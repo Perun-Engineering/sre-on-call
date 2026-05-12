@@ -1,0 +1,175 @@
+###############################################################################
+# sre-on-call — Architecture
+#
+# Render: d2 -l elk docs/architecture.d2 docs/architecture.svg
+#
+# Icons:
+#   docs/icons/aws/*.png    — Official AWS Architecture Icons
+#                              (mirrored from awslabs/aws-icons-for-plantuml)
+#   docs/icons/vendor/*.svg — Slack brand mark (simple-icons)
+###############################################################################
+
+vars: {
+  d2-config: {
+    layout-engine: elk
+    pad: 40
+  }
+}
+
+direction: right
+
+###############################################################################
+# External actor
+###############################################################################
+
+slack: Slack Workspace {
+  shape: image
+  icon: ./icons/vendor/slack.svg
+}
+
+discord: Discord Workspace {
+  shape: cloud
+  style.stroke: "#5865F2"
+  style.fill: "#EEF0FE"
+}
+
+###############################################################################
+# AWS account
+###############################################################################
+
+aws: AWS {
+  style.stroke: "#FF9900"
+  style.stroke-width: 2
+  style.fill: "#FFF7E6"
+
+  fn_url: Lambda Function URL {
+    shape: image
+    icon: ./icons/aws/lambda-function.png
+    tooltip: "Public webhook endpoint — signature verified inside the handler"
+  }
+
+  lambda: Lambda Adapter {
+    shape: image
+    icon: ./icons/aws/lambda.png
+    tooltip: "Verify Slack signature, deduplicate, invoke Master Agent.\nProvisioned concurrency keeps cold starts under the webhook deadline."
+  }
+
+  data: Data & Secrets {
+    style.stroke: "#7AA116"
+    style.fill: "#F4F8EC"
+
+    dedup: DynamoDB · dedup {
+      shape: image
+      icon: ./icons/aws/dynamodb.png
+      tooltip: "Suppresses duplicate alerts (TTL 24h)"
+    }
+
+    secrets: Secrets Manager {
+      shape: image
+      icon: ./icons/aws/secrets-manager.png
+      tooltip: "Slack signing secret + bot token"
+    }
+  }
+
+  bedrock: Bedrock {
+    style.stroke: "#1A73E8"
+    style.fill: "#EEF4FE"
+
+    haiku: Claude Haiku {
+      shape: image
+      icon: ./icons/aws/bedrock.png
+    }
+
+    agentcore: AgentCore Runtimes {
+      style.stroke: "#1A73E8"
+      style.fill: "#FFFFFF"
+
+      master: Master Agent {
+        shape: image
+        icon: ./icons/aws/bedrock-agentcore.png
+        tooltip: "Orchestrator — fans out to specialized agents,\nenforces deadlines, synthesizes the incident report."
+      }
+
+      slack_scanner: Slack Scanner {
+        shape: image
+        icon: ./icons/aws/bedrock-agentcore.png
+      }
+
+      discord_scanner: Discord Scanner {
+        shape: image
+        icon: ./icons/aws/bedrock-agentcore.png
+      }
+
+      cloudwatch_logs: CloudWatch Logs Agent {
+        shape: image
+        icon: ./icons/aws/bedrock-agentcore.png
+      }
+
+      eks_agent: EKS Agent {
+        shape: image
+        icon: ./icons/aws/bedrock-agentcore.png
+        tooltip: "VPC-attached — reaches the cluster's private endpoint"
+      }
+    }
+  }
+
+  ecr: ECR · agent images {
+    shape: image
+    icon: ./icons/aws/ecr.png
+  }
+
+  cwlogs: CloudWatch Logs {
+    shape: image
+    icon: ./icons/aws/cloudwatch-logs.png
+  }
+
+  vpc: VPC {
+    style.stroke: "#7B61FF"
+    style.fill: "#F3F0FF"
+    style.stroke-dash: 4
+
+    eks_cluster: EKS Cluster {
+      shape: image
+      icon: ./icons/aws/eks.png
+      tooltip: "Private endpoint — agent authenticates with IAM,\nauthorized via EKS Access Entry (read-only)."
+    }
+  }
+}
+
+###############################################################################
+# Edges — request flow
+###############################################################################
+
+slack -> aws.fn_url: "POST /events" {style.stroke: "#4A154B"}
+discord -> aws.fn_url: "POST /interactions" {style.stroke: "#5865F2"}
+aws.fn_url -> aws.lambda
+
+aws.lambda -> aws.data.dedup: "GetItem / PutItem"
+aws.lambda -> aws.data.secrets: "GetSecretValue"
+
+aws.lambda -> aws.bedrock.agentcore.master: "InvokeAgentRuntime" {style.stroke: "#FF9900"; style.bold: true}
+
+aws.bedrock.agentcore.master -> aws.bedrock.agentcore.slack_scanner: "InvokeAgentRuntime"
+aws.bedrock.agentcore.master -> aws.bedrock.agentcore.discord_scanner: "InvokeAgentRuntime"
+aws.bedrock.agentcore.master -> aws.bedrock.agentcore.cloudwatch_logs: "InvokeAgentRuntime"
+aws.bedrock.agentcore.master -> aws.bedrock.agentcore.eks_agent: "InvokeAgentRuntime"
+
+aws.bedrock.agentcore.slack_scanner -> slack: "conversations.history" {style.stroke: "#4A154B"}
+aws.bedrock.agentcore.discord_scanner -> discord: "GET /channels/.../messages" {style.stroke: "#5865F2"}
+aws.bedrock.agentcore.cloudwatch_logs -> aws.cwlogs: "Logs Insights query"
+aws.bedrock.agentcore.eks_agent -> aws.vpc.eks_cluster: "HTTPS :443" {style.stroke: "#7B61FF"}
+
+aws.bedrock.agentcore.master -> slack: "chat.postMessage\n(incident report)" {style.stroke: "#4A154B"; style.bold: true}
+aws.bedrock.agentcore.master -> discord: "POST /messages\n(incident report)" {style.stroke: "#5865F2"; style.bold: true}
+
+aws.bedrock.agentcore.master -> aws.bedrock.haiku: "Converse" {style.stroke: "#1A73E8"; style.opacity: 0.5}
+aws.bedrock.agentcore.slack_scanner -> aws.bedrock.haiku {style.stroke: "#1A73E8"; style.opacity: 0.5}
+aws.bedrock.agentcore.discord_scanner -> aws.bedrock.haiku {style.stroke: "#1A73E8"; style.opacity: 0.5}
+aws.bedrock.agentcore.cloudwatch_logs -> aws.bedrock.haiku {style.stroke: "#1A73E8"; style.opacity: 0.5}
+aws.bedrock.agentcore.eks_agent -> aws.bedrock.haiku {style.stroke: "#1A73E8"; style.opacity: 0.5}
+
+aws.ecr -> aws.bedrock.agentcore: "image pulls" {style.stroke-dash: 3; style.opacity: 0.6}
+
+aws.bedrock.agentcore.slack_scanner -> aws.data.secrets {style.stroke-dash: 3; style.opacity: 0.5}
+aws.bedrock.agentcore.discord_scanner -> aws.data.secrets {style.stroke-dash: 3; style.opacity: 0.5}
+aws.bedrock.agentcore.master -> aws.data.secrets {style.stroke-dash: 3; style.opacity: 0.5}

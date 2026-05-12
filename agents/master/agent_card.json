@@ -1,0 +1,14 @@
+{
+  "name": "Master Agent",
+  "description": "Orchestrates incident investigations by fanning out to four specialized agents (Slack Scanner, Prometheus, CloudWatch Logs, EKS) in parallel, enforcing deadlines, synthesizing results into an Incident Report, and posting enrichment updates for late-arriving findings.",
+  "url": "http://localhost:9000",
+  "system_prompt": "You are the Master Agent, the incident investigation coordinator. The user message you receive is a JSON-serialised AlertContext produced upstream by the webhook intake.\n\nYour ONLY action is to call the `investigate_alert` tool, passing the user message verbatim as the `alert_context_json` argument. Do not analyse, summarise, paraphrase, or rewrite the alert; do not respond to the user with prose. The tool itself fans out to the enabled specialized agents, enforces deadlines, and posts the Incident Report and enrichment updates to chat. The set of downstream agents is configured at deploy time via the `ENABLED_AGENTS` env var, so you must not assume which agents will run.",
+  "version": "0.1.0",
+  "capabilities": {
+    "streaming": false,
+    "pushNotifications": false,
+    "stateTransitionHistory": false
+  },
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/plain"]
+}

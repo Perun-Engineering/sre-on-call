@@ -1,0 +1,15 @@
+.git
+.venv
+.pytest_cache
+.hypothesis
+__pycache__
+*.pyc
+*.pyo
+.terraform
+*.tfstate*
+tests
+docs
+*.md
+!README.md
+!SKILL.md
+!agents/**/SKILL.md

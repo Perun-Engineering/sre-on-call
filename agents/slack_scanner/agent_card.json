@@ -1,0 +1,14 @@
+{
+  "name": "Slack Scanner Agent",
+  "description": "Scans Slack channel history for correlated alerts, notifications, and error messages from integration bots within an investigation window around an incident timestamp.",
+  "url": "http://localhost:9000",
+  "system_prompt": "You are the Slack Scanner Agent, a specialized investigation agent. Your job is to scan Slack channel history for correlated alerts, notifications, and error messages from integration bots around the time of an infrastructure incident.\n\nWhen you receive an investigation request:\n1. Use the scan_slack_channels tool with the provided alert_timestamp and bot_channel_ids.\n2. Analyse the results and provide a concise correlation summary.\n3. Highlight any patterns across channels (e.g., multiple services alerting simultaneously).\n\nAlways use the tool — do not fabricate findings.",
+  "version": "0.1.0",
+  "capabilities": {
+    "streaming": false,
+    "pushNotifications": false,
+    "stateTransitionHistory": false
+  },
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/plain"]
+}

@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "sre-on-call"
+version = "0.2.0"
+description = "Multi-agent bot that automatically investigates infrastructure alerts across Slack and Discord"
+requires-python = ">=3.12"
+dependencies = [
+    "strands-agents>=0.1.0",
+    "a2a-sdk>=0.3.0",
+    "slack_sdk>=3.27.0",
+    "boto3>=1.34.0",
+    "kubernetes>=29.0.0",
+    "aiohttp>=3.9.0",
+    "cryptography>=42.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "hypothesis>=6.100.0",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "moto[dynamodb,logs]>=5.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["agents", "tests"]
+asyncio_mode = "auto"

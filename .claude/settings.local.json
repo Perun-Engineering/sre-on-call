@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/bin/pytest tests/ -q --tb=short)",
+      "Bash(.venv/bin/python -m pyright)",
+      "Bash(.venv/bin/pyright)",
+      "Bash(npx pyright *)",
+      "Bash(.venv/bin/pytest --collect-only -q)",
+      "Bash(d2 -l elk docs/architecture.d2 docs/architecture.svg)",
+      "Bash(.venv/bin/pytest -q)",
+      "Bash(aws sts *)"
+    ]
+  }
+}

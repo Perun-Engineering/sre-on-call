@@ -1,0 +1,41 @@
+project: sre-on-call
+environment: dev
+
+defaults:
+  model_id: us.anthropic.claude-haiku-4-5-20251001-v1:0
+  network_mode: PUBLIC
+
+agents:
+  master:
+    skills:
+      - investigate_alert
+    mcps: []
+
+  slack_scanner:
+    enabled: true
+    skills:
+      - scan_slack_channels
+    mcps: []
+
+  discord_scanner:
+    enabled: false
+    skills:
+      - scan_discord_channels
+    mcps: []
+
+  cloudwatch_logs:
+    enabled: true
+    skills:
+      - query_cloudwatch_logs
+    mcps:
+      - name: aws_docs
+        transport: streamable_http
+        endpoint: https://knowledge-mcp.global.api.aws
+        auth: none
+
+  eks:
+    enabled: true
+    network_mode: VPC
+    skills:
+      - gather_eks_state
+    mcps: []
