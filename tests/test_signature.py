@@ -7,7 +7,7 @@ import hmac
 import time
 from unittest.mock import patch
 
-from lambda_adapter.slack.signature import verify_slack_signature
+from shared.platforms.slack import verify_slack_signature
 
 
 def _compute_signature(signing_secret: str, timestamp: str, body: str) -> str:
@@ -95,7 +95,7 @@ class TestVerifySlackSignature:
         body = "test"
         sig = _compute_signature(secret, boundary_ts, body)
 
-        with patch("lambda_adapter.slack.signature.time") as mock_time:
+        with patch("shared.platforms.slack.time") as mock_time:
             mock_time.time.return_value = float(now)
             assert verify_slack_signature(secret, boundary_ts, body, sig) is True
 
@@ -107,6 +107,6 @@ class TestVerifySlackSignature:
         body = "test"
         sig = _compute_signature(secret, past_ts, body)
 
-        with patch("lambda_adapter.slack.signature.time") as mock_time:
+        with patch("shared.platforms.slack.time") as mock_time:
             mock_time.time.return_value = float(now)
             assert verify_slack_signature(secret, past_ts, body, sig) is False

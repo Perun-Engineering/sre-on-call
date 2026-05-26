@@ -1,8 +1,8 @@
 """Shared webhook intake pipeline.
 
-Owns the full flow: decode → verify → challenge → dedup → experiment →
-invoke master agent → respond.  Platform-specific behaviour is delegated
-to a WebhookAdapter.
+Owns the full flow: ingest → dedup → experiment → invoke master agent →
+respond. Platform-specific behaviour is delegated to a
+:class:`shared.platforms.ChatPlatform`.
 
 The master agent posts its own "Investigation Started" message as soon
 as it boots, so we do not post a chat-level ack here — Lambda's HTTP 200
@@ -19,10 +19,17 @@ from dataclasses import asdict
 
 import boto3
 
-from lambda_adapter.adapters import WebhookAdapter
 from lambda_adapter.dedup import DeduplicationStore
 from shared.a2a_protocol import build_a2a_request
 from shared.experiment_store import ExperimentStore
+from shared.models import AlertContext, CommandRequest
+from shared.platforms import (
+    AlertWebhook,
+    ChallengeWebhook,
+    ChatPlatform,
+    CommandWebhook,
+    InvalidWebhook,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,44 +65,49 @@ def _http_response(status_code: int, body: dict | None = None) -> dict:
     }
 
 
-def process_webhook(event: dict, adapter: WebhookAdapter) -> dict:
-    """Run the full intake pipeline using the given platform adapter.
+def process_webhook(event: dict, platform: ChatPlatform) -> dict:
+    """Run the full intake pipeline using the given :class:`ChatPlatform`.
 
     Flow:
-        1. Verify request signature
-        2. Handle slash commands (if applicable)
-        3. Handle platform challenge/ping
-        4. Deduplicate via DynamoDB
-        5. Invoke Master Agent(s) asynchronously
-        6. Return HTTP 200
+        1. ``platform.ingest(headers, raw_body)`` — verify signature, classify
+           the request as :class:`InvalidWebhook`, :class:`ChallengeWebhook`,
+           :class:`AlertWebhook`, or :class:`CommandWebhook`.
+        2. Dispatch on the tagged event variant.
+        3. For alerts: deduplicate via DynamoDB, invoke the Master Agent.
+        4. For commands: ack synchronously, invoke the Master Agent for PIR.
+        5. Return HTTP 200.
     """
     raw_body = _decode_body(event)
     headers = event.get("headers", {})
 
-    # 1. Verify signature
-    if not adapter.verify_signature(headers, raw_body):
-        logger.warning("Rejected request: invalid signature")
-        return _http_response(401, {"error": "invalid signature"})
+    webhook_event = platform.ingest(headers, raw_body)
 
-    # 2. Slash command handling (different body format, separate flow)
-    if adapter.is_command(headers, raw_body):
-        return _process_command(raw_body, adapter)
+    if isinstance(webhook_event, InvalidWebhook):
+        logger.warning(
+            "Rejected request: %s (status=%d)",
+            webhook_event.reason,
+            webhook_event.status_code,
+        )
+        return _http_response(
+            webhook_event.status_code, {"error": webhook_event.reason},
+        )
 
-    # 3. Parse JSON
-    try:
-        payload = json.loads(raw_body)
-    except (json.JSONDecodeError, TypeError):
-        return _http_response(400, {"error": "invalid JSON body"})
+    if isinstance(webhook_event, ChallengeWebhook):
+        return _http_response(200, webhook_event.response)
 
-    # 3. Handle platform challenge
-    challenge = adapter.get_challenge_response(payload)
-    if challenge is not None:
-        return _http_response(200, challenge)
+    if isinstance(webhook_event, CommandWebhook):
+        return _process_command(webhook_event.command, platform)
 
-    # 4. Dedup
+    if isinstance(webhook_event, AlertWebhook):
+        return _process_alert(webhook_event.context)
+
+    # Defensive: unknown variant — return 500 rather than silently passing.
+    raise RuntimeError(f"Unhandled WebhookEvent variant: {type(webhook_event).__name__}")
+
+
+def _process_alert(alert_context: AlertContext) -> dict:
+    """Dedup the alert and invoke the Master Agent (or A/B variants)."""
     dedup_table = _get_env("DEDUP_TABLE_NAME")
-    alert_context = adapter.parse_alert_context(payload)
-
     store = DeduplicationStore(table_name=dedup_table)
     is_new = store.record_if_new(
         channel_id=alert_context.channel_id,
@@ -111,13 +123,12 @@ def process_webhook(event: dict, adapter: WebhookAdapter) -> dict:
         )
         return _http_response(200)
 
-    # 5. Check for active A/B experiment
+    # Check for active A/B experiment
     experiment = None
     experiments_table = os.environ.get("EXPERIMENTS_TABLE_NAME", "")
     if experiments_table:
         experiment = ExperimentStore(table_name=experiments_table).get_active_experiment()
 
-    # 6. Invoke Master Agent(s)
     runtime_client = boto3.client("bedrock-agentcore")
 
     if experiment:
@@ -156,26 +167,23 @@ def process_webhook(event: dict, adapter: WebhookAdapter) -> dict:
     return _http_response(200, {"ok": True})
 
 
-def _process_command(raw_body: str, adapter: WebhookAdapter) -> dict:
+def _process_command(command: CommandRequest, platform: ChatPlatform) -> dict:
     """Handle a slash command (e.g. /postmortem).
 
     Flow:
-        1. Parse the command payload
-        2. Validate: must be invoked in a thread
-        3. Ack immediately
-        4. Invoke Master Agent with a PIR task
-        5. Return HTTP 200
+        1. Validate: must be a known command, invoked in a thread.
+        2. Ack synchronously via the platform's slash-command callback.
+        3. Invoke the Master Agent with a PIR task.
+        4. Return HTTP 200.
     """
-    command = adapter.parse_command(raw_body)
-
     if command.command not in ("/postmortem",):
         return _http_response(200, {"text": f"Unknown command: {command.command}"})
 
     if not command.thread_ts:
-        adapter.ack_command(command, "⚠️ Please use /postmortem inside an incident thread.")
+        platform.ack(command, "⚠️ Please use /postmortem inside an incident thread.")
         return _http_response(200)
 
-    adapter.ack_command(command, "📝 Generating Post-Incident Report...")
+    platform.ack(command, "📝 Generating Post-Incident Report...")
 
     # Invoke Master Agent with PIR task
     agent_runtime_arn = _get_env("MASTER_AGENT_RUNTIME_ARN")

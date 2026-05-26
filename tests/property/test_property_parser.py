@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from lambda_adapter.slack.parser import parse_alert_context
+from shared.platforms.slack import parse_alert_context
 from shared.constants import INVESTIGATION_WINDOW_MINUTES
 from shared.models import AlertContext
 

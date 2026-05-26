@@ -13,7 +13,11 @@ import boto3
 import pytest
 from moto import mock_aws
 
-from lambda_adapter.adapters import SlackWebhookAdapter, DiscordWebhookAdapter
+from shared.platforms import (
+    AlertWebhook, ChallengeWebhook, CommandWebhook, InvalidWebhook,
+)
+from shared.platforms.slack import SlackChatPlatform
+from shared.platforms.discord import DiscordChatPlatform
 from lambda_adapter.handler import lambda_handler
 from lambda_adapter.intake import _process_command
 from shared.models import CommandRequest
@@ -89,33 +93,59 @@ def _env(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# SlackWebhookAdapter command detection
+# Slack command parsing via SlackChatPlatform.ingest
 # ---------------------------------------------------------------------------
 
 
-class TestSlackCommandDetection:
-    def test_is_command_true_for_form_encoded(self):
-        adapter = SlackWebhookAdapter(signing_secret=SIGNING_SECRET)
-        headers = {"content-type": "application/x-www-form-urlencoded"}
+class TestSlackIngestForCommand:
+    def test_form_encoded_command_returns_command_webhook(self):
+        platform = SlackChatPlatform(signing_secret=SIGNING_SECRET, bot_token='x')
         body = _build_slack_command_body()
-        assert adapter.is_command(headers, body) is True
+        ts = str(int(time.time()))
+        sig = _make_signature(SIGNING_SECRET, ts, body)
+        headers = {
+            "content-type": "application/x-www-form-urlencoded",
+            "x-slack-request-timestamp": ts,
+            "x-slack-signature": sig,
+        }
+        event = platform.ingest(headers, body)
+        assert isinstance(event, CommandWebhook)
 
-    def test_is_command_false_for_json(self):
-        adapter = SlackWebhookAdapter(signing_secret=SIGNING_SECRET)
-        headers = {"content-type": "application/json"}
-        body = json.dumps({"type": "event_callback"})
-        assert adapter.is_command(headers, body) is False
+    def test_event_payload_with_json_returns_alert(self):
+        platform = SlackChatPlatform(signing_secret=SIGNING_SECRET, bot_token='x')
+        body = json.dumps({
+            "type": "event_callback",
+            "event": {
+                "type": "message",
+                "channel": "C1",
+                "ts": "1700000000.000",
+                "text": "ALERT",
+                "event_ts": "1700000000.000",
+            },
+        })
+        ts = str(int(time.time()))
+        sig = _make_signature(SIGNING_SECRET, ts, body)
+        headers = {
+            "content-type": "application/json",
+            "x-slack-request-timestamp": ts,
+            "x-slack-signature": sig,
+        }
+        event = platform.ingest(headers, body)
+        assert isinstance(event, AlertWebhook)
 
-    def test_is_command_false_when_no_command_field(self):
-        adapter = SlackWebhookAdapter(signing_secret=SIGNING_SECRET)
-        headers = {"content-type": "application/x-www-form-urlencoded"}
-        body = urlencode({"text": "hello"})
-        assert adapter.is_command(headers, body) is False
 
+class TestSlackIngestParsesCommandFields:
+    def _make_command_event(self, body: str) -> dict:
+        ts = str(int(time.time()))
+        sig = _make_signature(SIGNING_SECRET, ts, body)
+        return {
+            "x-slack-request-timestamp": ts,
+            "x-slack-signature": sig,
+            "content-type": "application/x-www-form-urlencoded",
+        }
 
-class TestSlackParseCommand:
     def test_parses_all_fields(self):
-        adapter = SlackWebhookAdapter(signing_secret=SIGNING_SECRET)
+        platform = SlackChatPlatform(signing_secret=SIGNING_SECRET, bot_token='x')
         body = _build_slack_command_body(
             command="/postmortem",
             text="extra notes",
@@ -124,7 +154,9 @@ class TestSlackParseCommand:
             thread_ts="1700000000.000200",
             response_url="https://hooks.slack.com/test",
         )
-        cmd = adapter.parse_command(body)
+        event = platform.ingest(self._make_command_event(body), body)
+        assert isinstance(event, CommandWebhook)
+        cmd = event.command
         assert cmd.platform == "slack"
         assert cmd.command == "/postmortem"
         assert cmd.text == "extra notes"
@@ -134,39 +166,39 @@ class TestSlackParseCommand:
         assert cmd.response_url == "https://hooks.slack.com/test"
 
     def test_thread_ts_none_when_absent(self):
-        adapter = SlackWebhookAdapter(signing_secret=SIGNING_SECRET)
+        platform = SlackChatPlatform(signing_secret=SIGNING_SECRET, bot_token='x')
         body = _build_slack_command_body(thread_ts=None)
-        cmd = adapter.parse_command(body)
-        assert cmd.thread_ts is None
+        event = platform.ingest(self._make_command_event(body), body)
+        assert isinstance(event, CommandWebhook)
+        assert event.command.thread_ts is None
 
 
 # ---------------------------------------------------------------------------
-# DiscordWebhookAdapter command detection
+# Discord command parsing via DiscordChatPlatform.ingest
 # ---------------------------------------------------------------------------
 
 
-class TestDiscordCommandDetection:
-    def test_is_command_true_for_interaction_type_2(self):
-        adapter = DiscordWebhookAdapter(public_key="abc")
-        headers = {"content-type": "application/json"}
-        body = json.dumps({"type": 2, "data": {"name": "postmortem"}})
-        assert adapter.is_command(headers, body) is True
+def _discord_signed_headers(public_key_hex: str, body: str) -> tuple[dict, str]:
+    """Build a signature for Discord's Ed25519 verification."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+        Ed25519PrivateKey,
+    )
+    # We need a private key to sign. The legacy adapter test side-stepped this
+    # by patching verify; we instead generate a fresh keypair so the platform
+    # actually verifies a real signature.
+    private = Ed25519PrivateKey.generate()
+    public = private.public_key().public_bytes_raw().hex()
+    ts = str(int(time.time()))
+    signature = private.sign(f"{ts}{body}".encode()).hex()
+    return {
+        "content-type": "application/json",
+        "x-signature-timestamp": ts,
+        "x-signature-ed25519": signature,
+    }, public
 
-    def test_is_command_false_for_ping(self):
-        adapter = DiscordWebhookAdapter(public_key="abc")
-        headers = {"content-type": "application/json"}
-        body = json.dumps({"type": 1})
-        assert adapter.is_command(headers, body) is False
 
-    def test_is_command_false_for_invalid_json(self):
-        adapter = DiscordWebhookAdapter(public_key="abc")
-        headers = {"content-type": "application/json"}
-        assert adapter.is_command(headers, "not json") is False
-
-
-class TestDiscordParseCommand:
-    def test_parses_interaction(self):
-        adapter = DiscordWebhookAdapter(public_key="abc")
+class TestDiscordIngestForCommand:
+    def test_interaction_type_2_returns_command_webhook(self):
         body = json.dumps({
             "type": 2,
             "id": "interaction-123",
@@ -175,13 +207,33 @@ class TestDiscordParseCommand:
             "member": {"user": {"id": "discord-user-1"}},
             "data": {"name": "postmortem", "options": [{"name": "text", "value": "notes"}]},
         })
-        cmd = adapter.parse_command(body)
+        headers, public = _discord_signed_headers("", body)
+        platform = DiscordChatPlatform(public_key=public, bot_token='x')
+        event = platform.ingest(headers, body)
+        assert isinstance(event, CommandWebhook)
+        cmd = event.command
         assert cmd.platform == "discord"
         assert cmd.command == "/postmortem"
         assert cmd.text == "notes"
         assert cmd.channel_id == "999888777"
         assert cmd.user_id == "discord-user-1"
         assert cmd.platform_metadata["interaction_id"] == "interaction-123"
+
+    def test_ping_returns_challenge(self):
+        body = json.dumps({"type": 1})
+        headers, public = _discord_signed_headers("", body)
+        platform = DiscordChatPlatform(public_key=public, bot_token='x')
+        event = platform.ingest(headers, body)
+        assert isinstance(event, ChallengeWebhook)
+        assert event.response == {"type": 1}
+
+    def test_invalid_signature_returns_invalid(self):
+        body = json.dumps({"type": 1})
+        platform = DiscordChatPlatform(public_key='00' * 32, bot_token='x')
+        # No headers → signature verification fails
+        event = platform.ingest({}, body)
+        assert isinstance(event, InvalidWebhook)
+        assert event.status_code == 401
 
 
 # ---------------------------------------------------------------------------
@@ -196,7 +248,7 @@ class TestCommandRouting:
         event = _build_command_event(body)
 
         with patch.object(
-            SlackWebhookAdapter, "ack_command",
+            SlackChatPlatform, "ack",
         ) as mock_ack, patch("lambda_adapter.intake.boto3.client") as mock_client:
             mock_runtime = MagicMock()
             mock_client.return_value = mock_runtime
@@ -213,7 +265,7 @@ class TestCommandRouting:
         event = _build_command_event(body)
 
         with patch.object(
-            SlackWebhookAdapter, "ack_command",
+            SlackChatPlatform, "ack",
         ), patch("lambda_adapter.intake.boto3.client") as mock_client:
             mock_runtime = MagicMock()
             mock_client.return_value = mock_runtime
@@ -232,7 +284,7 @@ class TestCommandRouting:
         event = _build_command_event(body)
 
         with patch.object(
-            SlackWebhookAdapter, "ack_command",
+            SlackChatPlatform, "ack",
         ) as mock_ack, patch("lambda_adapter.intake.boto3.client") as mock_client:
             mock_runtime = MagicMock()
             mock_client.return_value = mock_runtime
@@ -249,7 +301,7 @@ class TestCommandRouting:
         event = _build_command_event(body)
 
         with patch.object(
-            SlackWebhookAdapter, "ack_command",
+            SlackChatPlatform, "ack",
         ), patch("lambda_adapter.intake.boto3.client"):
             result = lambda_handler(event, None)
 
@@ -305,7 +357,10 @@ class TestPIRFormatting:
                 findings=[], summary="Pod restarts",
             ),
         }
-        pir = formatter.format_pir(ctx, results)
+        from shared.report_renderer import SlackReportRenderer
+        pir = SlackReportRenderer().render_pir(
+            formatter.build_pir_sections(ctx, results)
+        )
         assert "Post-Incident Report" in pir
         assert "Timeline" in pir
         assert "Root Cause" in pir
@@ -347,7 +402,10 @@ class TestPIRFormatting:
                 findings=[], summary="Healthy",
             ),
         }
-        pir = formatter.format_pir(ctx, results)
+        from shared.report_renderer import SlackReportRenderer
+        pir = SlackReportRenderer().render_pir(
+            formatter.build_pir_sections(ctx, results)
+        )
         assert "Disk warning" in pir
         assert "14:31:00" in pir
 

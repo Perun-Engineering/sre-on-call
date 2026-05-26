@@ -41,11 +41,8 @@ All agents run on AWS Bedrock AgentCore Runtime, communicate via the A2A protoco
 ├── config.yaml                     # Per-agent skills + MCP servers (single source of truth)
 ├── lambda_adapter/                 # Lambda webhook ingestion
 │   ├── handler.py                  # Lambda entry point
-│   ├── adapters.py                 # Slack/Discord platform routing
 │   ├── intake.py                   # Dedup + master agent invocation
-│   ├── dedup.py                    # DynamoDB deduplication store
-│   ├── slack/{signature,parser}.py
-│   └── discord/{signature,parser}.py
+│   └── dedup.py                    # DynamoDB deduplication store
 ├── agents/
 │   ├── master/                     # Master orchestration agent
 │   │   ├── tools.py                # investigate_alert (single tool, fire-and-forget)
@@ -60,7 +57,7 @@ All agents run on AWS Bedrock AgentCore Runtime, communicate via the A2A protoco
 │   ├── eks/                        # same layout (network_mode: VPC)
 │   └── prometheus/                 # Not deployed; not in config.yaml
 ├── shared/                         # Cross-agent utilities
-│   ├── models.py                   # AlertContext, AgentResult, Finding, AgentFailure, AgentMetadata
+│   ├── models.py                   # AlertContext, AgentResult, Finding, AgentFailure, AgentMetadata, CommandRequest
 │   ├── constants.py
 │   ├── a2a_factory.py              # Loads config + skills + MCPs; A2AServer + uvicorn + /ping
 │   ├── a2a_protocol.py             # JSON-RPC envelope build/extract helpers
@@ -68,10 +65,13 @@ All agents run on AWS Bedrock AgentCore Runtime, communicate via the A2A protoco
 │   ├── config.py                   # ProjectConfig (Pydantic) + loader for config.yaml
 │   ├── skill_loader.py             # SKILL.md parser + tool-symbol resolver
 │   ├── mcp_loader.py               # Context-managed MCPConnections handle
-│   ├── chat_poster.py              # Slack/Discord posting + retry
+│   ├── platforms/                  # ChatPlatform per chat platform (Slack, Discord)
+│   │   ├── __init__.py             # Protocol, WebhookEvent tagged union, deliver_with_retry, registry
+│   │   ├── slack.py                # SlackChatPlatform: signature, parse, ack, deliver
+│   │   └── discord.py              # DiscordChatPlatform: signature, parse, ack, deliver
 │   ├── channel_scan.py             # Shared channel-scanning algorithm
 │   ├── channel_utils.py
-│   ├── report_renderer.py
+│   ├── report_renderer.py          # MarkupDialect-driven section renderer (Slack mrkdwn, Discord MD)
 │   ├── secrets.py                  # Secrets Manager ARN -> plaintext resolver (cached)
 │   ├── time_utils.py               # Investigation window + ISO timestamp helpers
 │   ├── tool_result.py
@@ -137,7 +137,7 @@ pytest tests/integration/test_orchestrator.py       # one integration test
 pytest tests/property/                              # property-based tests only
 ```
 
-Current count: **380 collected**, 380 passing. (Prometheus tests run and pass even though the agent isn't deployed.)
+Current count: **400 collected**, 400 passing. (Prometheus tests run and pass even though the agent isn't deployed.)
 
 ### Test layout
 

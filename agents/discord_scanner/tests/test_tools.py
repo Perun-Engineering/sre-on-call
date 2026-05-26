@@ -11,10 +11,11 @@ import boto3
 import pytest
 from moto import mock_aws
 
-from lambda_adapter.discord.signature import verify_discord_signature
-from lambda_adapter.discord.parser import parse_alert_context as discord_parse
+from shared.platforms.discord import verify_discord_signature
+from shared.platforms.discord import parse_alert_context as discord_parse
 from lambda_adapter.handler import lambda_handler as discord_handler
-from shared.chat_poster import create_chat_poster, chat_post_with_retry, DiscordChatPoster
+from shared.platforms import for_platform
+from shared.platforms.discord import DiscordChatPlatform
 from shared.report_renderer import DiscordReportRenderer, ReportSections, EvidenceBlock, EnrichmentSections
 from shared.models import AlertContext
 
@@ -208,18 +209,20 @@ class TestDiscordHandler:
 # ===========================================================================
 
 
-class TestChatPosterFactory:
-    def test_creates_slack_poster(self):
-        poster = create_chat_poster("slack")
-        assert type(poster).__name__ == "SlackChatPoster"
+class TestChatPlatformRegistry:
+    """The for_platform() factory replaces the legacy create_chat_poster()."""
 
-    def test_creates_discord_poster(self):
-        poster = create_chat_poster("discord")
-        assert isinstance(poster, DiscordChatPoster)
+    def test_creates_slack_platform(self):
+        platform = for_platform("slack")
+        assert type(platform).__name__ == "SlackChatPlatform"
+
+    def test_creates_discord_platform(self):
+        platform = for_platform("discord")
+        assert isinstance(platform, DiscordChatPlatform)
 
     def test_unknown_platform_raises(self):
         with pytest.raises(ValueError, match="Unsupported platform"):
-            create_chat_poster("teams")
+            for_platform("teams")
 
 
 # ===========================================================================

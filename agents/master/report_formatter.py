@@ -1,8 +1,10 @@
 """Report formatter for assembling agent results into structured incident reports.
 
-Builds platform-agnostic ReportSections from agent results, then delegates
-to a ReportRenderer for platform-specific markup.  When no renderer is
-provided, defaults to SlackReportRenderer for backward compatibility.
+Builds platform-agnostic ``ReportSections`` (and the related section dataclasses)
+from agent results. Platform-specific markup is owned by
+:class:`shared.platforms.ChatPlatform` implementations, which call the
+``build_*_sections`` methods on :class:`ReportFormatter` and render the
+returned sections in their native dialect.
 """
 
 from __future__ import annotations
@@ -16,9 +18,7 @@ from shared.report_renderer import (
     EvidenceStatus,
     InvestigationStartedSections,
     PIRSections,
-    ReportRenderer,
     ReportSections,
-    SlackReportRenderer,
 )
 
 
@@ -132,18 +132,19 @@ def _format_metadata_line(metadata: AgentMetadata | None) -> str | None:
 
 
 class ReportFormatter:
-    """Assembles agent results into structured reports via a pluggable renderer."""
+    """Builds platform-agnostic report sections from agent results.
 
-    def __init__(self, renderer: ReportRenderer | None = None) -> None:
-        self._renderer: ReportRenderer = renderer or SlackReportRenderer()
+    The formatter knows nothing about platform-specific markup; rendering
+    is owned by :class:`shared.platforms.ChatPlatform` implementations.
+    """
 
-    def format_incident_report(
+    def build_incident_sections(
         self,
         alert_context: AlertContext,
         agent_results: dict[str, AgentResult | AgentFailure],
         pending_agents: set[str] | None = None,
-    ) -> str:
-        """Produce a formatted Incident Report string.
+    ) -> ReportSections:
+        """Build the structured Incident Report sections.
 
         ``pending_agents`` are agents that were dispatched but hadn't
         responded by the 60-second deadline. They render with a ``⏳``
@@ -156,35 +157,30 @@ class ReportFormatter:
             alert_context, agent_results, pending_agents or set(),
         )
         sections.variant_label = alert_context.variant_label
-        return self._renderer.render_report(sections)
+        return sections
 
-    def format_investigation_started(
+    def build_started_sections(
         self,
         alert_context: AlertContext,
         dispatched_agents: list[str],
-    ) -> str:
-        """Format the "investigation kicked off" announcement message."""
-        sections = InvestigationStartedSections(
+    ) -> InvestigationStartedSections:
+        """Build the "investigation kicked off" announcement sections."""
+        return InvestigationStartedSections(
             alert_text=alert_context.alert_text,
             investigation_id=alert_context.investigation_id,
             dispatched=[
                 AGENT_DISPLAY.get(aid, ("📌", aid)) for aid in dispatched_agents
             ],
         )
-        return self._renderer.render_investigation_started(sections)
 
-    def format_enrichment_update(
+    def build_enrichment_sections(
         self,
         source_agent: str,
         new_findings: AgentResult | AgentFailure,
         initial_report_summary: str,
         variant_label: str | None = None,
-    ) -> str:
-        """Format a late-arriving result as an enrichment update.
-
-        Handles both successful late results and late failures (an agent
-        that crossed the 60s deadline and eventually errored).
-        """
+    ) -> EnrichmentSections:
+        """Build sections for a late-arriving result (success or failure)."""
         emoji, display_name = AGENT_DISPLAY.get(source_agent, ("📌", source_agent))
         error_message = _enrichment_error(new_findings)
 
@@ -208,7 +204,7 @@ class ReportFormatter:
             )
             status = "ok"
 
-        sections = EnrichmentSections(
+        return EnrichmentSections(
             emoji=emoji,
             display_name=display_name,
             findings_lines=findings_lines,
@@ -217,23 +213,23 @@ class ReportFormatter:
             metadata_line=_format_metadata_line(new_findings.metadata),
             status=status,
         )
-        return self._renderer.render_enrichment(sections)
 
-    def format_pir(
+    def build_pir_sections(
         self,
         alert_context: AlertContext,
         agent_results: dict[str, AgentResult | AgentFailure],
-    ) -> str:
-        """Produce a formatted Post-Incident Report string."""
-        sections = PIRSections(
-            incident_summary=self._build_summary(alert_context, agent_results),
+    ) -> PIRSections:
+        """Build the structured Post-Incident Report sections."""
+        summary_parts = self._collect_summary_parts(agent_results)
+        root_cause_parts = self._collect_root_cause_parts(agent_results)
+        return PIRSections(
+            incident_summary=self._joined_summary_or_fallback(alert_context, summary_parts),
             timeline=self._build_pir_timeline(alert_context, agent_results),
-            root_cause=self._build_root_cause(agent_results),
+            root_cause=self._joined_root_cause_or_fallback(root_cause_parts),
             impact=self._build_impact_assessment(alert_context, agent_results),
             action_items=self._build_recommended_actions(agent_results, set()),
             lessons_learned="(To be filled in by the team during the post-incident review.)",
         )
-        return self._renderer.render_pir(sections)
 
     # --- Private helpers ---
 
@@ -261,17 +257,21 @@ class ReportFormatter:
         agent_results: dict[str, AgentResult | AgentFailure],
         pending_agents: set[str],
     ) -> ReportSections:
+        summary_parts = self._collect_summary_parts(agent_results)
+        root_cause_parts = self._collect_root_cause_parts(agent_results)
         return ReportSections(
             severity=self._determine_severity(agent_results),
             affected_services=self._extract_affected_services(alert_context, agent_results),
             time_of_detection=alert_context.alert_timestamp,
-            summary=self._build_summary(alert_context, agent_results),
-            root_cause=self._build_root_cause(agent_results),
+            summary=self._joined_summary_or_fallback(alert_context, summary_parts),
+            root_cause=self._joined_root_cause_or_fallback(root_cause_parts),
             evidence_blocks=self._build_evidence_blocks(agent_results, pending_agents),
             impact_assessment=self._build_impact_assessment(alert_context, agent_results),
             recommended_actions=self._build_recommended_actions(agent_results, pending_agents),
             links=self._build_links(agent_results),
             totals_line=_format_totals_line(agent_results),
+            summary_parts=summary_parts,
+            root_cause_parts=root_cause_parts,
         )
 
     def _determine_severity(
@@ -300,12 +300,11 @@ class ReportFormatter:
                         services.append(finding.source)
         return ", ".join(services) if services else "Unknown (insufficient data)"
 
-    def _build_summary(
-        self,
-        alert_context: AlertContext,
-        agent_results: dict[str, AgentResult | AgentFailure],
-    ) -> str:
-        summaries: list[str] = []
+    def _collect_summary_parts(
+        self, agent_results: dict[str, AgentResult | AgentFailure]
+    ) -> list[str]:
+        """Per-agent raw summaries in render order. Renderer normalizes each."""
+        parts: list[str] = []
         for agent_key in AGENT_ORDER:
             result = agent_results.get(agent_key)
             if (
@@ -313,15 +312,32 @@ class ReportFormatter:
                 and result.status == "success"
                 and result.summary
             ):
-                summaries.append(self._renderer.normalize(result.summary))
-        if summaries:
-            return " ".join(summaries)
-        return f"Alert detected: {alert_context.alert_text}. Insufficient agent data to provide a detailed summary."
+                parts.append(result.summary)
+        return parts
 
-    def _build_root_cause(
-        self, agent_results: dict[str, AgentResult | AgentFailure]
+    def _joined_summary_or_fallback(
+        self,
+        alert_context: AlertContext,
+        summary_parts: list[str],
     ) -> str:
-        evidence_sources: list[str] = []
+        """Backward-compat fallback string for ``ReportSections.summary``.
+
+        Renderers that consult ``summary_parts`` ignore this; older callers
+        that read ``.summary`` still get a usable joined string. The fallback
+        prose is also surfaced here when no agent reported a summary.
+        """
+        if summary_parts:
+            return " ".join(summary_parts)
+        return (
+            f"Alert detected: {alert_context.alert_text}. "
+            "Insufficient agent data to provide a detailed summary."
+        )
+
+    def _collect_root_cause_parts(
+        self, agent_results: dict[str, AgentResult | AgentFailure]
+    ) -> list[tuple[str, str]]:
+        """Per-agent (display_name, raw_summary) tuples in render order."""
+        parts: list[tuple[str, str]] = []
         for agent_key in AGENT_ORDER:
             result = agent_results.get(agent_key)
             if (
@@ -330,11 +346,16 @@ class ReportFormatter:
                 and result.summary
             ):
                 _, display_name = AGENT_DISPLAY.get(agent_key, ("", agent_key))
-                normalized = self._renderer.normalize(result.summary)
-                evidence_sources.append(f"{display_name}: {normalized}")
-        if evidence_sources:
+                parts.append((display_name, result.summary))
+        return parts
+
+    def _joined_root_cause_or_fallback(
+        self, root_cause_parts: list[tuple[str, str]]
+    ) -> str:
+        """Backward-compat fallback string for ``ReportSections.root_cause``."""
+        if root_cause_parts:
             return "Based on available evidence:\n" + "\n".join(
-                f"- {src}" for src in evidence_sources
+                f"- {display}: {raw}" for display, raw in root_cause_parts
             )
         return "Insufficient data to determine root cause. See agent availability in Evidence section."
 

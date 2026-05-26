@@ -10,7 +10,7 @@ from unittest.mock import patch
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from lambda_adapter.slack.signature import verify_slack_signature
+from shared.platforms.slack import verify_slack_signature
 
 
 def _compute_signature(signing_secret: str, timestamp: str, body: str) -> str:
@@ -79,7 +79,7 @@ def test_signature_round_trip_accepts_correct_and_rejects_corrupted(
     correct_sig = _compute_signature(secret, ts, body)
     corrupted_sig = _corrupt_signature(correct_sig)
 
-    with patch("lambda_adapter.slack.signature.time") as mock_time:
+    with patch("shared.platforms.slack.time") as mock_time:
         mock_time.time.return_value = float(frozen_now)
 
         # Correct signature must be accepted

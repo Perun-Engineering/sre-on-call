@@ -12,11 +12,9 @@ Domain vocabulary for the project. Use these terms consistently in code, docs, a
 
 **ToolResult** — The generic intermediate result produced by any agent tool's `_execute_*()` function. Contains `findings`, `scanned_items` (flat list, prefixed for multi-category agents e.g. `pod/name`, `node/name`), and `errors`. Converted to `AgentResult` via `build_agent_result()`. Defined in `shared/tool_result.py`.
 
-**WebhookAdapter** — The seam between the shared intake pipeline and a chat platform. Protocol with 7 methods (verify, challenge, parse, ack, command). Slack and Discord each provide an adapter. Defined in `lambda_adapter/adapters.py`.
+**WebhookEvent** — A tagged union returned by `ChatPlatform.ingest()`. One of `InvalidWebhook(status_code, reason)`, `ChallengeWebhook(response)`, `AlertWebhook(context)`, or `CommandWebhook(command)`. The intake pipeline pattern-matches on the variant. Defined in `shared/platforms/__init__.py`.
 
-**ChatPoster** — The seam between the orchestrator and chat platform reply delivery. Protocol with one method (`post_reply`). Slack and Discord each provide an implementation. Defined in `shared/chat_poster.py`.
-
-**ReportRenderer** — The seam between report formatting logic and platform-specific markup. Protocol with 3 methods (report, enrichment, PIR). Parameterized by `MarkupDialect` (Slack vs Discord tokens). Defined in `shared/report_renderer.py`.
+**ChatPlatform** — The seam between the investigation pipeline and a chat platform. Protocol with 3 methods: `ingest(headers, raw_body) -> WebhookEvent` (verify signature, classify the request), `ack(command, text)` (synchronous slash-command callback), and `async deliver(alert_context, payload) -> str` (render `ReportSections` / `EnrichmentSections` / `InvestigationStartedSections` / `PIRSections` to platform-native markup, post it as a thread reply, return the rendered text). Slack and Discord each provide one implementation in `shared/platforms/`. Subsumes the legacy `WebhookAdapter` + `ChatPoster` + `ReportRenderer` seams.
 
 **ChannelMessageSource** — The seam between the shared channel-scanning algorithm and a chat platform. Protocol with 3 methods (`fetch_messages`, `is_alert`, `extract_finding`). Slack and Discord each provide an adapter (`SlackMessageSource`, `DiscordMessageSource`). The scanning algorithm (`execute_channel_scan`) lives in `shared/channel_scan.py` and is parameterized by a source. Defined in `shared/channel_scan.py`.
 

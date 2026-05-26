@@ -15,7 +15,14 @@ from agents.master.orchestrator import (
     _parse_agent_result,
 )
 from shared.a2a_protocol import build_a2a_request
-from shared.chat_poster import ChatPoster, chat_post_with_retry
+from shared.platforms import ChatPlatform
+from shared.report_renderer import (
+    EnrichmentSections,
+    InvestigationStartedSections,
+    PIRSections,
+    ReportSections,
+    SlackReportRenderer,
+)
 from agents.master.report_formatter import ReportFormatter
 from shared.models import AgentFailure, AgentMetadata, AgentResult, AlertContext, Finding
 
@@ -55,17 +62,53 @@ class FakeHTTPClient:
         return self.responses.get(url, _default_a2a_response(payload))
 
 
-class FakeSlackPoster:
-    """Fake chat poster that records posted messages."""
+class FakeChatPlatform:
+    """Fake :class:`ChatPlatform` that renders payloads via Slack mrkdwn and
+    records the rendered text alongside the original (ctx, payload) tuples.
 
-    def __init__(self):
-        self.messages: list[tuple[str, str, str]] = []
+    Exposes a ``messages`` property in the legacy ``(channel, thread, text)``
+    shape so existing assertions about rendered content keep working.
+    """
 
-    async def post_reply(
-        self, alert_context, text: str
-    ) -> None:
-        thread_ts = alert_context.platform_metadata.get("thread_ts", alert_context.message_id)
-        self.messages.append((alert_context.channel_id, thread_ts, text))
+    name = "slack"
+
+    def __init__(self) -> None:
+        self._renderer = SlackReportRenderer()
+        self.deliveries: list[tuple] = []  # (ctx, payload, rendered_text)
+
+    def ingest(self, headers, raw_body):  # not exercised in orchestrator tests
+        raise NotImplementedError
+
+    def ack(self, command, text):  # not exercised in orchestrator tests
+        raise NotImplementedError
+
+    async def deliver(self, alert_context, payload) -> str:
+        text = self._render(payload)
+        self.deliveries.append((alert_context, payload, text))
+        return text
+
+    def _render(self, payload) -> str:
+        if isinstance(payload, ReportSections):
+            return self._renderer.render_report(payload)
+        if isinstance(payload, EnrichmentSections):
+            return self._renderer.render_enrichment(payload)
+        if isinstance(payload, InvestigationStartedSections):
+            return self._renderer.render_investigation_started(payload)
+        if isinstance(payload, PIRSections):
+            return self._renderer.render_pir(payload)
+        raise TypeError(f"Unsupported deliver payload: {type(payload).__name__}")
+
+    @property
+    def messages(self) -> list[tuple[str, str, str]]:
+        """Legacy compat: list of (channel_id, thread_ts, rendered_text) tuples."""
+        return [
+            (
+                ctx.channel_id,
+                ctx.platform_metadata.get("thread_ts", ctx.message_id),
+                text,
+            )
+            for ctx, _, text in self.deliveries
+        ]
 
 
 def _find_report_msg(messages: list[tuple[str, str, str]]) -> tuple[str, str, str]:
@@ -97,14 +140,14 @@ def _default_a2a_response(request: dict) -> dict:
 
 def _make_orchestrator(
     http_client: AsyncHTTPClient | None = None,
-    slack_poster: ChatPoster | None = None,
+    chat_platform: ChatPlatform | None = None,
     initial_deadline: float = 0.1,
     hard_cutoff: float = 0.5,
 ) -> InvestigationOrchestrator:
     """Create an orchestrator with short timeouts for testing."""
     orch = InvestigationOrchestrator(
         http_client=http_client or FakeHTTPClient(),
-        chat_poster=slack_poster or FakeSlackPoster(),
+        chat_platform=chat_platform or FakeChatPlatform(),
         report_formatter=ReportFormatter(),
         agent_endpoints={
             "slack_scanner": "http://localhost:9001",
@@ -432,9 +475,9 @@ class TestOrchestratorDeadlines:
 
     @pytest.mark.asyncio
     async def test_initial_report_posted_at_deadline(self, alert_context):
-        slack_poster = FakeSlackPoster()
+        chat_platform = FakeChatPlatform()
         orch = _make_orchestrator(
-            slack_poster=slack_poster,
+            chat_platform=chat_platform,
             initial_deadline=0.1,
             hard_cutoff=0.5,
         )
@@ -442,7 +485,7 @@ class TestOrchestratorDeadlines:
         await orch.investigate(alert_context)
 
         # The Incident Report follows the "Investigation Started" notice.
-        channel, thread_ts, text = _find_report_msg(slack_poster.messages)
+        channel, thread_ts, text = _find_report_msg(chat_platform.messages)
         assert channel == alert_context.channel_id
         assert thread_ts == alert_context.message_id
         assert "Incident Report" in text
@@ -452,17 +495,17 @@ class TestOrchestratorDeadlines:
         """Agents that don't respond within the initial deadline render as ⏳ pending."""
         # Make all agents slow (longer than initial deadline)
         http_client = FakeHTTPClient(delay=0.3)
-        slack_poster = FakeSlackPoster()
+        chat_platform = FakeChatPlatform()
         orch = _make_orchestrator(
             http_client=http_client,
-            slack_poster=slack_poster,
+            chat_platform=chat_platform,
             initial_deadline=0.05,
             hard_cutoff=0.5,
         )
 
         await orch.investigate(alert_context)
 
-        _, _, report_text = _find_report_msg(slack_poster.messages)
+        _, _, report_text = _find_report_msg(chat_platform.messages)
         assert "⏳" in report_text or "still investigating" in report_text.lower()
 
     @pytest.mark.asyncio
@@ -470,10 +513,10 @@ class TestOrchestratorDeadlines:
         """Investigation terminates at the hard cutoff."""
         # Agents take longer than the hard cutoff
         http_client = FakeHTTPClient(delay=5.0)
-        slack_poster = FakeSlackPoster()
+        chat_platform = FakeChatPlatform()
         orch = _make_orchestrator(
             http_client=http_client,
-            slack_poster=slack_poster,
+            chat_platform=chat_platform,
             initial_deadline=0.05,
             hard_cutoff=0.2,
         )
@@ -508,10 +551,10 @@ class TestOrchestratorLateResults:
                 return _default_a2a_response(payload)
 
         http_client = MixedHTTPClient()
-        slack_poster = FakeSlackPoster()
+        chat_platform = FakeChatPlatform()
         orch = _make_orchestrator(
             http_client=http_client,
-            slack_poster=slack_poster,
+            chat_platform=chat_platform,
             initial_deadline=0.05,
             hard_cutoff=0.5,
         )
@@ -519,7 +562,7 @@ class TestOrchestratorLateResults:
         await orch.investigate(alert_context)
 
         # Should have initial report + enrichment updates
-        assert len(slack_poster.messages) >= 2  # At least report + 1 enrichment
+        assert len(chat_platform.messages) >= 2  # At least report + 1 enrichment
 
     @pytest.mark.asyncio
     async def test_enrichment_update_format(self, alert_context):
@@ -536,10 +579,10 @@ class TestOrchestratorLateResults:
                 return _default_a2a_response(payload)
 
         http_client = SlowOneAgent()
-        slack_poster = FakeSlackPoster()
+        chat_platform = FakeChatPlatform()
         orch = _make_orchestrator(
             http_client=http_client,
-            slack_poster=slack_poster,
+            chat_platform=chat_platform,
             initial_deadline=0.05,
             hard_cutoff=0.5,
         )
@@ -548,7 +591,7 @@ class TestOrchestratorLateResults:
 
         # Find enrichment update messages (not the initial report)
         enrichment_msgs = [
-            text for _, _, text in slack_poster.messages
+            text for _, _, text in chat_platform.messages
             if "Enrichment Update" in text
         ]
         # The slow agent should trigger an enrichment update
@@ -573,31 +616,36 @@ class TestOrchestratorErrorHandling:
                 return _default_a2a_response(payload)
 
         http_client = FailingHTTPClient()
-        slack_poster = FakeSlackPoster()
+        chat_platform = FakeChatPlatform()
         orch = _make_orchestrator(
             http_client=http_client,
-            slack_poster=slack_poster,
+            chat_platform=chat_platform,
         )
 
         # Should not raise
         await orch.investigate(alert_context)
 
         # Report should still be posted
-        assert len(slack_poster.messages) >= 1
+        assert len(chat_platform.messages) >= 1
 
     @pytest.mark.asyncio
     async def test_slack_post_failure_does_not_crash(self, alert_context):
-        """Slack posting failures are logged but don't crash the orchestrator."""
+        """Chat post failures are logged but don't crash the orchestrator."""
 
-        class FailingSlackPoster:
-            def __init__(self):
-                self.messages = []
+        class FailingChatPlatform:
+            name = "slack"
 
-            async def post_reply(self, alert_context, text):
+            def ingest(self, headers, raw_body):
+                raise NotImplementedError
+
+            def ack(self, command, text):
+                raise NotImplementedError
+
+            async def deliver(self, alert_context, payload):
                 raise RuntimeError("Slack API error")
 
         orch = _make_orchestrator(
-            slack_poster=FailingSlackPoster(),
+            chat_platform=FailingChatPlatform(),
         )
 
         # Should not raise
@@ -639,7 +687,7 @@ class TestOrchestratorEndpointConfig:
     def test_default_endpoints(self):
         orch = InvestigationOrchestrator(
             http_client=FakeHTTPClient(),
-            chat_poster=FakeSlackPoster(),
+            chat_platform=FakeChatPlatform(),
         )
         # Should have all 4 agents (Prometheus deferred)
         assert len(orch.agent_endpoints) == 4
@@ -656,7 +704,7 @@ class TestOrchestratorEndpointConfig:
         }
         orch = InvestigationOrchestrator(
             http_client=FakeHTTPClient(),
-            chat_poster=FakeSlackPoster(),
+            chat_platform=FakeChatPlatform(),
             agent_endpoints=custom,
         )
         assert orch.agent_endpoints == custom
@@ -668,7 +716,7 @@ class TestOrchestratorEndpointConfig:
     def test_endpoints_from_environment(self):
         orch = InvestigationOrchestrator(
             http_client=FakeHTTPClient(),
-            chat_poster=FakeSlackPoster(),
+            chat_platform=FakeChatPlatform(),
         )
         assert orch.agent_endpoints["cloudwatch_logs"] == "http://env-cw:9999"
 
@@ -682,7 +730,7 @@ class TestOrchestratorEndpointConfig:
     def test_runtime_arn_env_var_overrides_url(self):
         orch = InvestigationOrchestrator(
             http_client=FakeHTTPClient(),
-            chat_poster=FakeSlackPoster(),
+            chat_platform=FakeChatPlatform(),
         )
         assert (
             orch.agent_endpoints["eks"]
@@ -701,7 +749,7 @@ class TestOrchestratorEndpointConfig:
     def test_enabled_agents_filters_to_allowlist(self):
         orch = InvestigationOrchestrator(
             http_client=FakeHTTPClient(),
-            chat_poster=FakeSlackPoster(),
+            chat_platform=FakeChatPlatform(),
         )
         assert list(orch.agent_endpoints.keys()) == ["eks"]
 
@@ -717,7 +765,7 @@ class TestOrchestratorEndpointConfig:
     def test_enabled_agents_handles_whitespace_and_multiples(self):
         orch = InvestigationOrchestrator(
             http_client=FakeHTTPClient(),
-            chat_poster=FakeSlackPoster(),
+            chat_platform=FakeChatPlatform(),
         )
         assert sorted(orch.agent_endpoints.keys()) == ["cloudwatch_logs", "eks"]
 
@@ -739,20 +787,20 @@ class TestOrchestratorEndpointConfig:
 
         orch = InvestigationOrchestrator(
             http_client=FakeHTTPClient(),
-            chat_poster=FakeSlackPoster(),
+            chat_platform=FakeChatPlatform(),
         )
         assert orch.agent_endpoints == {}
 
     def test_auto_selects_agentcore_client_for_arn_endpoints(self):
         orch = InvestigationOrchestrator(
-            chat_poster=FakeSlackPoster(),
+            chat_platform=FakeChatPlatform(),
             agent_endpoints={"eks": "arn:aws:bedrock-agentcore:us-east-1:0:runtime/x"},
         )
         assert isinstance(orch.http_client, AgentCoreClient)
 
     def test_auto_selects_aiohttp_client_for_url_endpoints(self):
         orch = InvestigationOrchestrator(
-            chat_poster=FakeSlackPoster(),
+            chat_platform=FakeChatPlatform(),
             agent_endpoints={"eks": "http://localhost:9005"},
         )
         from agents.master.orchestrator import AiohttpClient
@@ -762,7 +810,7 @@ class TestOrchestratorEndpointConfig:
     def test_empty_enabled_agents_keeps_default_behaviour(self):
         orch = InvestigationOrchestrator(
             http_client=FakeHTTPClient(),
-            chat_poster=FakeSlackPoster(),
+            chat_platform=FakeChatPlatform(),
         )
         # No allowlist => all four agents present (with localhost fallbacks).
         assert sorted(orch.agent_endpoints.keys()) == [
@@ -771,139 +819,6 @@ class TestOrchestratorEndpointConfig:
             "eks",
             "slack_scanner",
         ]
-
-
-# ---------------------------------------------------------------------------
-# Tests: Slack post retry logic
-# ---------------------------------------------------------------------------
-
-
-class TestChatPostWithRetry:
-    """Test the chat_post_with_retry utility function."""
-
-    @pytest.mark.asyncio
-    async def test_succeeds_on_first_attempt(self, alert_context):
-        """No retries needed when the first call succeeds."""
-        poster = FakeSlackPoster()
-        await chat_post_with_retry(
-            poster, alert_context, "hello", base_delay=0.0
-        )
-        assert len(poster.messages) == 1
-        assert poster.messages[0] == (alert_context.channel_id, alert_context.message_id, "hello")
-
-    @pytest.mark.asyncio
-    async def test_retries_on_failure_then_succeeds(self, alert_context):
-        """Retries after transient failures and eventually succeeds."""
-        call_count = 0
-
-        class FailThenSucceedPoster:
-            def __init__(self):
-                self.messages = []
-
-            async def post_reply(self, alert_context, text):
-                nonlocal call_count
-                call_count += 1
-                if call_count < 3:
-                    raise RuntimeError("Chat API transient error")
-                self.messages.append((alert_context.channel_id, alert_context.message_id, text))
-
-        poster = FailThenSucceedPoster()
-        await chat_post_with_retry(
-            poster, alert_context, "hello", base_delay=0.0
-        )
-        # 2 failures + 1 success = 3 total calls
-        assert call_count == 3
-        assert len(poster.messages) == 1
-
-    @pytest.mark.asyncio
-    async def test_raises_after_all_retries_exhausted(self, alert_context):
-        """Raises the last exception when all retries are exhausted."""
-
-        class AlwaysFailPoster:
-            async def post_reply(self, alert_context, text):
-                raise RuntimeError("Permanent failure")
-
-        poster = AlwaysFailPoster()
-        with pytest.raises(RuntimeError, match="Permanent failure"):
-            await chat_post_with_retry(
-                poster, alert_context, "hello",
-                max_retries=3, base_delay=0.0,
-            )
-
-    @pytest.mark.asyncio
-    async def test_total_attempts_is_max_retries_plus_one(self, alert_context):
-        """With max_retries=3, there are 4 total attempts (1 initial + 3 retries)."""
-        call_count = 0
-
-        class CountingFailPoster:
-            async def post_reply(self, alert_context, text):
-                nonlocal call_count
-                call_count += 1
-                raise RuntimeError("fail")
-
-        poster = CountingFailPoster()
-        with pytest.raises(RuntimeError):
-            await chat_post_with_retry(
-                poster, alert_context, "hello",
-                max_retries=3, base_delay=0.0,
-            )
-        assert call_count == 4  # 1 initial + 3 retries
-
-    @pytest.mark.asyncio
-    async def test_exponential_backoff_delays(self, alert_context):
-        """Verify that delays follow exponential backoff pattern."""
-        import time
-
-        delays_observed: list[float] = []
-        last_call_time: list[float] = [time.monotonic()]
-
-        class TimingFailPoster:
-            async def post_reply(self, alert_context, text):
-                now = time.monotonic()
-                delays_observed.append(now - last_call_time[0])
-                last_call_time[0] = now
-                raise RuntimeError("fail")
-
-        poster = TimingFailPoster()
-        # Use small base_delay to keep test fast but measurable
-        base_delay = 0.05
-        with pytest.raises(RuntimeError):
-            await chat_post_with_retry(
-                poster, alert_context, "hello",
-                max_retries=3, base_delay=base_delay,
-            )
-
-        # delays_observed[0] is the initial call (no delay)
-        # delays_observed[1] should be ~base_delay * 1 = 0.05s
-        # delays_observed[2] should be ~base_delay * 2 = 0.10s
-        # delays_observed[3] should be ~base_delay * 4 = 0.20s
-        assert len(delays_observed) == 4
-        # Verify delays are increasing (exponential backoff)
-        assert delays_observed[1] < delays_observed[2] < delays_observed[3]
-
-    @pytest.mark.asyncio
-    async def test_succeeds_on_last_retry(self, alert_context):
-        """Succeeds on the final retry attempt (attempt 4 of 4)."""
-        call_count = 0
-
-        class FailUntilLastPoster:
-            def __init__(self):
-                self.messages = []
-
-            async def post_reply(self, alert_context, text):
-                nonlocal call_count
-                call_count += 1
-                if call_count < 4:  # Fail first 3 attempts
-                    raise RuntimeError("transient")
-                self.messages.append((alert_context.channel_id, alert_context.message_id, text))
-
-        poster = FailUntilLastPoster()
-        await chat_post_with_retry(
-            poster, alert_context, "report",
-            max_retries=3, base_delay=0.0,
-        )
-        assert call_count == 4
-        assert len(poster.messages) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -916,12 +831,12 @@ class TestInvestigationStartedAnnouncement:
 
     @pytest.mark.asyncio
     async def test_started_message_posted_first(self, alert_context):
-        slack_poster = FakeSlackPoster()
-        orch = _make_orchestrator(slack_poster=slack_poster)
+        chat_platform = FakeChatPlatform()
+        orch = _make_orchestrator(chat_platform=chat_platform)
 
         await orch.investigate(alert_context)
 
-        first = slack_poster.messages[0][2]
+        first = chat_platform.messages[0][2]
         assert "Investigation Started" in first
         # Names every agent the orchestrator dispatched
         assert "Slack Scanner" in first
@@ -930,10 +845,10 @@ class TestInvestigationStartedAnnouncement:
 
     @pytest.mark.asyncio
     async def test_no_started_message_when_no_agents_configured(self, alert_context):
-        slack_poster = FakeSlackPoster()
+        chat_platform = FakeChatPlatform()
         orch = InvestigationOrchestrator(
             http_client=FakeHTTPClient(),
-            chat_poster=slack_poster,
+            chat_platform=chat_platform,
             report_formatter=ReportFormatter(),
             agent_endpoints={"placeholder": "x"},  # avoid env fallback
         )
@@ -946,7 +861,7 @@ class TestInvestigationStartedAnnouncement:
 
         # Only the Incident Report (which says no agents configured) — no
         # started notice when we'd be naming zero agents.
-        for _, _, text in slack_poster.messages:
+        for _, _, text in chat_platform.messages:
             assert "Investigation Started" not in text
 
 
@@ -966,10 +881,10 @@ class TestLateFailureEnrichment:
                     raise ConnectionError("boom")
                 return _default_a2a_response(payload)
 
-        slack_poster = FakeSlackPoster()
+        chat_platform = FakeChatPlatform()
         orch = _make_orchestrator(
             http_client=OneSlowFailingClient(),
-            slack_poster=slack_poster,
+            chat_platform=chat_platform,
             initial_deadline=0.05,
             hard_cutoff=0.5,
         )
@@ -977,7 +892,7 @@ class TestLateFailureEnrichment:
         await orch.investigate(alert_context)
 
         late_msgs = [
-            text for _, _, text in slack_poster.messages
+            text for _, _, text in chat_platform.messages
             if "Late Result" in text or "Enrichment Update" in text
         ]
         assert any("Late Result (failed)" in m for m in late_msgs), (
@@ -1025,7 +940,7 @@ class TestAgentMetadataPropagation:
 
         orch = InvestigationOrchestrator(
             http_client=StubClient(),
-            chat_poster=FakeSlackPoster(),
+            chat_platform=FakeChatPlatform(),
             report_formatter=ReportFormatter(),
             agent_endpoints={"eks": "http://localhost:9999"},
         )
