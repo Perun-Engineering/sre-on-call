@@ -55,12 +55,50 @@ class FakeHTTPClient:
         }
 
 
-class FakePoster:
-    def __init__(self):
-        self.messages = []
+class FakeChatPlatform:
+    """Fake :class:`ChatPlatform` for orchestrator tests.
 
-    async def post_reply(self, alert_context, text):
-        self.messages.append(text)
+    Renders payloads via the Slack mrkdwn renderer (matching the legacy
+    ``FakePoster`` semantics) and exposes ``messages`` as a list of
+    rendered strings — preserving existing assertions like
+    ``any("[B: Nova Pro]" in m for m in poster.messages)``.
+    """
+
+    name = "slack"
+
+    def __init__(self) -> None:
+        self._renderer = SlackReportRenderer()
+        self.deliveries: list = []
+
+    def ingest(self, headers, raw_body):
+        raise NotImplementedError
+
+    def ack(self, command, text):
+        raise NotImplementedError
+
+    async def deliver(self, alert_context, payload) -> str:
+        from shared.report_renderer import (
+            EnrichmentSections,
+            InvestigationStartedSections,
+            PIRSections,
+            ReportSections,
+        )
+        if isinstance(payload, ReportSections):
+            text = self._renderer.render_report(payload)
+        elif isinstance(payload, EnrichmentSections):
+            text = self._renderer.render_enrichment(payload)
+        elif isinstance(payload, InvestigationStartedSections):
+            text = self._renderer.render_investigation_started(payload)
+        elif isinstance(payload, PIRSections):
+            text = self._renderer.render_pir(payload)
+        else:
+            raise TypeError(f"Unsupported deliver payload: {type(payload).__name__}")
+        self.deliveries.append((alert_context, payload, text))
+        return text
+
+    @property
+    def messages(self) -> list[str]:
+        return [text for _, _, text in self.deliveries]
 
 
 # ---------------------------------------------------------------------------
@@ -70,45 +108,55 @@ class FakePoster:
 
 class TestReportFormatterVariantLabel:
     def test_report_includes_variant_label_slack(self) -> None:
-        fmt = ReportFormatter(renderer=SlackReportRenderer())
+        fmt = ReportFormatter()
         ctx = _alert(variant_label="A: Claude Sonnet")
         results: dict[str, AgentResult | AgentFailure] = {k: _success_result(k) for k in ["slack_scanner", "prometheus", "cloudwatch_logs", "eks"]}
-        report = fmt.format_incident_report(ctx, results)
+        report = SlackReportRenderer().render_report(
+            fmt.build_incident_sections(ctx, results)
+        )
         assert "[A: Claude Sonnet]" in report
         assert "Incident Report" in report
 
     def test_report_no_variant_label_when_none(self) -> None:
-        fmt = ReportFormatter(renderer=SlackReportRenderer())
+        fmt = ReportFormatter()
         ctx = _alert()
         results: dict[str, AgentResult | AgentFailure] = {k: _success_result(k) for k in ["slack_scanner", "prometheus", "cloudwatch_logs", "eks"]}
-        report = fmt.format_incident_report(ctx, results)
+        report = SlackReportRenderer().render_report(
+            fmt.build_incident_sections(ctx, results)
+        )
         assert "📊 *[" not in report
         assert "Incident Report" in report
 
     def test_report_includes_variant_label_discord(self) -> None:
-        fmt = ReportFormatter(renderer=DiscordReportRenderer())
+        fmt = ReportFormatter()
         ctx = _alert(variant_label="B: Nova Pro")
         results: dict[str, AgentResult | AgentFailure] = {k: _success_result(k) for k in ["slack_scanner", "prometheus", "cloudwatch_logs", "eks"]}
-        report = fmt.format_incident_report(ctx, results)
+        report = DiscordReportRenderer().render_report(
+            fmt.build_incident_sections(ctx, results)
+        )
         assert "[B: Nova Pro]" in report
 
     def test_enrichment_includes_variant_label(self) -> None:
-        fmt = ReportFormatter(renderer=SlackReportRenderer())
-        update = fmt.format_enrichment_update(
-            source_agent="eks",
-            new_findings=_success_result("eks"),
-            initial_report_summary="...",
-            variant_label="A: Claude Sonnet",
+        fmt = ReportFormatter()
+        update = SlackReportRenderer().render_enrichment(
+            fmt.build_enrichment_sections(
+                source_agent="eks",
+                new_findings=_success_result("eks"),
+                initial_report_summary="...",
+                variant_label="A: Claude Sonnet",
+            )
         )
         assert "[A: Claude Sonnet]" in update
         assert "Enrichment Update" in update
 
     def test_enrichment_no_variant_label_when_none(self) -> None:
-        fmt = ReportFormatter(renderer=SlackReportRenderer())
-        update = fmt.format_enrichment_update(
-            source_agent="eks",
-            new_findings=_success_result("eks"),
-            initial_report_summary="...",
+        fmt = ReportFormatter()
+        update = SlackReportRenderer().render_enrichment(
+            fmt.build_enrichment_sections(
+                source_agent="eks",
+                new_findings=_success_result("eks"),
+                initial_report_summary="...",
+            )
         )
         assert "📊 *[" not in update
 
@@ -134,10 +182,10 @@ def results_table():
 class TestOrchestratorExperimentStorage:
     async def test_stores_result_when_variant_set(self, results_table) -> None:
         store = ExperimentResultsStore(dynamodb_resource=results_table)
-        poster = FakePoster()
+        platform = FakeChatPlatform()
         orch = InvestigationOrchestrator(
             http_client=FakeHTTPClient(),
-            chat_poster=poster,
+            chat_platform=platform,
             agent_endpoints={"eks": "http://localhost:9004"},
             results_store=store,
         )
@@ -151,10 +199,10 @@ class TestOrchestratorExperimentStorage:
 
     async def test_no_result_stored_without_experiment(self, results_table) -> None:
         store = ExperimentResultsStore(dynamodb_resource=results_table)
-        poster = FakePoster()
+        platform = FakeChatPlatform()
         orch = InvestigationOrchestrator(
             http_client=FakeHTTPClient(),
-            chat_poster=poster,
+            chat_platform=platform,
             agent_endpoints={"eks": "http://localhost:9004"},
             results_store=store,
         )
@@ -164,12 +212,12 @@ class TestOrchestratorExperimentStorage:
         assert results == []
 
     async def test_report_posted_with_variant_label(self, results_table) -> None:
-        poster = FakePoster()
+        platform = FakeChatPlatform()
         orch = InvestigationOrchestrator(
             http_client=FakeHTTPClient(),
-            chat_poster=poster,
+            chat_platform=platform,
             agent_endpoints={"eks": "http://localhost:9004"},
         )
         ctx = _alert(variant_id="b", variant_label="B: Nova Pro")
         await orch.investigate(ctx)
-        assert any("[B: Nova Pro]" in m for m in poster.messages)
+        assert any("[B: Nova Pro]" in m for m in platform.messages)

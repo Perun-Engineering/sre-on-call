@@ -157,7 +157,9 @@ def test_failure_notices_for_non_successful_agents(
     """
     agent_results, status_map = data
     formatter = ReportFormatter()
-    report = formatter.format_incident_report(ALERT_CONTEXT, agent_results)
+    report = SlackReportRenderer().render_report(
+        formatter.build_incident_sections(ALERT_CONTEXT, agent_results)
+    )
 
     for agent_key in AGENT_ORDER:
         _, display_name = AGENT_DISPLAY[agent_key]
@@ -204,7 +206,9 @@ def test_incident_report_contains_all_required_sections(
     """
     agent_results, _status_map = data
     formatter = ReportFormatter()
-    report = formatter.format_incident_report(ALERT_CONTEXT, agent_results)
+    report = SlackReportRenderer().render_report(
+        formatter.build_incident_sections(ALERT_CONTEXT, agent_results)
+    )
 
     for header in REQUIRED_SECTION_HEADERS:
         assert header in report, (
@@ -256,7 +260,9 @@ def test_agent_findings_appear_in_evidence_section(
     """
     agent_results, status_map = data
     formatter = ReportFormatter()
-    report = formatter.format_incident_report(ALERT_CONTEXT, agent_results)
+    report = SlackReportRenderer().render_report(
+        formatter.build_incident_sections(ALERT_CONTEXT, agent_results)
+    )
 
     # Extract the Evidence section from the report
     evidence_start = report.find("*Evidence*")
@@ -347,8 +353,10 @@ def test_enrichment_update_identifies_source_agent_and_contains_findings(
     """
     agent_name, agent_result = data
     renderer = SlackReportRenderer()
-    formatter = ReportFormatter(renderer=renderer)
-    update = formatter.format_enrichment_update(agent_name, agent_result, summary_text)
+    formatter = ReportFormatter()
+    update = renderer.render_enrichment(
+        formatter.build_enrichment_sections(agent_name, agent_result, summary_text)
+    )
 
     # The agent's display name must appear in the header
     _, display_name = AGENT_DISPLAY[agent_name]

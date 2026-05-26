@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
 EvidenceStatus = Literal["ok", "pending", "error"]
@@ -50,6 +50,13 @@ class ReportSections:
     links: list[tuple[str, str]]  # [(url, label), ...] — renderer formats per-platform
     variant_label: str | None = None  # e.g. "[A: Claude Sonnet]"
     totals_line: str | None = None  # Optional aggregate "tokens=…in/…out · cost=$…"
+    # Per-agent raw pieces. When non-empty, the renderer prefers these and
+    # normalizes each piece before joining — preserves heading promotion
+    # for content that ends up in mid-line position (e.g. inside bullets).
+    # The legacy ``summary`` / ``root_cause`` strings remain as a fallback
+    # for callers that haven't been updated.
+    summary_parts: list[str] = field(default_factory=list)
+    root_cause_parts: list[tuple[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -217,10 +224,10 @@ class MarkupReportRenderer:
         parts += [
             "",
             d.bold("Summary"),
-            d.normalize(sections.summary),
+            self._render_summary(sections),
             "",
             d.bold("Root Cause Hypothesis"),
-            d.normalize(sections.root_cause),
+            self._render_root_cause(sections),
             "",
             d.bold("Evidence"),
             self._render_evidence(sections.evidence_blocks),
@@ -235,6 +242,28 @@ class MarkupReportRenderer:
             self._render_links(sections.links),
         ]
         return "\n".join(parts)
+
+    def _render_summary(self, sections: ReportSections) -> str:
+        """Prefer per-agent summary_parts when present; normalize each piece
+        independently before joining so heading promotion still fires for
+        content that would otherwise end up mid-line in the joined string.
+        """
+        if sections.summary_parts:
+            return " ".join(self._d.normalize(p) for p in sections.summary_parts)
+        return self._d.normalize(sections.summary)
+
+    def _render_root_cause(self, sections: ReportSections) -> str:
+        """Prefer per-agent root_cause_parts: each (display, raw_summary) is
+        normalized in isolation, then prefixed with ``- {display}: `` and
+        bulleted under the standard preamble.
+        """
+        if sections.root_cause_parts:
+            bullets = [
+                f"- {display}: {self._d.normalize(raw)}"
+                for display, raw in sections.root_cause_parts
+            ]
+            return "Based on available evidence:\n" + "\n".join(bullets)
+        return self._d.normalize(sections.root_cause)
 
     def render_enrichment(self, sections: EnrichmentSections) -> str:
         d = self._d

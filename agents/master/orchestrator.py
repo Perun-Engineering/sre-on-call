@@ -22,7 +22,7 @@ from shared.agent_telemetry import extract_metadata
 from shared.constants import HARD_CUTOFF_SECONDS, INITIAL_DEADLINE_SECONDS
 from shared.models import AgentFailure, AgentMetadata, AgentResult, AlertContext, Finding
 from shared.time_utils import now_iso
-from shared.chat_poster import ChatPoster, SlackChatPoster, chat_post_with_retry, create_chat_poster
+from shared.platforms import ChatPlatform, deliver_with_retry, for_platform
 from shared.experiment import ExperimentResult
 from shared.experiment_results_store import ExperimentResultsStore
 from shared.tool_result import extract_agent_result
@@ -278,12 +278,12 @@ class InvestigationOrchestrator:
     def __init__(
         self,
         http_client: AsyncHTTPClient | None = None,
-        chat_poster: ChatPoster | None = None,
+        chat_platform: ChatPlatform | None = None,
         report_formatter: ReportFormatter | None = None,
         agent_endpoints: dict[str, str] | None = None,
         results_store: ExperimentResultsStore | None = None,
     ) -> None:
-        self._chat_poster: ChatPoster | None = chat_poster
+        self._chat_platform: ChatPlatform | None = chat_platform
         self.report_formatter = report_formatter or ReportFormatter()
         self.agent_endpoints = agent_endpoints or _load_agent_endpoints()
         if http_client is None:
@@ -294,11 +294,11 @@ class InvestigationOrchestrator:
         self.http_client: AsyncHTTPClient = http_client
         self._results_store = results_store
 
-    def _get_poster(self, alert_context: AlertContext) -> ChatPoster:
-        """Return the chat poster, creating one from platform if not injected."""
-        if self._chat_poster is not None:
-            return self._chat_poster
-        return create_chat_poster(alert_context.platform)
+    def _get_platform(self, alert_context: AlertContext) -> ChatPlatform:
+        """Return the ChatPlatform, selecting from alert_context.platform when not injected."""
+        if self._chat_platform is not None:
+            return self._chat_platform
+        return for_platform(alert_context.platform)
 
     # ------------------------------------------------------------------
     # Public API
@@ -309,18 +309,18 @@ class InvestigationOrchestrator:
         start_time = asyncio.get_event_loop().time()
         results: dict[str, AgentResult | AgentFailure] = {}
         initial_report_summary = ""
-        poster = self._get_poster(alert_context)
+        platform = self._get_platform(alert_context)
 
         # --- Phase 0: announce which agents will be queried ------------------
-        # Fire-and-forget so fan-out starts immediately; a slow Slack post
+        # Fire-and-forget so fan-out starts immediately; a slow chat post
         # would otherwise add an RTT to every investigation.
         dispatched_agents = list(self.agent_endpoints.keys())
         if dispatched_agents:
-            started_msg = self.report_formatter.format_investigation_started(
+            started_sections = self.report_formatter.build_started_sections(
                 alert_context, dispatched_agents,
             )
             asyncio.create_task(
-                self._post_started_notice(poster, alert_context, started_msg),
+                self._post_started_notice(platform, alert_context, started_sections),
                 name=f"started-notice-{alert_context.investigation_id}",
             )
 
@@ -354,19 +354,19 @@ class InvestigationOrchestrator:
         # their late results trigger an enrichment update in Phase 4.
         pending_ids = {task_to_agent[t] for t in pending}
 
-        report = self.report_formatter.format_incident_report(
+        report_sections = self.report_formatter.build_incident_sections(
             alert_context, results, pending_agents=pending_ids,
         )
-        initial_report_summary = report
 
         try:
-            await chat_post_with_retry(poster, alert_context, report)
+            initial_report_summary = await deliver_with_retry(
+                platform, alert_context, report_sections,
+            )
         except Exception:
             logger.exception(
                 "Failed to post initial Incident Report for investigation %s "
-                "(all retries exhausted). Report content:\n%s",
+                "(all retries exhausted).",
                 alert_context.investigation_id,
-                report,
             )
 
         # --- Phase 4: accept late results until HARD_CUTOFF_SECONDS ----------
@@ -385,13 +385,15 @@ class InvestigationOrchestrator:
                 # Late results post regardless of status — a failure that
                 # crossed the 60s mark is still surfaced.
                 try:
-                    update = self.report_formatter.format_enrichment_update(
+                    enrichment_sections = self.report_formatter.build_enrichment_sections(
                         source_agent=agent_id,
                         new_findings=result,
                         initial_report_summary=initial_report_summary,
                         variant_label=alert_context.variant_label,
                     )
-                    await chat_post_with_retry(poster, alert_context, update)
+                    await deliver_with_retry(
+                        platform, alert_context, enrichment_sections,
+                    )
                 except Exception:
                     logger.exception(
                         "Failed to post enrichment update for %s in investigation %s "
@@ -451,10 +453,13 @@ class InvestigationOrchestrator:
     # ------------------------------------------------------------------
 
     async def _post_started_notice(
-        self, poster: ChatPoster, alert_context: AlertContext, message: str
+        self,
+        platform: ChatPlatform,
+        alert_context: AlertContext,
+        sections,
     ) -> None:
         try:
-            await chat_post_with_retry(poster, alert_context, message)
+            await deliver_with_retry(platform, alert_context, sections)
         except Exception:
             logger.exception(
                 "Failed to post investigation-started notice for %s",

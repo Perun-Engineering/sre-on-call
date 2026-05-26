@@ -12,7 +12,7 @@ import pathlib
 import sys
 import time
 
-from lambda_adapter.slack.signature import verify_slack_signature
+from shared.platforms.slack import verify_slack_signature
 
 
 def _load_script_module():

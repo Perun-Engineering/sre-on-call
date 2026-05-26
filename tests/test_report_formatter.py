@@ -1,4 +1,12 @@
-"""Unit tests for the ReportFormatter class."""
+"""Unit tests for the ReportFormatter (section builders) + the Slack/Discord
+markup dialects that render those sections.
+
+After step 4 of the deepening migration, ``ReportFormatter`` only builds
+platform-agnostic ``ReportSections``; rendering lives in
+:class:`shared.platforms.ChatPlatform` implementations. These tests
+combine the builder with a renderer locally to exercise the full
+build-then-render pipeline.
+"""
 
 import pytest
 
@@ -8,12 +16,18 @@ from shared.report_renderer import (
     DiscordDialect,
     DiscordReportRenderer,
     SlackDialect,
+    SlackReportRenderer,
 )
 
 
 @pytest.fixture
 def formatter():
     return ReportFormatter()
+
+
+@pytest.fixture
+def slack_renderer():
+    return SlackReportRenderer()
 
 
 @pytest.fixture
@@ -60,8 +74,25 @@ def _make_error_result(agent_name, error_message="endpoint unreachable"):
     )
 
 
+def _render_report(formatter, alert_context, results, pending_agents=None, renderer=None):
+    """Helper: build incident sections then render via Slack mrkdwn."""
+    sections = formatter.build_incident_sections(
+        alert_context, results, pending_agents,
+    )
+    return (renderer or SlackReportRenderer()).render_report(sections)
+
+
+def _render_enrichment(formatter, source_agent, new_findings, initial_summary,
+                       variant_label=None, renderer=None):
+    """Helper: build enrichment sections then render."""
+    sections = formatter.build_enrichment_sections(
+        source_agent, new_findings, initial_summary, variant_label,
+    )
+    return (renderer or SlackReportRenderer()).render_enrichment(sections)
+
+
 class TestFormatIncidentReport:
-    """Tests for format_incident_report."""
+    """Tests for build_incident_sections + render_report (Slack dialect)."""
 
     def test_all_agents_successful(self, formatter, alert_context):
         results = {
@@ -82,7 +113,7 @@ class TestFormatIncidentReport:
             ),
         }
 
-        report = formatter.format_incident_report(alert_context, results)
+        report = _render_report(formatter, alert_context, results)
 
         # All required sections present
         assert "🚨 *Incident Report*" in report
@@ -119,8 +150,8 @@ class TestFormatIncidentReport:
             "cloudwatch_logs": _make_error_result("cloudwatch_logs", "endpoint unreachable"),
         }
         # eks is still pending — orchestrator dispatched it but it hasn't responded
-        report = formatter.format_incident_report(
-            alert_context, results, pending_agents={"eks"}
+        report = _render_report(
+            formatter, alert_context, results, pending_agents={"eks"},
         )
 
         # Successful agent findings present
@@ -144,7 +175,7 @@ class TestFormatIncidentReport:
                 "Found alerts",
             ),
         }
-        report = formatter.format_incident_report(alert_context, results)
+        report = _render_report(formatter, alert_context, results)
         # Only the dispatched agent shows up
         assert "Slack Scanner" in report
         # CloudWatch and EKS were never dispatched → not even mentioned
@@ -153,7 +184,7 @@ class TestFormatIncidentReport:
 
     def test_no_agents_dispatched(self, formatter, alert_context):
         """When no agents are configured, evidence section says so explicitly."""
-        report = formatter.format_incident_report(alert_context, {})
+        report = _render_report(formatter, alert_context, {})
         assert "*Evidence*" in report
         assert "No agents were configured" in report
         # No agent names appear
@@ -162,7 +193,7 @@ class TestFormatIncidentReport:
         assert "EKS Cluster State" not in report
 
     def test_time_of_detection_matches_alert(self, formatter, alert_context):
-        report = formatter.format_incident_report(alert_context, {})
+        report = _render_report(formatter, alert_context, {})
         assert f"*Time of Detection:* {alert_context.alert_timestamp}" in report
 
     def test_severity_defaults_to_low(self, formatter, alert_context):
@@ -172,7 +203,7 @@ class TestFormatIncidentReport:
                 [_make_finding("info finding", severity="info")],
             ),
         }
-        report = formatter.format_incident_report(alert_context, results)
+        report = _render_report(formatter, alert_context, results)
         assert "🔵 Low" in report
 
     def test_severity_escalates_to_highest(self, formatter, alert_context):
@@ -186,7 +217,7 @@ class TestFormatIncidentReport:
                 [_make_finding("high finding", severity="high")],
             ),
         }
-        report = formatter.format_incident_report(alert_context, results)
+        report = _render_report(formatter, alert_context, results)
         assert "🟠 High" in report
 
     def test_evidence_grouped_by_agent(self, formatter, alert_context):
@@ -200,7 +231,7 @@ class TestFormatIncidentReport:
                 [_make_finding("cw finding 1")],
             ),
         }
-        report = formatter.format_incident_report(alert_context, results)
+        report = _render_report(formatter, alert_context, results)
 
         # Verify agent section headers
         assert "📡 *Slack Scanner*" in report
@@ -224,19 +255,19 @@ class TestFormatIncidentReport:
                 ],
             ),
         }
-        report = formatter.format_incident_report(alert_context, results)
+        report = _render_report(formatter, alert_context, results)
         assert "https://console.aws.amazon.com/cloudwatch/home" in report
 
     def test_agent_error_with_error_message(self, formatter, alert_context):
         results = {
             "cloudwatch_logs": _make_error_result("cloudwatch_logs", "connection timeout"),
         }
-        report = formatter.format_incident_report(alert_context, results)
+        report = _render_report(formatter, alert_context, results)
         assert "⚠️ CloudWatch Logs data unavailable: connection timeout" in report
 
 
 class TestFormatEnrichmentUpdate:
-    """Tests for format_enrichment_update."""
+    """Tests for build_enrichment_sections + render_enrichment (Slack dialect)."""
 
     def test_enrichment_update_contains_agent_name(self, formatter):
         findings = _make_success_result(
@@ -244,8 +275,8 @@ class TestFormatEnrichmentUpdate:
             [_make_finding("Late log data")],
             "CloudWatch data now available",
         )
-        update = formatter.format_enrichment_update(
-            "cloudwatch_logs", findings, "Initial summary"
+        update = _render_enrichment(
+            formatter, "cloudwatch_logs", findings, "Initial summary",
         )
         assert "CloudWatch Logs" in update
 
@@ -255,7 +286,7 @@ class TestFormatEnrichmentUpdate:
             [_make_finding("Pod recovered"), _make_finding("Node healthy")],
             "EKS cluster stabilized",
         )
-        update = formatter.format_enrichment_update("eks", findings, "Initial summary")
+        update = _render_enrichment(formatter, "eks", findings, "Initial summary")
         assert "Pod recovered" in update
         assert "Node healthy" in update
 
@@ -265,8 +296,8 @@ class TestFormatEnrichmentUpdate:
             [_make_finding("New log entry")],
             "Logs now available",
         )
-        update = formatter.format_enrichment_update(
-            "cloudwatch_logs", findings, "Initial summary"
+        update = _render_enrichment(
+            formatter, "cloudwatch_logs", findings, "Initial summary",
         )
         assert "📬 *Enrichment Update" in update
         assert "*New Findings:*" in update
@@ -348,7 +379,7 @@ class TestRendererSlackNormalizationIntegration:
                 ),
             ),
         }
-        report = formatter.format_incident_report(alert_context, results)
+        report = _render_report(formatter, alert_context, results)
 
         # Slack renders ## headings as plain text — the dialect promotes
         # them to bold instead.
@@ -361,8 +392,7 @@ class TestRendererSlackNormalizationIntegration:
         assert "[dashboard](https://grafana/x)" not in report
         assert "<https://grafana/x|dashboard>" in report
 
-    def test_discord_renderer_keeps_commonmark(self, alert_context):
-        formatter = ReportFormatter(renderer=DiscordReportRenderer())
+    def test_discord_renderer_keeps_commonmark(self, formatter, alert_context):
         results: dict[str, AgentResult | AgentFailure] = {
             "cloudwatch_logs": _make_success_result(
                 "cloudwatch_logs",
@@ -370,7 +400,9 @@ class TestRendererSlackNormalizationIntegration:
                 summary="## Investigation Summary\n\n**Trigger Time:** 09:12 UTC.",
             ),
         }
-        report = formatter.format_incident_report(alert_context, results)
+        report = _render_report(
+            formatter, alert_context, results, renderer=DiscordReportRenderer(),
+        )
 
         # Discord supports both — they pass through untouched.
         assert "## Investigation Summary" in report
