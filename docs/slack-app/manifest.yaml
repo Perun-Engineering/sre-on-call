@@ -1,0 +1,45 @@
+# Slack app manifest for the sre-on-call Incident Investigator.
+#
+# Create the app from this file at https://api.slack.com/apps
+# ("Create New App" -> "From an app manifest"). See docs/slack-app-setup.md.
+#
+# Before use, replace EVERY occurrence of the `your-function-url` placeholder
+# with your deployed Lambda function URL (terraform output -raw
+# lambda_function_url), e.g. https://abc123.lambda-url.us-east-1.on.aws/
+#
+# Note: Slack verifies the event_subscriptions request_url at save time by
+# sending a signed url_verification challenge. That only succeeds once the
+# Lambda is deployed AND the app's signing secret is hydrated into Secrets
+# Manager (scripts/hydrate_secrets.sh). If you create the app before the
+# endpoint is live, omit the settings.event_subscriptions block and add it
+# after hydrating the secret.
+display_information:
+  name: SRE On-Call Investigator
+  description: Automated incident investigation - correlates alerts and posts incident reports in-thread.
+  background_color: "#1f2d3d"
+features:
+  bot_user:
+    display_name: sre-on-call
+    always_online: true
+  slash_commands:
+    - command: /postmortem
+      url: https://your-function-url.lambda-url.us-east-1.on.aws/
+      description: Generate a Post-Incident Report from the current incident thread
+      usage_hint: run inside an incident thread
+      should_escape: false
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read   # receive the app_mention that triggers an investigation
+      - chat:write          # post the incident report / PIR back in-thread
+      - channels:history    # scanner reads history of public channels the bot is in
+      - groups:history      # scanner reads history of private channels the bot is in
+      - commands            # required for the /postmortem slash command
+settings:
+  event_subscriptions:
+    request_url: https://your-function-url.lambda-url.us-east-1.on.aws/
+    bot_events:
+      - app_mention
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false
