@@ -77,7 +77,8 @@ All agents run on AWS Bedrock AgentCore Runtime, communicate via the A2A protoco
 │   ├── tool_result.py
 │   ├── experiment.py
 │   ├── experiment_store.py
-│   └── experiment_results_store.py
+│   ├── experiment_results_store.py
+│   └── trace_store.py              # S3 + DDB per-investigation trace archive (fail-open)
 ├── tests/                          # Cross-cutting / shared unit tests
 │   ├── integration/                # Handler, orchestrator, A2A factory, synthetic webhook
 │   └── property/                   # Hypothesis property-based tests
@@ -92,10 +93,13 @@ All agents run on AWS Bedrock AgentCore Runtime, communicate via the A2A protoco
 │   ├── lambda.tf                   # Lambda function + URL
 │   ├── iam.tf                      # Lambda + agent IAM roles
 │   ├── iam_agentcore.tf            # AgentCore-specific IAM
-│   └── agentcore.tf                # 5 aws_bedrockagentcore_agent_runtime resources
+│   ├── agentcore.tf                # 5 aws_bedrockagentcore_agent_runtime resources
+│   ├── traces.tf                   # S3 trace bucket + DDB index + KMS CMK + IAM grants
+│   └── observability.tf            # CloudWatch alarms + SNS topic for AgentCore
 ├── scripts/
 │   ├── build_and_push_agents.sh    # Build 5 linux/arm64 images and push to ECR
 │   ├── hydrate_secrets.sh          # Push Slack/Discord secret values
+│   ├── enable_observability.sh     # One-time CloudWatch Transaction Search enablement
 │   └── synthetic_slack_webhook.py  # Send a signed synthetic alert to the Lambda URL
 ├── docs/
 │   ├── README.md                   # Docs index
@@ -206,6 +210,8 @@ These are set on the Lambda function and the AgentCore runtimes by Terraform; yo
 | `DEDUP_TABLE_NAME` | Lambda | DynamoDB deduplication table name |
 | `EXPERIMENTS_TABLE_NAME` | Lambda | DynamoDB A/B experiment config table name |
 | `MASTER_AGENT_RUNTIME_ARN` | Lambda | AgentCore runtime ARN of the master agent |
+| `TRACES_BUCKET_NAME` | Lambda, Master | S3 bucket for per-investigation trace archive (optional — unset disables tracing) |
+| `TRACES_TABLE_NAME` | Lambda, Master | DynamoDB index table for trace archive lookups |
 | `SLACK_SCANNER_AGENT_RUNTIME_ARN` | Master | AgentCore runtime ARN of the Slack Scanner |
 | `DISCORD_SCANNER_AGENT_RUNTIME_ARN` | Master | AgentCore runtime ARN of the Discord Scanner |
 | `CLOUDWATCH_LOGS_AGENT_RUNTIME_ARN` | Master | AgentCore runtime ARN of CloudWatch Logs |

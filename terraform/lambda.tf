@@ -128,6 +128,8 @@ resource "aws_lambda_function" "lambda_adapter" {
       DEDUP_TABLE_NAME         = aws_dynamodb_table.dedup.name
       EXPERIMENTS_TABLE_NAME   = aws_dynamodb_table.experiments.name
       MASTER_AGENT_RUNTIME_ARN = aws_bedrockagentcore_agent_runtime.master.agent_runtime_arn
+      TRACES_BUCKET_NAME       = aws_s3_bucket.traces.bucket
+      TRACES_TABLE_NAME        = aws_dynamodb_table.traces.name
     }
   }
 

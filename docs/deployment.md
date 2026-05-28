@@ -93,6 +93,63 @@ AWS_PROFILE=<profile> aws bedrock-agentcore-control get-agent-runtime \
 
 Then run the synthetic webhook (see `docs/testing.md`).
 
+### 8. Enable AgentCore Observability (one-time, account/region)
+
+CloudWatch Transaction Search is account-scoped and is not managed by Terraform — `scripts/enable_observability.sh` makes the three required API calls idempotently:
+
+```bash
+AWS_PROFILE=<profile> ./scripts/enable_observability.sh us-east-1 1
+```
+
+The two arguments are region (default `us-east-1`) and span sampling percentage (default `1` — index 1% of spans at no cost). The script:
+
+- Puts the `AgentCoreTransactionSearchAccess` resource policy that lets X-Ray write to the `aws/spans` log group.
+- Sets the X-Ray trace segment destination to `CloudWatchLogs`.
+- Configures the indexing rule sampling rate.
+
+It can take up to 10 minutes after running before spans appear in the **GenAI Observability** page of the CloudWatch console (Log groups: `/aws/spans/default`).
+
+Skip this step if Transaction Search is already enabled in the target account+region for another project — it's a global toggle.
+
+The Terraform stack provisions three CloudWatch alarms over the `bedrock-agentcore` namespace and an SNS topic to fan them out (`terraform/observability.tf`). Set `alarm_email_subscriptions` in `terraform.tfvars` if you want email notifications:
+
+```hcl
+alarm_email_subscriptions = ["sre-pager@example.com"]
+```
+
+Without subscriptions, the topic is still created — subscribe additional protocols (Slack via Lambda, PagerDuty, etc.) directly to the topic ARN exported as `agentcore_alarms_topic_arn`.
+
+## Trace archive
+
+Every investigation writes a trace bundle to the `${project}-${env}-traces-${account_id}` S3 bucket (KMS-encrypted with a project-owned CMK). The DynamoDB `${project}-traces` table holds a thin lookup index keyed by `investigation_id`. See `shared/trace_store.py` for the full schema.
+
+S3 layout:
+
+```
+dt=YYYY-MM-DD/investigation_id=<uuid>/
+    manifest.json
+    events/<ts>-<source>-<event_type>-<uuid8>.json
+```
+
+Common queries:
+
+```bash
+# Open the manifest for a known investigation:
+AWS_PROFILE=<profile> aws s3 cp \
+    "s3://sre-on-call-dev-traces-<account>/dt=2026-05-28/investigation_id=<uuid>/manifest.json" -
+
+# Find all investigations for a Slack channel in the last week (DDB GSI):
+AWS_PROFILE=<profile> aws dynamodb query \
+    --table-name sre-on-call-traces \
+    --index-name channel_id-alert_timestamp-index \
+    --key-condition-expression "channel_id = :c" \
+    --expression-attribute-values '{":c":{"S":"C12345"}}'
+```
+
+Trace writes are **fail-open** — if S3 or DynamoDB is unavailable, the investigation continues and the failure is logged. Setting either env var to empty disables tracing for that component (Lambda or master).
+
+Lifecycle: objects transition to STANDARD_IA at 30 days and expire at `var.trace_archive_retention_days` (default 365). DDB index entries expire after 90 days via the `ttl` attribute.
+
 ## Re-deploy after a code change
 
 For agent code changes:

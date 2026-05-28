@@ -209,10 +209,12 @@ resource "aws_bedrockagentcore_agent_runtime" "master" {
 
   environment_variables = merge(
     {
-      AWS_REGION        = var.aws_region
-      MODEL_ID          = var.model_id
-      SLACK_BOT_TOKEN   = aws_secretsmanager_secret.slack_bot_token.arn
-      DISCORD_BOT_TOKEN = aws_secretsmanager_secret.discord_bot_token.arn
+      AWS_REGION         = var.aws_region
+      MODEL_ID           = var.model_id
+      SLACK_BOT_TOKEN    = aws_secretsmanager_secret.slack_bot_token.arn
+      DISCORD_BOT_TOKEN  = aws_secretsmanager_secret.discord_bot_token.arn
+      TRACES_BUCKET_NAME = aws_s3_bucket.traces.bucket
+      TRACES_TABLE_NAME  = aws_dynamodb_table.traces.name
     },
     local.agent_enabled["slack_scanner"] ? {
       SLACK_SCANNER_AGENT_RUNTIME_ARN = aws_bedrockagentcore_agent_runtime.slack_scanner[0].agent_runtime_arn

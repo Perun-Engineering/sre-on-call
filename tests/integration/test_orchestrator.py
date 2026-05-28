@@ -1043,3 +1043,163 @@ class TestDisabledInConfigPropagation:
         assert "EKS Cluster State" in started
         assert "CloudWatch Logs" in started
         assert "Slack Scanner" not in started
+
+
+# ---------------------------------------------------------------------------
+# Trace archive — verify the orchestrator writes A2A round-trip events and
+# the end-of-investigation manifest when a TraceStore is configured.
+# ---------------------------------------------------------------------------
+
+
+import json as _json
+
+import boto3
+from moto import mock_aws
+
+from shared.trace_store import (
+    EVENT_A2A_REQUEST,
+    EVENT_A2A_RESPONSE,
+    EVENT_INVESTIGATION_TERMINATED,
+    TraceStore,
+)
+
+
+_TRACE_BUCKET = "test-orchestrator-traces"
+_TRACE_TABLE = "test-orchestrator-traces"
+
+
+def _make_trace_resources():
+    """Create a moto-mocked S3 bucket + DDB table for trace archive."""
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket=_TRACE_BUCKET)
+
+    ddb = boto3.resource("dynamodb", region_name="us-east-1")
+    ddb.create_table(
+        TableName=_TRACE_TABLE,
+        KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],
+        AttributeDefinitions=[{"AttributeName": "pk", "AttributeType": "S"}],
+        BillingMode="PAY_PER_REQUEST",
+    )
+    return s3, ddb
+
+
+class TestTraceArchive:
+    """The orchestrator emits trace events + a manifest when a TraceStore is wired in."""
+
+    @pytest.mark.asyncio
+    async def test_manifest_and_events_written_for_full_investigation(
+        self, alert_context
+    ):
+        with mock_aws():
+            s3, ddb = _make_trace_resources()
+            trace_store = TraceStore(
+                bucket=_TRACE_BUCKET,
+                table_name=_TRACE_TABLE,
+                s3_client=s3,
+                dynamodb_resource=ddb,
+            )
+
+            registry = _build_registry()
+            http_client = FakeHTTPClient()
+            chat_platform = FakeChatPlatform()
+            orch = InvestigationOrchestrator(
+                http_client=http_client,
+                chat_platform=chat_platform,
+                report_formatter=ReportFormatter(registry),
+                registry=registry,
+                trace_store=trace_store,
+            )
+            orch.INITIAL_DEADLINE_SECONDS = 0.1
+            orch.HARD_CUTOFF_SECONDS = 0.5
+
+            await orch.investigate(alert_context)
+
+            # Manifest should land under dt=YYYY-MM-DD/investigation_id=.../manifest.json
+            objs = s3.list_objects_v2(Bucket=_TRACE_BUCKET, Prefix="dt=")
+            keys = [o["Key"] for o in objs.get("Contents", [])]
+            assert any(
+                f"/investigation_id={alert_context.investigation_id}/manifest.json" in k
+                for k in keys
+            ), f"Manifest not written; got {keys}"
+
+            # A2A request + response events for each of the 3 active agents.
+            event_keys = [k for k in keys if "/events/" in k]
+            assert sum(EVENT_A2A_REQUEST in k for k in event_keys) == 3
+            assert sum(EVENT_A2A_RESPONSE in k for k in event_keys) == 3
+            assert sum(EVENT_INVESTIGATION_TERMINATED in k for k in event_keys) == 1
+
+            # DDB index entry written.
+            item = ddb.Table(_TRACE_TABLE).get_item(
+                Key={"pk": alert_context.investigation_id}
+            ).get("Item")
+            assert item is not None
+            assert item["status"] == "completed"
+            assert item["agent_count"] == 3
+            assert item["error_count"] == 0
+            assert item["channel_id"] == alert_context.channel_id
+
+    @pytest.mark.asyncio
+    async def test_manifest_status_partial_when_some_agents_fail(
+        self, alert_context
+    ):
+        """Mixed success/error fan-out yields ``status: partial`` in the manifest."""
+        with mock_aws():
+            s3, ddb = _make_trace_resources()
+            trace_store = TraceStore(
+                bucket=_TRACE_BUCKET,
+                table_name=_TRACE_TABLE,
+                s3_client=s3,
+                dynamodb_resource=ddb,
+            )
+
+            # eks errors; slack and cloudwatch succeed.
+            http_client = FakeHTTPClient(responses={
+                EKS_URL: {
+                    "jsonrpc": "2.0",
+                    "id": "x",
+                    "error": {"code": -32000, "message": "EKS unavailable"},
+                },
+            })
+            registry = _build_registry()
+            orch = InvestigationOrchestrator(
+                http_client=http_client,
+                chat_platform=FakeChatPlatform(),
+                report_formatter=ReportFormatter(registry),
+                registry=registry,
+                trace_store=trace_store,
+            )
+            orch.INITIAL_DEADLINE_SECONDS = 0.1
+            orch.HARD_CUTOFF_SECONDS = 0.5
+
+            await orch.investigate(alert_context)
+
+            item = ddb.Table(_TRACE_TABLE).get_item(
+                Key={"pk": alert_context.investigation_id}
+            )["Item"]
+            assert item["status"] == "partial"
+            assert item["error_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_no_traces_written_when_store_unset(self, alert_context):
+        """Default behaviour (no TraceStore + no env vars) writes no traces."""
+        with mock_aws():
+            # Bucket exists but neither env var nor explicit store — must skip.
+            s3 = boto3.client("s3", region_name="us-east-1")
+            s3.create_bucket(Bucket=_TRACE_BUCKET)
+
+            registry = _build_registry()
+            orch = InvestigationOrchestrator(
+                http_client=FakeHTTPClient(),
+                chat_platform=FakeChatPlatform(),
+                report_formatter=ReportFormatter(registry),
+                registry=registry,
+                # trace_store omitted; from_env() returns None (env vars
+                # cleared by the autouse _clean_env fixture above).
+            )
+            orch.INITIAL_DEADLINE_SECONDS = 0.1
+            orch.HARD_CUTOFF_SECONDS = 0.5
+
+            await orch.investigate(alert_context)
+
+            objs = s3.list_objects_v2(Bucket=_TRACE_BUCKET, Prefix="dt=")
+            assert objs.get("KeyCount", 0) == 0

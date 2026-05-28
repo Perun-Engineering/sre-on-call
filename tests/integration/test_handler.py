@@ -201,3 +201,130 @@ class TestHappyPath:
             result = lambda_handler(event, None)
             assert result["statusCode"] == 200
             assert json.loads(result["body"]).get("ok") is True
+
+
+# ---------------------------------------------------------------------------
+# Trace archive — verify the lambda_adapter writes the dedup_outcome and
+# alert_received events when the trace env vars are configured.
+# ---------------------------------------------------------------------------
+
+
+TRACES_BUCKET = "test-traces-bucket"
+TRACES_TABLE = "test-traces-table"
+
+
+def _create_traces_resources():
+    """Create a moto-mocked S3 bucket and DDB table for the trace archive."""
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket=TRACES_BUCKET)
+
+    ddb = boto3.resource("dynamodb", region_name="us-east-1")
+    ddb.create_table(
+        TableName=TRACES_TABLE,
+        KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],
+        AttributeDefinitions=[{"AttributeName": "pk", "AttributeType": "S"}],
+        BillingMode="PAY_PER_REQUEST",
+    )
+    return s3
+
+
+def _patched_boto3_client(mock_runtime):
+    """Build a side_effect that returns *mock_runtime* for the AgentCore
+    runtime client and the real moto-wrapped client for everything else.
+
+    The handler tests patch ``lambda_adapter.intake.boto3.client`` to fake
+    out the AgentCore invocation, but doing it unconditionally also
+    breaks anything else that constructs an S3 / DDB client during the
+    request — including :class:`shared.trace_store.TraceStore`. This
+    helper lets the patch fall through to moto for those services.
+    """
+    real = boto3.client
+
+    def _side_effect(service_name, *args, **kwargs):
+        if service_name == "bedrock-agentcore":
+            return mock_runtime
+        return real(service_name, *args, **kwargs)
+
+    return _side_effect
+
+
+class TestTraceArchive:
+    """The Lambda adapter writes to the trace archive when env vars are set."""
+
+    @mock_aws
+    def test_alert_received_and_dedup_outcome_written_for_new_alert(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("TRACES_BUCKET_NAME", TRACES_BUCKET)
+        monkeypatch.setenv("TRACES_TABLE_NAME", TRACES_TABLE)
+
+        _create_dedup_table()
+        s3 = _create_traces_resources()
+
+        payload = _slack_event_payload()
+        event = _build_event(payload)
+
+        mock_runtime = MagicMock()
+        with patch(
+            "lambda_adapter.intake.boto3.client",
+            side_effect=_patched_boto3_client(mock_runtime),
+        ):
+            result = lambda_handler(event, None)
+            assert result["statusCode"] == 200
+
+        objs = s3.list_objects_v2(Bucket=TRACES_BUCKET, Prefix="dt=")
+        keys = [o["Key"] for o in objs.get("Contents", [])]
+        assert any("alert_received" in k for k in keys), (
+            f"alert_received event not written; got {keys}"
+        )
+        assert any("dedup_outcome" in k for k in keys), (
+            f"dedup_outcome event not written; got {keys}"
+        )
+        # Master agent invocation must still have happened.
+        mock_runtime.invoke_agent_runtime.assert_called_once()
+
+    @mock_aws
+    def test_only_dedup_outcome_written_for_duplicate(self, monkeypatch):
+        monkeypatch.setenv("TRACES_BUCKET_NAME", TRACES_BUCKET)
+        monkeypatch.setenv("TRACES_TABLE_NAME", TRACES_TABLE)
+
+        _create_dedup_table()
+        s3 = _create_traces_resources()
+
+        payload = _slack_event_payload()
+
+        mock_runtime = MagicMock()
+        with patch(
+            "lambda_adapter.intake.boto3.client",
+            side_effect=_patched_boto3_client(mock_runtime),
+        ):
+            lambda_handler(_build_event(payload), None)
+            # Re-send the same payload — second call hits the dedup path.
+            lambda_handler(_build_event(payload), None)
+
+        objs = s3.list_objects_v2(Bucket=TRACES_BUCKET, Prefix="dt=")
+        keys = [o["Key"] for o in objs.get("Contents", [])]
+        # First call: alert_received + dedup_outcome (is_new=True).
+        # Second call: dedup_outcome only (is_new=False).
+        assert sum("alert_received" in k for k in keys) == 1
+        assert sum("dedup_outcome" in k for k in keys) == 2
+
+    @mock_aws
+    def test_intake_succeeds_when_traces_unconfigured(self, monkeypatch):
+        # Unset both — the intake must still write an HTTP 200 and
+        # invoke the master agent.
+        monkeypatch.delenv("TRACES_BUCKET_NAME", raising=False)
+        monkeypatch.delenv("TRACES_TABLE_NAME", raising=False)
+
+        _create_dedup_table()
+        payload = _slack_event_payload()
+        event = _build_event(payload)
+
+        mock_runtime = MagicMock()
+        with patch(
+            "lambda_adapter.intake.boto3.client",
+            side_effect=_patched_boto3_client(mock_runtime),
+        ):
+            result = lambda_handler(event, None)
+            assert result["statusCode"] == 200
+            mock_runtime.invoke_agent_runtime.assert_called_once()

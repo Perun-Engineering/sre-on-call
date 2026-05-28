@@ -31,6 +31,12 @@ from shared.platforms import (
     InvalidWebhook,
 )
 from shared.time_utils import now_iso
+from shared.trace_store import (
+    EVENT_ALERT_RECEIVED,
+    EVENT_DEDUP_OUTCOME,
+    SOURCE_LAMBDA,
+    TraceStore,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +122,20 @@ def _process_alert(alert_context: AlertContext) -> dict:
         investigation_id=alert_context.investigation_id,
         platform=alert_context.platform,
     )
+
+    # Trace archive (fail-open). Records the dedup decision for every
+    # alert and the full AlertContext for new investigations. Duplicates
+    # leave only a `dedup_outcome` event so postmortem tooling can see
+    # which messages were dropped.
+    trace_store = TraceStore.from_env()
+    if trace_store is not None:
+        trace_store.put_event(
+            investigation_id=alert_context.investigation_id,
+            source=SOURCE_LAMBDA,
+            event_type=EVENT_DEDUP_OUTCOME,
+            payload={"is_new": is_new},
+        )
+
     if not is_new:
         logger.info(
             "Duplicate alert discarded: channel=%s message_id=%s",
@@ -123,6 +143,14 @@ def _process_alert(alert_context: AlertContext) -> dict:
             alert_context.message_id,
         )
         return _http_response(200)
+
+    if trace_store is not None:
+        trace_store.put_event(
+            investigation_id=alert_context.investigation_id,
+            source=SOURCE_LAMBDA,
+            event_type=EVENT_ALERT_RECEIVED,
+            payload=asdict(alert_context),
+        )
 
     # Check for active A/B experiment
     experiment = None
