@@ -34,6 +34,15 @@ from shared.platforms import ChatPlatform, deliver_with_retry, for_platform
 from shared.experiment import ExperimentResult
 from shared.experiment_results_store import ExperimentResultsStore
 from shared.tool_result import extract_agent_result
+from shared.trace_store import (
+    EVENT_A2A_REQUEST,
+    EVENT_A2A_RESPONSE,
+    EVENT_INVESTIGATION_TERMINATED,
+    SOURCE_MASTER,
+    ResultSummary,
+    TraceManifest,
+    TraceStore,
+)
 from agents.master.report_formatter import ReportFormatter
 
 logger = logging.getLogger(__name__)
@@ -212,6 +221,7 @@ class InvestigationOrchestrator:
         report_formatter: ReportFormatter | None = None,
         registry: AgentRegistry | None = None,
         results_store: ExperimentResultsStore | None = None,
+        trace_store: TraceStore | None = None,
     ) -> None:
         self._chat_platform: ChatPlatform | None = chat_platform
         self._registry: AgentRegistry = registry or get_registry()
@@ -232,6 +242,10 @@ class InvestigationOrchestrator:
             http_client = AgentCoreClient() if any_arn else AiohttpClient()
         self.http_client: AsyncHTTPClient = http_client
         self._results_store = results_store
+        # Trace archive is opt-in via env vars; from_env() returns None when
+        # TRACES_BUCKET_NAME / TRACES_TABLE_NAME are unset (e.g. local dev,
+        # tests). All trace_store calls below must check for None.
+        self._trace_store = trace_store if trace_store is not None else TraceStore.from_env()
 
     @property
     def registry(self) -> AgentRegistry:
@@ -250,6 +264,7 @@ class InvestigationOrchestrator:
     async def investigate(self, alert_context: AlertContext) -> None:
         """Run the full investigation lifecycle."""
         start_time = asyncio.get_event_loop().time()
+        started_at_iso = now_iso()
         results: dict[str, AgentResult | AgentFailure] = {}
         initial_report_summary = ""
         platform = self._get_platform(alert_context)
@@ -373,6 +388,18 @@ class InvestigationOrchestrator:
                 alert_context, results, initial_report_summary, start_time,
             )
 
+        # --- Phase 7: finalize the trace archive (manifest + DDB index) ------
+        # Fail-open: an error here is logged inside the trace store and
+        # never raises into the surrounding investigation.
+        self._finalize_trace(
+            alert_context=alert_context,
+            results=results,
+            dispatched_agents=dispatched_agents,
+            pending_ids=pending_ids,
+            started_at_iso=started_at_iso,
+            start_time=start_time,
+        )
+
     # ------------------------------------------------------------------
     # Agent invocation
     # ------------------------------------------------------------------
@@ -420,10 +447,54 @@ class InvestigationOrchestrator:
     ) -> AgentResult:
         """Invoke an agent, catching exceptions and returning an error result."""
         started_at = now_iso()
+        endpoint = self.agent_endpoints.get(agent_id, "")
+
+        # Trace: write the outbound A2A request envelope so postmortem
+        # tooling can replay this agent in isolation.
+        if self._trace_store is not None:
+            self._trace_store.put_event(
+                investigation_id=alert_context.investigation_id,
+                source=SOURCE_MASTER,
+                event_type=EVENT_A2A_REQUEST,
+                payload={
+                    "agent_id": agent_id,
+                    "endpoint": endpoint,
+                    "started_at": started_at,
+                },
+            )
+
         try:
-            return await self.invoke_agent(agent_id, alert_context)
+            result = await self.invoke_agent(agent_id, alert_context)
+            if self._trace_store is not None:
+                self._trace_store.put_event(
+                    investigation_id=alert_context.investigation_id,
+                    source=SOURCE_MASTER,
+                    event_type=EVENT_A2A_RESPONSE,
+                    payload={
+                        "agent_id": agent_id,
+                        "duration_seconds": result.duration_seconds,
+                        "status": result.status,
+                        "findings_count": len(result.findings),
+                        "summary": result.summary,
+                    },
+                )
+            return result
         except Exception as exc:
             logger.exception("Agent %s invocation failed", agent_id)
+            if self._trace_store is not None:
+                self._trace_store.put_event(
+                    investigation_id=alert_context.investigation_id,
+                    source=SOURCE_MASTER,
+                    event_type=EVENT_A2A_RESPONSE,
+                    payload={
+                        "agent_id": agent_id,
+                        "status": "error",
+                        "error": {
+                            "type": type(exc).__name__,
+                            "message": str(exc),
+                        },
+                    },
+                )
             return AgentResult(
                 agent_name=agent_id,
                 status="error",
@@ -463,6 +534,92 @@ class InvestigationOrchestrator:
                 alert_context.investigation_id,
                 alert_context.variant_id,
             )
+
+    def _finalize_trace(
+        self,
+        *,
+        alert_context: AlertContext,
+        results: dict[str, AgentResult | AgentFailure],
+        dispatched_agents: list[str],
+        pending_ids: set[str],
+        started_at_iso: str,
+        start_time: float,
+    ) -> None:
+        """Emit the investigation_terminated event + write the manifest.
+
+        Fail-open. ``self._trace_store`` may be ``None`` (tracing
+        disabled); both writes inside :class:`TraceStore` are themselves
+        wrapped in try/except, so this method should never raise.
+        """
+        if self._trace_store is None:
+            return
+
+        ended_at_iso = now_iso()
+        total_duration = asyncio.get_event_loop().time() - start_time
+
+        # Emit a terminating event so the events folder has a tombstone
+        # even if the manifest write fails. ``pending_ids`` is the set of
+        # agents that didn't return before the hard cutoff.
+        self._trace_store.put_event(
+            investigation_id=alert_context.investigation_id,
+            source=SOURCE_MASTER,
+            event_type=EVENT_INVESTIGATION_TERMINATED,
+            payload={
+                "pending_agents": sorted(pending_ids),
+                "elapsed_seconds": total_duration,
+            },
+        )
+
+        # Build the per-agent rollup. Anything in `results` that's not an
+        # AgentResult is an AgentFailure (timeout / cancellation); count
+        # it as an error in the manifest.
+        results_summary: dict[str, ResultSummary] = {}
+        error_count = 0
+        for aid in dispatched_agents:
+            r = results.get(aid)
+            if isinstance(r, AgentResult):
+                if r.status != "success":
+                    error_count += 1
+                results_summary[aid] = ResultSummary(
+                    status=r.status,
+                    findings_count=len(r.findings),
+                    duration_seconds=r.duration_seconds,
+                )
+            elif isinstance(r, AgentFailure):
+                error_count += 1
+                results_summary[aid] = ResultSummary(
+                    status="error",
+                    findings_count=0,
+                    duration_seconds=0.0,
+                )
+            else:
+                # Pending — never returned before the hard cutoff.
+                error_count += 1
+                results_summary[aid] = ResultSummary(
+                    status="timeout",
+                    findings_count=0,
+                    duration_seconds=0.0,
+                )
+
+        if error_count == 0:
+            status = "completed"
+        elif error_count == len(dispatched_agents):
+            status = "failed"
+        else:
+            status = "partial"
+
+        manifest = TraceManifest(
+            investigation_id=alert_context.investigation_id,
+            alert_context=asdict(alert_context),
+            started_at=started_at_iso,
+            ended_at=ended_at_iso,
+            total_duration_seconds=total_duration,
+            dispatched_agents=list(dispatched_agents),
+            results_summary=results_summary,
+            status=status,
+            error_count=error_count,
+        )
+        self._trace_store.put_manifest(manifest)
 
     @staticmethod
     def _collect_done(
