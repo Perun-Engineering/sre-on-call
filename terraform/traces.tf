@@ -131,9 +131,16 @@ resource "aws_dynamodb_table" "traces" {
 
   global_secondary_index {
     name            = "channel_id-alert_timestamp-index"
-    hash_key        = "channel_id"
-    range_key       = "alert_timestamp"
     projection_type = "ALL"
+
+    key_schema {
+      attribute_name = "channel_id"
+      key_type       = "HASH"
+    }
+    key_schema {
+      attribute_name = "alert_timestamp"
+      key_type       = "RANGE"
+    }
   }
 
   ttl {
