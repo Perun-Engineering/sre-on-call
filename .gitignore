@@ -9,3 +9,5 @@ __pycache__/
 .kiro/
 CLAUDE.local.md
 docs/superpowers/
+docs/slack-app/manifest.local.yaml
+
