@@ -1,16 +1,24 @@
-"""Master Agent tool — bridges the LLM to the deterministic orchestrator.
+"""Master Agent tools — bridge the LLM to the deterministic orchestrators.
 
-A single async tool wraps :class:`InvestigationOrchestrator`. The fan-out
-target list is derived from the :class:`shared.agents.AgentRegistry`'s
-``active(kind="specialized")`` view — i.e. specialized agents listed in
-``config.yaml`` with ``enabled: true``. There is no ``ENABLED_AGENTS``
-allowlist; operators control fan-out by editing ``config.yaml``.
+Two async tools wrap the master's two orchestration paths:
 
-The tool kicks off the investigation as a background asyncio task and
-returns immediately so the upstream Lambda invoker isn't held open for
-the full 5-minute orchestrator lifecycle. Strands A2AServer is a
-long-running uvicorn process, so background tasks keep running across
-requests until AgentCore tears the container down.
+* :func:`investigate_alert` — full incident investigation lifecycle, fanning
+  out to active specialized agents and posting an Incident Report.
+* :func:`capture_status_snapshot` — read-only ``/status`` snapshot, fanning
+  out a snapshot request and posting a :class:`SnapshotSections` payload at
+  top-level.
+
+Both tools kick off their orchestration as background asyncio tasks and
+return immediately so the upstream Lambda invoker isn't held open for the
+full lifecycle. Strands A2AServer is a long-running uvicorn process, so
+background tasks keep running across requests until AgentCore tears the
+container down.
+
+The fan-out target lists are derived from the
+:class:`shared.agents.AgentRegistry`'s ``active(kind="specialized")`` view —
+i.e. specialized agents listed in ``config.yaml`` with ``enabled: true``.
+There is no ``ENABLED_AGENTS`` allowlist; operators control fan-out by
+editing ``config.yaml``.
 """
 
 from __future__ import annotations
@@ -22,6 +30,7 @@ import logging
 from strands import tool
 
 from agents.master.orchestrator import InvestigationOrchestrator
+from agents.master.snapshot_orchestrator import StatusSnapshotOrchestrator
 from shared.models import AlertContext
 
 logger = logging.getLogger(__name__)
@@ -93,4 +102,59 @@ async def investigate_alert(alert_context_json: str) -> str:
         f"Investigation {alert_context.investigation_id} started "
         f"(fan-out: {', '.join(enabled_agents)}). "
         f"Results will be posted to chat as agents respond."
+    )
+
+
+@tool
+async def capture_status_snapshot(snapshot_request_json: str) -> str:
+    """Run the ``/status`` snapshot lifecycle for an operator.
+
+    Fans out a snapshot A2A request to every active specialized agent (per
+    the registry's view of ``config.yaml``), aggregates the
+    :class:`shared.models.SnapshotReport` results under a 30-second hard
+    cutoff, and posts a :class:`shared.report_renderer.SnapshotSections`
+    payload to the originating chat platform at top-level (not as a thread
+    reply). The return string is a status line for the LLM and is not
+    user-visible.
+
+    Args:
+        snapshot_request_json: The verbatim JSON payload received in the A2A
+            ``message/send`` text part. Must be an object with ``task =
+            "snapshot"``, plus ``platform``, ``channel_id``, ``user_id``,
+            and ``requested_at``.
+
+    Returns:
+        A short status string describing how the snapshot was dispatched.
+    """
+    payload = json.loads(snapshot_request_json)
+    task_kind = payload.get("task")
+    if task_kind != "snapshot":
+        msg = (
+            f"capture_status_snapshot received unexpected task={task_kind!r}; "
+            f"expected 'snapshot'."
+        )
+        logger.error(msg)
+        return msg
+
+    requested_at = payload.get("requested_at", "")
+    orchestrator = StatusSnapshotOrchestrator()
+    enabled_agents = sorted(orchestrator.agent_endpoints.keys())
+
+    logger.info(
+        "Starting status snapshot at requested_at=%s, fan-out=%s",
+        requested_at,
+        enabled_agents,
+    )
+    bg_task = asyncio.create_task(
+        orchestrator.capture(payload),
+        name=f"snapshot-{requested_at or 'now'}",
+    )
+    # Hold a strong reference so the loop doesn't GC the task mid-flight.
+    _BACKGROUND_TASKS.add(bg_task)
+    bg_task.add_done_callback(_BACKGROUND_TASKS.discard)
+
+    return (
+        f"Status snapshot started "
+        f"(fan-out: {', '.join(enabled_agents) or 'no active specialized agents'}). "
+        f"Result will be posted to chat once collected."
     )

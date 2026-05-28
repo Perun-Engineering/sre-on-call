@@ -6,13 +6,26 @@ import json
 import re
 from dataclasses import asdict, dataclass, field, fields
 
-from shared.models import AgentMetadata, AgentResult, Finding
+from shared.models import (
+    AgentMetadata,
+    AgentResult,
+    Finding,
+    SnapshotReport,
+    SnapshotSection,
+)
 
 _MAX_CONTENT_LENGTH: int = 200
 AGENT_RESULT_PREFIX = "<<<AGENT_RESULT "
 AGENT_RESULT_SUFFIX = " AGENT_RESULT>>>"
 _AGENT_RESULT_RE = re.compile(
     re.escape(AGENT_RESULT_PREFIX) + r"(.*?)" + re.escape(AGENT_RESULT_SUFFIX),
+    re.DOTALL,
+)
+
+SNAPSHOT_RESULT_PREFIX = "<<<SNAPSHOT_RESULT "
+SNAPSHOT_RESULT_SUFFIX = " SNAPSHOT_RESULT>>>"
+_SNAPSHOT_RESULT_RE = re.compile(
+    re.escape(SNAPSHOT_RESULT_PREFIX) + r"(.*?)" + re.escape(SNAPSHOT_RESULT_SUFFIX),
     re.DOTALL,
 )
 
@@ -169,3 +182,89 @@ def _finding_from_dict(payload: dict) -> Finding:
 def _metadata_from_dict(payload: dict) -> AgentMetadata:
     valid_keys = {f.name for f in fields(AgentMetadata)}
     return AgentMetadata(**{k: v for k, v in payload.items() if k in valid_keys})
+
+
+# ---------------------------------------------------------------------------
+# SnapshotReport transport — parallel to AgentResult, used by /status path
+# ---------------------------------------------------------------------------
+
+
+def format_snapshot_result(report: SnapshotReport) -> str:
+    """Produce a human-readable snapshot summary string with embedded footer.
+
+    The string is what the agent's ``capture_snapshot`` tool returns. The
+    master orchestrator extracts the structured :class:`SnapshotReport` via
+    :func:`extract_snapshot_report` from the trailing
+    ``<<<SNAPSHOT_RESULT ... SNAPSHOT_RESULT>>>`` block.
+    """
+    lines: list[str] = [
+        f"Snapshot of {report.agent_name} captured at {report.captured_at}",
+    ]
+    if report.anomaly:
+        lines.append(f"⚠️ {report.anomaly_summary or 'anomaly detected'}")
+    for section in report.sections:
+        lines.append("")
+        lines.append(f"{section.label}:")
+        if section.lines:
+            for entry in section.lines:
+                lines.append(f"  - {entry}")
+        else:
+            lines.append("  (no data)")
+    return "\n".join(lines) + "\n\n" + encode_snapshot_report(report)
+
+
+def encode_snapshot_report(report: SnapshotReport) -> str:
+    """Serialise a :class:`SnapshotReport` for appending to an agent text response."""
+    payload = json.dumps(asdict(report), separators=(",", ":"))
+    return f"{SNAPSHOT_RESULT_PREFIX}{payload}{SNAPSHOT_RESULT_SUFFIX}"
+
+
+def extract_snapshot_report(text: str) -> tuple[str, SnapshotReport | None]:
+    """Strip and decode an embedded :class:`SnapshotReport` from *text* if present.
+
+    Returns ``(cleaned_text, report)``. ``report`` is ``None`` when the
+    footer is absent or malformed; ``cleaned_text`` is *text* with the
+    footer block removed and trailing whitespace trimmed.
+    """
+    match = _SNAPSHOT_RESULT_RE.search(text)
+    if match is None:
+        return text, None
+
+    cleaned = _SNAPSHOT_RESULT_RE.sub("", text).strip()
+    try:
+        payload = json.loads(match.group(1))
+        return cleaned, _snapshot_report_from_dict(payload)
+    except (TypeError, ValueError, KeyError, json.JSONDecodeError):
+        return cleaned, None
+
+
+def find_snapshot_report_footer(text: str) -> str | None:
+    """Return the raw embedded :class:`SnapshotReport` footer from *text*, if present."""
+    match = _SNAPSHOT_RESULT_RE.search(text)
+    return match.group(0) if match is not None else None
+
+
+def _snapshot_report_from_dict(payload: dict) -> SnapshotReport:
+    sections = [
+        SnapshotSection(
+            label=str(item["label"]),
+            lines=[str(line) for line in item.get("lines", [])],
+        )
+        for item in payload.get("sections", [])
+        if isinstance(item, dict)
+    ]
+    metadata_payload = payload.get("metadata")
+    metadata = (
+        _metadata_from_dict(metadata_payload)
+        if isinstance(metadata_payload, dict)
+        else AgentMetadata()
+    )
+    anomaly_summary = payload.get("anomaly_summary")
+    return SnapshotReport(
+        agent_name=str(payload["agent_name"]),
+        captured_at=str(payload["captured_at"]),
+        sections=sections,
+        anomaly=bool(payload.get("anomaly", False)),
+        anomaly_summary=str(anomaly_summary) if anomaly_summary is not None else None,
+        metadata=metadata,
+    )

@@ -9,24 +9,28 @@ agents:
   master:
     skills:
       - investigate_alert
+      - capture_status_snapshot
     mcps: []
 
   slack_scanner:
     enabled: true
     skills:
       - scan_slack_channels
+      - capture_snapshot
     mcps: []
 
   discord_scanner:
     enabled: false
     skills:
       - scan_discord_channels
+      - capture_snapshot
     mcps: []
 
   cloudwatch_logs:
     enabled: true
     skills:
       - query_cloudwatch_logs
+      - capture_snapshot
     mcps:
       - name: aws_docs
         transport: streamable_http
@@ -38,4 +42,5 @@ agents:
     network_mode: VPC
     skills:
       - gather_eks_state
+      - capture_snapshot
     mcps: []

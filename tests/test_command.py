@@ -319,6 +319,146 @@ class TestCommandRouting:
 
 
 # ---------------------------------------------------------------------------
+# /status command routing
+# ---------------------------------------------------------------------------
+
+
+class TestStatusCommandRouting:
+    """Lambda intake handling for the operator-driven /status command."""
+
+    def test_status_command_acks_and_invokes_agent(self):
+        body = _build_slack_command_body(command="/status", thread_ts=None)
+        event = _build_command_event(body)
+
+        with patch.object(
+            SlackChatPlatform, "ack",
+        ) as mock_ack, patch("lambda_adapter.intake.boto3.client") as mock_client:
+            mock_runtime = MagicMock()
+            mock_client.return_value = mock_runtime
+
+            result = lambda_handler(event, None)
+
+            assert result["statusCode"] == 200
+            mock_ack.assert_called_once()
+            ack_text = mock_ack.call_args[0][1]
+            assert "snapshot" in ack_text.lower()
+            mock_runtime.invoke_agent_runtime.assert_called_once()
+
+    def test_status_command_does_not_require_thread(self):
+        """Unlike /postmortem, /status is fine without thread context — it's
+        an operational broadcast, not an incident-thread reply."""
+        body = _build_slack_command_body(command="/status", thread_ts=None)
+        event = _build_command_event(body)
+
+        with patch.object(
+            SlackChatPlatform, "ack",
+        ) as mock_ack, patch("lambda_adapter.intake.boto3.client") as mock_client:
+            mock_runtime = MagicMock()
+            mock_client.return_value = mock_runtime
+
+            lambda_handler(event, None)
+
+            ack_text = mock_ack.call_args[0][1]
+            # No "use inside an incident thread" warning
+            assert "thread" not in ack_text.lower()
+            mock_runtime.invoke_agent_runtime.assert_called_once()
+
+    def test_status_payload_carries_task_snapshot_and_required_fields(self):
+        body = _build_slack_command_body(
+            command="/status",
+            channel_id="C99999",
+            user_id="U22222",
+            thread_ts=None,
+        )
+        event = _build_command_event(body)
+
+        with patch.object(
+            SlackChatPlatform, "ack",
+        ), patch("lambda_adapter.intake.boto3.client") as mock_client:
+            mock_runtime = MagicMock()
+            mock_client.return_value = mock_runtime
+
+            lambda_handler(event, None)
+
+            call_kwargs = mock_runtime.invoke_agent_runtime.call_args[1]
+            envelope = json.loads(call_kwargs["payload"].decode("utf-8"))
+            payload = json.loads(envelope["params"]["message"]["parts"][0]["text"])
+            assert payload["task"] == "snapshot"
+            assert payload["platform"] == "slack"
+            assert payload["channel_id"] == "C99999"
+            assert payload["user_id"] == "U22222"
+            assert "requested_at" in payload
+            # ISO 8601 with timezone
+            assert "T" in payload["requested_at"]
+            # No thread_ts in the payload — /status doesn't carry that
+            assert "thread_ts" not in payload
+
+    def test_status_runtime_session_id_includes_channel_and_requested_at(self):
+        body = _build_slack_command_body(
+            command="/status",
+            channel_id="C77777",
+            thread_ts=None,
+        )
+        event = _build_command_event(body)
+
+        with patch.object(
+            SlackChatPlatform, "ack",
+        ), patch("lambda_adapter.intake.boto3.client") as mock_client:
+            mock_runtime = MagicMock()
+            mock_client.return_value = mock_runtime
+
+            lambda_handler(event, None)
+
+            call_kwargs = mock_runtime.invoke_agent_runtime.call_args[1]
+            session_id = call_kwargs["runtimeSessionId"]
+            assert session_id.startswith("snapshot-C77777-")
+            # Distinct sessions on every invocation — reuse the requested_at
+            # in session id so retried/re-run /status calls don't collide.
+            assert len(session_id) > len("snapshot-C77777-")
+
+    def test_status_command_does_not_invoke_pir_path(self):
+        """/status path must NOT generate a PIR payload, even if a thread_ts
+        happens to be present (Slack sometimes includes it). The dispatcher
+        is keyed on command name, not thread context."""
+        body = _build_slack_command_body(
+            command="/status", thread_ts="1700000000.000100",
+        )
+        event = _build_command_event(body)
+
+        with patch.object(
+            SlackChatPlatform, "ack",
+        ), patch("lambda_adapter.intake.boto3.client") as mock_client:
+            mock_runtime = MagicMock()
+            mock_client.return_value = mock_runtime
+
+            lambda_handler(event, None)
+
+            call_kwargs = mock_runtime.invoke_agent_runtime.call_args[1]
+            envelope = json.loads(call_kwargs["payload"].decode("utf-8"))
+            payload = json.loads(envelope["params"]["message"]["parts"][0]["text"])
+            assert payload["task"] == "snapshot"
+            # Critical: not a PIR payload
+            assert payload["task"] != "pir"
+
+    def test_postmortem_path_isolated_from_status_changes(self):
+        """Sanity: /postmortem still requires thread + still sends task=pir."""
+        body = _build_slack_command_body(command="/postmortem", thread_ts=None)
+        event = _build_command_event(body)
+
+        with patch.object(
+            SlackChatPlatform, "ack",
+        ) as mock_ack, patch("lambda_adapter.intake.boto3.client") as mock_client:
+            mock_runtime = MagicMock()
+            mock_client.return_value = mock_runtime
+
+            lambda_handler(event, None)
+
+            ack_text = mock_ack.call_args[0][1]
+            assert "inside an incident thread" in ack_text
+            mock_runtime.invoke_agent_runtime.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # PIR formatting
 # ---------------------------------------------------------------------------
 

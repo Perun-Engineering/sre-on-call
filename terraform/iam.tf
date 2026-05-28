@@ -196,6 +196,64 @@ resource "aws_iam_role_policy" "master_agent_a2a_invoke" {
   })
 }
 
+# Read AgentCore runtime status for the master's section in the /status
+# snapshot ("READY" / "CREATING" / "FAILED" / etc. per deployed runtime).
+# Same resource set as the a2a-invoke policy so the master can introspect
+# every runtime it is allowed to call.
+resource "aws_iam_role_policy" "master_agent_agentcore_read" {
+  count = anytrue([for v in local.agent_enabled : v]) ? 1 : 0
+
+  name = "agentcore-runtime-read"
+  role = aws_iam_role.master_agent.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "ReadAgentRuntimeStatus"
+        Effect = "Allow"
+        Action = [
+          "bedrock-agentcore:GetAgentRuntime",
+        ]
+        Resource = flatten([
+          for arn in concat(
+            local.agent_enabled["slack_scanner"] ? [aws_bedrockagentcore_agent_runtime.slack_scanner[0].agent_runtime_arn] : [],
+            local.agent_enabled["discord_scanner"] ? [aws_bedrockagentcore_agent_runtime.discord_scanner[0].agent_runtime_arn] : [],
+            local.agent_enabled["cloudwatch_logs"] ? [aws_bedrockagentcore_agent_runtime.cloudwatch_logs[0].agent_runtime_arn] : [],
+            local.agent_enabled["eks"] ? [aws_bedrockagentcore_agent_runtime.eks[0].agent_runtime_arn] : [],
+          ) : [arn, "${arn}/*"]
+        ])
+      }
+    ]
+  })
+}
+
+# DynamoDB reachability check for the master's section in the /status
+# snapshot. DescribeTable is read-only and surfaces TableStatus so the
+# operator can see "ACTIVE" / "UPDATING" / etc. without granting any
+# data-plane permissions on these tables to the master role.
+resource "aws_iam_role_policy" "master_agent_dynamodb_describe" {
+  name = "dynamodb-describe"
+  role = aws_iam_role.master_agent.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "DescribeStateTablesForStatus"
+        Effect = "Allow"
+        Action = [
+          "dynamodb:DescribeTable"
+        ]
+        Resource = [
+          aws_dynamodb_table.dedup.arn,
+          aws_dynamodb_table.experiments.arn,
+        ]
+      }
+    ]
+  })
+}
+
 resource "aws_iam_role_policy" "master_agent_secrets" {
   name = "secrets-access"
   role = aws_iam_role.master_agent.id
@@ -384,6 +442,31 @@ resource "aws_iam_role_policy" "cloudwatch_logs_agent_logs" {
           "logs:DescribeLogGroups"
         ]
         Resource = "arn:aws:logs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:log-group:*"
+      }
+    ]
+  })
+}
+
+# Read CloudWatch metrics for the /status snapshot (top log groups by
+# IncomingBytes in the last 15 min). The cloudwatch:GetMetricData action
+# does NOT support resource-level permissions per the AWS service docs —
+# this is the AWS-recommended way to grant it.
+resource "aws_iam_role_policy" "cloudwatch_logs_agent_metrics" {
+  count = local.agent_enabled["cloudwatch_logs"] ? 1 : 0
+
+  name = "cloudwatch-metrics-read"
+  role = aws_iam_role.cloudwatch_logs_agent[0].id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "GetMetricDataForLogVolumeRanking"
+        Effect = "Allow"
+        Action = [
+          "cloudwatch:GetMetricData"
+        ]
+        Resource = "*"
       }
     ]
   })

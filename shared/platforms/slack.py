@@ -37,6 +37,7 @@ from shared.report_renderer import (
     PIRSections,
     ReportSections,
     SlackReportRenderer,
+    SnapshotSections,
 )
 from shared.secrets import resolve_secret
 
@@ -217,6 +218,8 @@ class SlackChatPlatform:
             return self._renderer.render_investigation_started(payload)
         if isinstance(payload, PIRSections):
             return self._renderer.render_pir(payload)
+        if isinstance(payload, SnapshotSections):
+            return self._renderer.render_snapshot(payload)
         raise TypeError(
             f"Unsupported deliver payload: {type(payload).__name__}"
         )
@@ -228,8 +231,13 @@ class SlackChatPlatform:
             "thread_ts", alert_context.message_id
         )
         client = AsyncWebClient(token=self._bot_token)
-        await client.chat_postMessage(
-            channel=alert_context.channel_id,
-            thread_ts=thread_ts,
-            text=text,
-        )
+        kwargs: dict = {
+            "channel": alert_context.channel_id,
+            "text": text,
+        }
+        # Empty thread_ts means "post at top-level" — used by /status snapshots,
+        # which are operational broadcasts, not thread replies. The Slack API
+        # rejects ``thread_ts=""`` so we omit the kwarg entirely in that case.
+        if thread_ts:
+            kwargs["thread_ts"] = thread_ts
+        await client.chat_postMessage(**kwargs)

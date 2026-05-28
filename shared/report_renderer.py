@@ -11,8 +11,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
+from shared.models import SnapshotSection
+
 EvidenceStatus = Literal["ok", "pending", "error", "disabled"]
 EnrichmentStatus = Literal["ok", "error"]
+SnapshotStatus = Literal["ok", "anomaly", "error", "disabled"]
 
 
 @dataclass
@@ -84,6 +87,40 @@ class PIRSections:
     lessons_learned: str
 
 
+@dataclass
+class SnapshotBlock:
+    """One agent's block in a :class:`SnapshotSections` payload.
+
+    Built by the master from a :class:`shared.models.SnapshotReport` (or
+    from a failure / disabled state). ``sections`` are pre-rendered bullet
+    lists owned by the agent; the renderer only lays out the block header,
+    the registry-derived header line, and each labelled section body.
+    """
+
+    emoji: str
+    display_name: str
+    header_line: str  # registry-derived: "model=… · network=… · skills=…"
+    sections: list[SnapshotSection]
+    status: SnapshotStatus = "ok"  # drives the per-block status marker
+    error_message: str | None = None  # populated when status == "error"
+    anomaly_summary: str | None = None  # one-liner describing the anomaly (status == "anomaly")
+
+
+@dataclass
+class SnapshotSections:
+    """Platform-agnostic ``/status`` snapshot output.
+
+    Built by the master's ``StatusSnapshotOrchestrator`` from a deterministic
+    aggregation of per-agent :class:`SnapshotReport` results. Rendered by
+    each platform's :meth:`MarkupReportRenderer.render_snapshot` into the
+    native markup for chat delivery.
+    """
+
+    requested_at: str  # ISO 8601 — when the operator ran /status
+    summary_line: str  # deterministic top-line ("3/4 agents healthy …")
+    blocks: list[SnapshotBlock]
+
+
 # ---------------------------------------------------------------------------
 # Protocol
 # ---------------------------------------------------------------------------
@@ -98,6 +135,7 @@ class ReportRenderer(Protocol):
     def render_investigation_started(
         self, sections: InvestigationStartedSections
     ) -> str: ...
+    def render_snapshot(self, sections: SnapshotSections) -> str: ...
     def normalize(self, text: str) -> str:
         """Translate agent-produced CommonMark into this platform's markup.
 
@@ -337,6 +375,56 @@ class MarkupReportRenderer:
             d.bold("Lessons Learned"),
             d.normalize(sections.lessons_learned),
         ]
+        return "\n".join(parts)
+
+    def render_snapshot(self, sections: SnapshotSections) -> str:
+        d = self._d
+        parts: list[str] = [
+            f"🩺 {d.bold('Status Snapshot')}",
+            d.separator,
+            f"{d.bold('Captured at:')} {sections.requested_at}",
+            sections.summary_line,
+        ]
+        for block in sections.blocks:
+            parts.append("")
+            parts.append(self._render_snapshot_block(block))
+        return "\n".join(parts)
+
+    def _render_snapshot_block(self, block: SnapshotBlock) -> str:
+        d = self._d
+        status_marker = ""
+        if block.status == "anomaly":
+            status_marker = " ⚠️"
+        elif block.status == "error":
+            status_marker = " ❌"
+        elif block.status == "disabled":
+            status_marker = " 🚫"
+        parts: list[str] = [
+            f"{block.emoji} {d.bold(block.display_name)}{status_marker}",
+        ]
+        if block.header_line:
+            parts.append(f"_{block.header_line}_")
+
+        if block.status == "error":
+            message = block.error_message or "no response"
+            parts.append(f"- {d.normalize(message)}")
+            return "\n".join(parts)
+
+        if block.status == "disabled":
+            parts.append("- _Disabled in config.yaml — not dispatched._")
+            return "\n".join(parts)
+
+        if block.status == "anomaly" and block.anomaly_summary:
+            parts.append(f"_{d.normalize(block.anomaly_summary)}_")
+
+        for section in block.sections:
+            parts.append("")
+            parts.append(d.bold(section.label))
+            if not section.lines:
+                parts.append("- _No data._")
+            else:
+                for line in section.lines:
+                    parts.append(f"- {d.normalize(line)}")
         return "\n".join(parts)
 
     def _render_evidence(self, blocks: list[EvidenceBlock]) -> str:

@@ -30,6 +30,7 @@ from shared.platforms import (
     CommandWebhook,
     InvalidWebhook,
 )
+from shared.time_utils import now_iso
 
 logger = logging.getLogger(__name__)
 
@@ -168,24 +169,32 @@ def _process_alert(alert_context: AlertContext) -> dict:
 
 
 def _process_command(command: CommandRequest, platform: ChatPlatform) -> dict:
-    """Handle a slash command (e.g. /postmortem).
+    """Handle a slash command (e.g. ``/postmortem``, ``/status``).
 
-    Flow:
-        1. Validate: must be a known command, invoked in a thread.
-        2. Ack synchronously via the platform's slash-command callback.
-        3. Invoke the Master Agent with a PIR task.
-        4. Return HTTP 200.
+    Each command is allow-listed by name and routed to its own handler.
+    Unknown commands fall through with an ephemeral "Unknown command" reply.
     """
-    if command.command not in ("/postmortem",):
-        return _http_response(200, {"text": f"Unknown command: {command.command}"})
+    if command.command == "/postmortem":
+        return _process_postmortem_command(command, platform)
+    if command.command == "/status":
+        return _process_status_command(command, platform)
+    return _http_response(200, {"text": f"Unknown command: {command.command}"})
 
+
+def _process_postmortem_command(
+    command: CommandRequest, platform: ChatPlatform
+) -> dict:
+    """Handle ``/postmortem`` — must be invoked inside an incident thread.
+
+    Acks synchronously, then invokes the Master Agent with a PIR task
+    payload referencing the originating thread.
+    """
     if not command.thread_ts:
         platform.ack(command, "⚠️ Please use /postmortem inside an incident thread.")
         return _http_response(200)
 
     platform.ack(command, "📝 Generating Post-Incident Report...")
 
-    # Invoke Master Agent with PIR task
     agent_runtime_arn = _get_env("MASTER_AGENT_RUNTIME_ARN")
     runtime_client = boto3.client("bedrock-agentcore")
     pir_payload = json.dumps({
@@ -211,5 +220,47 @@ def _process_command(command: CommandRequest, platform: ChatPlatform) -> dict:
         command.channel_id,
         command.thread_ts,
         command.user_id,
+    )
+    return _http_response(200)
+
+
+def _process_status_command(
+    command: CommandRequest, platform: ChatPlatform
+) -> dict:
+    """Handle ``/status`` — operator-driven snapshot. No thread required.
+
+    Acks synchronously, then invokes the Master Agent with a snapshot
+    task payload. The master fans out to active specialized agents and
+    posts a :class:`shared.report_renderer.SnapshotSections` payload at
+    top-level (not as a thread reply) when collection completes.
+    """
+    platform.ack(command, "🩺 Capturing status snapshot...")
+
+    requested_at = now_iso()
+
+    agent_runtime_arn = _get_env("MASTER_AGENT_RUNTIME_ARN")
+    runtime_client = boto3.client("bedrock-agentcore")
+    snapshot_payload = json.dumps({
+        "task": "snapshot",
+        "platform": command.platform,
+        "channel_id": command.channel_id,
+        "user_id": command.user_id,
+        "requested_at": requested_at,
+    })
+    runtime_client.invoke_agent_runtime(
+        agentRuntimeArn=agent_runtime_arn,
+        runtimeSessionId=f"snapshot-{command.channel_id}-{requested_at}",
+        payload=_wrap_a2a_message(
+            snapshot_payload,
+            f"req-master-snapshot-{command.channel_id}-{requested_at}",
+        ),
+        contentType="application/json",
+    )
+
+    logger.info(
+        "Status snapshot started: channel=%s user=%s requested_at=%s",
+        command.channel_id,
+        command.user_id,
+        requested_at,
     )
     return _http_response(200)

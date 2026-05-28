@@ -8,7 +8,11 @@ from dataclasses import asdict
 
 import pytest
 
-from agents.master.tools import _alert_context_from_payload, investigate_alert
+from agents.master.tools import (
+    _alert_context_from_payload,
+    capture_status_snapshot,
+    investigate_alert,
+)
 from shared.models import AlertContext
 
 
@@ -104,3 +108,97 @@ class TestInvestigateAlertTool:
 
         assert "aborted" in result.lower()
         assert "config.yaml" in result
+
+
+# ---------------------------------------------------------------------------
+# capture_status_snapshot
+# ---------------------------------------------------------------------------
+
+
+class TestCaptureStatusSnapshotTool:
+    @pytest.mark.asyncio
+    async def test_kicks_off_orchestrator_in_background(self, monkeypatch):
+        captured: dict = {}
+        started = asyncio.Event()
+        finish = asyncio.Event()
+
+        class StubOrchestrator:
+            def __init__(self):
+                self.agent_endpoints = {"slack_scanner": "http://localhost:9001"}
+
+            async def capture(self, request: dict) -> None:
+                captured["request"] = request
+                started.set()
+                # Block to prove the tool returns before capture completes
+                await finish.wait()
+
+        monkeypatch.setattr(
+            "agents.master.tools.StatusSnapshotOrchestrator", StubOrchestrator,
+        )
+
+        request = {
+            "task": "snapshot",
+            "platform": "slack",
+            "channel_id": "C1",
+            "user_id": "U1",
+            "requested_at": "2026-05-28T19:00:00+00:00",
+        }
+        result = await capture_status_snapshot(json.dumps(request))
+
+        assert "started" in result.lower()
+        assert "slack_scanner" in result
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        assert captured["request"] == request
+        finish.set()
+        await asyncio.sleep(0)
+
+    @pytest.mark.asyncio
+    async def test_rejects_unexpected_task_field(self, monkeypatch):
+        called = False
+
+        class ShouldNotConstruct:
+            def __init__(self):
+                nonlocal called
+                called = True
+
+        monkeypatch.setattr(
+            "agents.master.tools.StatusSnapshotOrchestrator", ShouldNotConstruct,
+        )
+
+        request = {"task": "investigation", "platform": "slack", "channel_id": "C1"}
+        result = await capture_status_snapshot(json.dumps(request))
+
+        assert "unexpected task" in result.lower()
+        assert "'investigation'" in result
+        assert called is False, "orchestrator must not be constructed for non-snapshot tasks"
+
+    @pytest.mark.asyncio
+    async def test_no_active_agents_still_completes_dispatch(self, monkeypatch):
+        finish = asyncio.Event()
+
+        class EmptyOrchestrator:
+            def __init__(self):
+                self.agent_endpoints: dict[str, str] = {}
+
+            async def capture(self, request: dict) -> None:
+                # /status with no active agents still posts a master-only
+                # snapshot — capture() is allowed to run.
+                await finish.wait()
+
+        monkeypatch.setattr(
+            "agents.master.tools.StatusSnapshotOrchestrator", EmptyOrchestrator,
+        )
+
+        request = {
+            "task": "snapshot",
+            "platform": "slack",
+            "channel_id": "C1",
+            "user_id": "U1",
+            "requested_at": "2026-05-28T19:00:00+00:00",
+        }
+        result = await capture_status_snapshot(json.dumps(request))
+
+        assert "started" in result.lower()
+        assert "no active specialized agents" in result.lower()
+        finish.set()
+        await asyncio.sleep(0)

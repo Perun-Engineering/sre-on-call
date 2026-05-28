@@ -261,3 +261,147 @@ class TestDiscordReportRenderer:
         update = renderer.render_enrichment(sections)
         assert "**Enrichment Update" in update
         assert "**New Findings:**" in update
+
+
+# ---------------------------------------------------------------------------
+# capture_snapshot — /status path
+# ---------------------------------------------------------------------------
+
+from agents.discord_scanner.tools import (
+    DiscordRESTClient,
+    _execute_capture_snapshot,
+)
+
+
+REQUESTED_AT = "2026-05-28T19:00:00+00:00"
+
+
+def _stub_client(
+    *,
+    self_status: int = 200,
+    self_body: dict | None = None,
+    self_exception: Exception | None = None,
+    guilds_status: int = 200,
+    guilds_body: list | None = None,
+    guilds_exception: Exception | None = None,
+) -> MagicMock:
+    """Build a mock DiscordRESTClient with controllable per-method responses."""
+    client = MagicMock(spec=DiscordRESTClient)
+    if self_exception is not None:
+        client.get_user_self.side_effect = self_exception
+    else:
+        client.get_user_self.return_value = (
+            self_status,
+            self_body if self_body is not None else {
+                "id": "987654321",
+                "username": "sre-bot",
+                "discriminator": "0001",
+            },
+        )
+    if guilds_exception is not None:
+        client.get_user_guilds.side_effect = guilds_exception
+    else:
+        client.get_user_guilds.return_value = (
+            guilds_status,
+            guilds_body if guilds_body is not None else [
+                {"id": "111"},
+                {"id": "222"},
+                {"id": "333"},
+            ],
+        )
+    return client
+
+
+# ---- happy path -----------------------------------------------------------
+
+
+class TestDiscordCaptureSnapshotHappyPath:
+    def test_no_anomaly_when_both_probes_succeed(self):
+        report = _execute_capture_snapshot(_stub_client(), requested_at=REQUESTED_AT)
+        assert report.anomaly is False
+        assert report.anomaly_summary is None
+
+    def test_captured_at_is_requested_at(self):
+        report = _execute_capture_snapshot(_stub_client(), requested_at=REQUESTED_AT)
+        assert report.captured_at == REQUESTED_AT
+
+    def test_agent_name_set(self):
+        report = _execute_capture_snapshot(_stub_client(), requested_at=REQUESTED_AT)
+        assert report.agent_name == "discord_scanner"
+
+    def test_authentication_section_lists_bot_identity(self):
+        report = _execute_capture_snapshot(_stub_client(), requested_at=REQUESTED_AT)
+        auth = next(s for s in report.sections if s.label == "Authentication")
+        joined = "\n".join(auth.lines)
+        assert "987654321" in joined
+        assert "sre-bot" in joined
+
+    def test_guild_access_section_reports_count(self):
+        report = _execute_capture_snapshot(_stub_client(), requested_at=REQUESTED_AT)
+        guilds = next(s for s in report.sections if s.label == "Guild access")
+        assert any("3 guild" in line for line in guilds.lines)
+
+
+# ---- auth anomaly paths ---------------------------------------------------
+
+
+class TestDiscordCaptureSnapshotAuthAnomalyPaths:
+    def test_4xx_on_users_self_flips_anomaly(self):
+        client = _stub_client(self_status=401, self_body={"message": "401: Unauthorized"})
+        report = _execute_capture_snapshot(client, requested_at=REQUESTED_AT)
+        assert report.anomaly is True
+        assert "401" in (report.anomaly_summary or "")
+
+    def test_5xx_on_users_self_flips_anomaly(self):
+        client = _stub_client(self_status=503, self_body={"message": "service down"})
+        report = _execute_capture_snapshot(client, requested_at=REQUESTED_AT)
+        assert report.anomaly is True
+        assert "503" in (report.anomaly_summary or "")
+
+    def test_exception_during_users_self_flips_anomaly_no_raise(self):
+        client = _stub_client(self_exception=RuntimeError("connection refused"))
+        # Tool honours the no-raise contract
+        report = _execute_capture_snapshot(client, requested_at=REQUESTED_AT)
+        assert report.anomaly is True
+        assert "connection refused" in (report.anomaly_summary or "")
+
+    def test_non_object_body_on_users_self_flips_anomaly(self):
+        client = _stub_client(self_body=[])  # type: ignore[arg-type]
+        report = _execute_capture_snapshot(client, requested_at=REQUESTED_AT)
+        assert report.anomaly is True
+
+
+# ---- guild probe failures (informational, not anomaly) --------------------
+
+
+class TestDiscordCaptureSnapshotGuildProbeFailures:
+    def test_4xx_on_guilds_does_not_flag_anomaly(self):
+        client = _stub_client(
+            guilds_status=403,
+            guilds_body={"message": "missing access"},
+        )
+        report = _execute_capture_snapshot(client, requested_at=REQUESTED_AT)
+        assert report.anomaly is False
+        guilds = next(s for s in report.sections if s.label == "Guild access")
+        assert any("403" in line for line in guilds.lines)
+
+    def test_exception_on_guilds_does_not_flag_anomaly(self):
+        client = _stub_client(guilds_exception=RuntimeError("boom"))
+        report = _execute_capture_snapshot(client, requested_at=REQUESTED_AT)
+        assert report.anomaly is False
+        guilds = next(s for s in report.sections if s.label == "Guild access")
+        assert any("boom" in line for line in guilds.lines)
+
+
+# ---- structural invariants -----------------------------------------------
+
+
+class TestDiscordCaptureSnapshotShape:
+    def test_sections_in_order_authentication_then_guild_access(self):
+        report = _execute_capture_snapshot(_stub_client(), requested_at=REQUESTED_AT)
+        assert [s.label for s in report.sections] == ["Authentication", "Guild access"]
+
+    def test_metadata_defaults_to_empty(self):
+        report = _execute_capture_snapshot(_stub_client(), requested_at=REQUESTED_AT)
+        assert report.metadata.model_id is None
+        assert report.metadata.input_tokens is None

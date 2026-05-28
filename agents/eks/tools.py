@@ -9,13 +9,18 @@ import base64
 import logging
 import os
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from kubernetes.client.exceptions import ApiException
 from strands import tool
 
-from shared.models import Finding
-from shared.tool_result import ToolResult, build_agent_result, format_result
+from shared.models import Finding, SnapshotReport, SnapshotSection
+from shared.tool_result import (
+    ToolResult,
+    build_agent_result,
+    format_result,
+    format_snapshot_result,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -411,3 +416,296 @@ def _execute_gather(
     _gather_node_conditions(core_v1, node_names, result)
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# /status snapshot — read-only cluster overview
+# ---------------------------------------------------------------------------
+
+
+_SNAPSHOT_PHASE_ORDER = ("Failed", "Unknown", "Pending", "Succeeded", "Running")
+_SNAPSHOT_NON_RUNNING_LIMIT: int = 10
+_SNAPSHOT_KUBE_SYSTEM_EVENT_LIMIT: int = 5
+_SNAPSHOT_KUBE_SYSTEM_EVENT_WINDOW = timedelta(minutes=5)
+_SNAPSHOT_RESTART_ANOMALY_THRESHOLD: int = 3
+
+
+@tool
+def capture_snapshot(requested_at: str) -> str:
+    """Capture a read-only snapshot of EKS cluster state.
+
+    Probes nodes, pods across all namespaces, and recent kube-system
+    warning events. Returns a human-readable summary with an embedded
+    :class:`SnapshotReport` footer that the master orchestrator extracts
+    via :func:`shared.tool_result.extract_snapshot_report`.
+
+    The tool never raises: if the cluster config cannot be loaded or the
+    API is unreachable, the failure is folded into a single anomaly
+    section.
+
+    Args:
+        requested_at: ISO 8601 timestamp from the master, used as the
+            ``captured_at`` field of the returned report.
+
+    Returns:
+        A short human-readable string ending with a
+        ``<<<SNAPSHOT_RESULT ... SNAPSHOT_RESULT>>>`` footer.
+    """
+    try:
+        _load_kube_config()
+        from kubernetes import client as k8s_client
+
+        core_v1 = k8s_client.CoreV1Api()
+        version_api = k8s_client.VersionApi()
+    except Exception as exc:
+        report = SnapshotReport(
+            agent_name="eks",
+            captured_at=requested_at,
+            sections=[
+                SnapshotSection(
+                    label="Cluster",
+                    lines=[f"❌ failed to load cluster config: {exc}"],
+                )
+            ],
+            anomaly=True,
+            anomaly_summary=f"EKS cluster config could not be loaded: {exc}",
+        )
+        return format_snapshot_result(report)
+
+    report = _execute_capture_snapshot(
+        core_v1, version_api, requested_at=requested_at,
+    )
+    return format_snapshot_result(report)
+
+
+def _execute_capture_snapshot(
+    core_v1,
+    version_api,
+    *,
+    requested_at: str,
+    cluster_name: str | None = None,
+    now: datetime | None = None,
+) -> SnapshotReport:
+    """Pure snapshot builder. All I/O goes through *core_v1* and *version_api*.
+
+    Tests pass mock K8s clients to drive every branch: happy path,
+    NotReady node, Failed pod, restart-count anomaly, kube-system events,
+    and per-probe API failures (which surface as ❌ section lines but
+    only flip ``anomaly=True`` if they're an anomaly-criteria probe).
+    """
+    sections: list[SnapshotSection] = []
+    anomalies: list[str] = []
+
+    cluster_name = cluster_name or os.environ.get("EKS_CLUSTER_NAME") or "(unknown)"
+    now = now or datetime.now(tz=timezone.utc)
+    cutoff = now - _SNAPSHOT_KUBE_SYSTEM_EVENT_WINDOW
+
+    # ----------------------------------------------------------------------
+    # Section 1: Cluster identity (cluster name + server version)
+    # ----------------------------------------------------------------------
+    cluster_lines: list[str] = [f"name: {cluster_name}"]
+    try:
+        version = version_api.get_code()
+        git_version = getattr(version, "git_version", None) or "(unknown)"
+        cluster_lines.append(f"server version: {git_version}")
+    except Exception as exc:
+        cluster_lines.append(f"❌ failed to read server version: {exc}")
+    sections.append(SnapshotSection(label="Cluster", lines=cluster_lines))
+
+    # ----------------------------------------------------------------------
+    # Section 2: Nodes
+    # ----------------------------------------------------------------------
+    node_lines: list[str] = []
+    try:
+        nodes = core_v1.list_node().items
+        ready = sum(1 for n in nodes if _node_is_ready(n))
+        not_ready = sum(1 for n in nodes if _node_is_not_ready(n))
+        sched_disabled = sum(1 for n in nodes if _node_is_scheduling_disabled(n))
+        node_lines.append(
+            f"{ready} Ready · {not_ready} NotReady · {sched_disabled} SchedulingDisabled"
+        )
+        if not_ready > 0:
+            anomalies.append(f"{not_ready} node(s) NotReady")
+    except ApiException as exc:
+        node_lines.append(f"❌ list_node failed: {_api_error(exc)}")
+    except Exception as exc:
+        node_lines.append(f"❌ list_node failed: {exc}")
+    sections.append(SnapshotSection(label="Nodes", lines=node_lines))
+
+    # ----------------------------------------------------------------------
+    # Section 3 + 4: Pod phase counts + non-Running list
+    # ----------------------------------------------------------------------
+    try:
+        pods = core_v1.list_pod_for_all_namespaces().items
+    except ApiException as exc:
+        sections.append(
+            SnapshotSection(
+                label="Pods",
+                lines=[f"❌ list_pod_for_all_namespaces failed: {_api_error(exc)}"],
+            )
+        )
+        sections.append(
+            SnapshotSection(label="Non-Running pods (top 10)", lines=[])
+        )
+        return _finalise_report(requested_at, sections, anomalies)
+    except Exception as exc:
+        sections.append(
+            SnapshotSection(
+                label="Pods",
+                lines=[f"❌ list_pod_for_all_namespaces failed: {exc}"],
+            )
+        )
+        sections.append(
+            SnapshotSection(label="Non-Running pods (top 10)", lines=[])
+        )
+        return _finalise_report(requested_at, sections, anomalies)
+
+    phase_counts: dict[str, int] = {p: 0 for p in _SNAPSHOT_PHASE_ORDER}
+    non_running: list[tuple] = []  # (phase_rank, -restart_count, ns, name, phase, restarts)
+    for pod in pods:
+        phase = _pod_phase(pod)
+        phase_counts[phase] = phase_counts.get(phase, 0) + 1
+        if phase != "Running":
+            ns = pod.metadata.namespace if pod.metadata else "?"
+            name = pod.metadata.name if pod.metadata else "?"
+            restarts = _pod_total_restarts(pod)
+            phase_rank = (
+                _SNAPSHOT_PHASE_ORDER.index(phase)
+                if phase in _SNAPSHOT_PHASE_ORDER
+                else len(_SNAPSHOT_PHASE_ORDER)
+            )
+            non_running.append((phase_rank, -restarts, ns, name, phase, restarts))
+
+    pod_summary = " · ".join(
+        f"{phase_counts.get(p, 0)} {p}"
+        for p in ("Running", "Pending", "Failed", "Unknown", "Succeeded")
+    )
+    sections.append(SnapshotSection(label="Pods", lines=[pod_summary]))
+
+    if phase_counts.get("Failed", 0) > 0:
+        anomalies.append(f"{phase_counts['Failed']} pod(s) Failed")
+
+    non_running.sort()
+    high_restart = sum(1 for _, _, _, _, _, r in non_running if r >= _SNAPSHOT_RESTART_ANOMALY_THRESHOLD)
+    if high_restart > 0:
+        anomalies.append(
+            f"{high_restart} non-Running pod(s) with restarts ≥ {_SNAPSHOT_RESTART_ANOMALY_THRESHOLD}"
+        )
+
+    nr_lines: list[str] = []
+    for _, _, ns, name, phase, restarts in non_running[:_SNAPSHOT_NON_RUNNING_LIMIT]:
+        nr_lines.append(f"{ns}/{name} · phase={phase} · restarts={restarts}")
+    if len(non_running) > _SNAPSHOT_NON_RUNNING_LIMIT:
+        nr_lines.append(
+            f"… {len(non_running) - _SNAPSHOT_NON_RUNNING_LIMIT} more not shown"
+        )
+    sections.append(
+        SnapshotSection(label="Non-Running pods (top 10)", lines=nr_lines)
+    )
+
+    # ----------------------------------------------------------------------
+    # Section 5: kube-system warning events (last 5 min)
+    # ----------------------------------------------------------------------
+    event_lines: list[str] = []
+    try:
+        events = core_v1.list_namespaced_event(
+            namespace="kube-system", field_selector="type=Warning",
+        ).items
+        recent_warnings = []
+        for event in events:
+            ts = event.last_timestamp or event.event_time
+            if ts is None:
+                continue
+            ts_dt = ts if isinstance(ts, datetime) else None
+            if ts_dt is None:
+                continue
+            if ts_dt.tzinfo is None:
+                ts_dt = ts_dt.replace(tzinfo=timezone.utc)
+            if ts_dt < cutoff:
+                continue
+            recent_warnings.append((ts_dt, event))
+
+        recent_warnings.sort(key=lambda t: t[0], reverse=True)
+        for _, event in recent_warnings[:_SNAPSHOT_KUBE_SYSTEM_EVENT_LIMIT]:
+            reason = getattr(event, "reason", None) or "(no reason)"
+            message = getattr(event, "message", None) or "(no message)"
+            obj = getattr(event, "involved_object", None)
+            kind = getattr(obj, "kind", None) or "?"
+            name = getattr(obj, "name", None) or "?"
+            event_lines.append(f"{reason}: {message} ({kind}/{name})")
+        if len(recent_warnings) > _SNAPSHOT_KUBE_SYSTEM_EVENT_LIMIT:
+            event_lines.append(
+                f"… {len(recent_warnings) - _SNAPSHOT_KUBE_SYSTEM_EVENT_LIMIT} more not shown"
+            )
+        if recent_warnings:
+            anomalies.append(
+                f"{len(recent_warnings)} kube-system warning event(s) in last 5 min"
+            )
+    except ApiException as exc:
+        event_lines.append(
+            f"❌ list_namespaced_event(kube-system) failed: {_api_error(exc)}"
+        )
+    except Exception as exc:
+        event_lines.append(f"❌ list_namespaced_event(kube-system) failed: {exc}")
+    sections.append(
+        SnapshotSection(
+            label="kube-system warning events (last 5 min)", lines=event_lines
+        )
+    )
+
+    return _finalise_report(requested_at, sections, anomalies)
+
+
+def _finalise_report(
+    requested_at: str,
+    sections: list[SnapshotSection],
+    anomalies: list[str],
+) -> SnapshotReport:
+    """Build the final SnapshotReport from accumulated sections + anomaly list."""
+    return SnapshotReport(
+        agent_name="eks",
+        captured_at=requested_at,
+        sections=sections,
+        anomaly=bool(anomalies),
+        anomaly_summary="; ".join(anomalies) if anomalies else None,
+    )
+
+
+def _node_is_ready(node) -> bool:
+    cond = _node_condition(node, "Ready")
+    return cond is not None and cond.status == "True" and not _node_is_scheduling_disabled(node)
+
+
+def _node_is_not_ready(node) -> bool:
+    cond = _node_condition(node, "Ready")
+    if cond is None:
+        return True
+    return cond.status != "True"
+
+
+def _node_is_scheduling_disabled(node) -> bool:
+    spec = getattr(node, "spec", None)
+    return bool(getattr(spec, "unschedulable", False)) if spec else False
+
+
+def _node_condition(node, condition_type: str):
+    status = getattr(node, "status", None)
+    if not status:
+        return None
+    for cond in getattr(status, "conditions", None) or []:
+        if getattr(cond, "type", None) == condition_type:
+            return cond
+    return None
+
+
+def _pod_total_restarts(pod) -> int:
+    status = getattr(pod, "status", None)
+    if not status:
+        return 0
+    statuses = getattr(status, "container_statuses", None) or []
+    return sum((getattr(cs, "restart_count", 0) or 0) for cs in statuses)
+
+
+def _api_error(exc: ApiException) -> str:
+    reason = getattr(exc, "reason", None)
+    return reason or str(exc)

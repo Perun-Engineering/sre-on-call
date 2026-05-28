@@ -30,6 +30,7 @@ from shared.report_renderer import (
     InvestigationStartedSections,
     PIRSections,
     ReportSections,
+    SnapshotSections,
 )
 
 
@@ -88,6 +89,7 @@ DeliverPayload = Union[
     EnrichmentSections,
     InvestigationStartedSections,
     PIRSections,
+    SnapshotSections,
 ]
 
 

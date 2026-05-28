@@ -137,7 +137,7 @@ pytest tests/integration/test_orchestrator.py       # one integration test
 pytest tests/property/                              # property-based tests only
 ```
 
-Current count: **400 collected**, 400 passing. (Prometheus tests run and pass even though the agent isn't deployed.)
+Current count: **582 collected**, 582 passing. (Prometheus tests run and pass even though the agent isn't deployed.)
 
 ### Test layout
 
@@ -187,10 +187,11 @@ See **[docs/testing.md](docs/testing.md)** for the full Slack App + bot setup. Q
 
 ## Testing
 
-See **[docs/testing.md](docs/testing.md)**. Two paths:
+See **[docs/testing.md](docs/testing.md)**. Three paths:
 
-- **Synthetic** — `scripts/synthetic_slack_webhook.py` builds a correctly-signed `app_mention` payload and POSTs to the Lambda URL. Useful for fast smoke tests.
+- **Synthetic alert** — `scripts/synthetic_slack_webhook.py` builds a correctly-signed `app_mention` payload and POSTs to the Lambda URL. Useful for fast smoke tests.
 - **Real Slack alert** — invite the bot to a channel and `@bot …` to trigger an investigation end-to-end.
+- **`/status` snapshot** — the same script with `--command /status` (or run `/status` in any channel after Slack registration). Posts a top-level snapshot of cluster state, top log groups by ingestion, and chat platform reachability.
 
 ## Environment variables
 

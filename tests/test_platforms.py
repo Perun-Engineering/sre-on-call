@@ -247,6 +247,65 @@ class TestDeliverDispatch:
             asyncio.run(platform.deliver(self._ctx(), object()))  # type: ignore[arg-type]
 
 
+class TestSlackPostReply:
+    """Exercises SlackChatPlatform._post_reply directly to verify the
+    thread-vs-top-level routing — added for the /status path which uses a
+    synthetic AlertContext with empty message_id to broadcast at top-level.
+    """
+
+    def _ctx(self, *, message_id: str = "ts-1", platform_metadata: dict | None = None) -> AlertContext:
+        return AlertContext(
+            investigation_id="inv-1",
+            platform="slack",
+            channel_id="C1",
+            message_id=message_id,
+            alert_text="",
+            alert_timestamp="2026-05-28T19:00:00+00:00",
+            investigation_window=("2026-05-28T19:00:00+00:00", "2026-05-28T19:10:00+00:00"),
+            platform_metadata=platform_metadata or {},
+        )
+
+    def test_thread_ts_in_metadata_routes_as_thread_reply(self) -> None:
+        from unittest.mock import patch as _patch, AsyncMock
+        platform = SlackChatPlatform(signing_secret="x", bot_token="y")
+        ctx = self._ctx(platform_metadata={"thread_ts": "ts-parent"})
+        async_client = AsyncMock()
+        async_client.chat_postMessage = AsyncMock()
+        with _patch("slack_sdk.web.async_client.AsyncWebClient", return_value=async_client):
+            asyncio.run(platform._post_reply(ctx, "hello"))
+        async_client.chat_postMessage.assert_awaited_once_with(
+            channel="C1", thread_ts="ts-parent", text="hello",
+        )
+
+    def test_message_id_falls_through_when_no_metadata(self) -> None:
+        from unittest.mock import patch as _patch, AsyncMock
+        platform = SlackChatPlatform(signing_secret="x", bot_token="y")
+        ctx = self._ctx(message_id="ts-msg", platform_metadata={})
+        async_client = AsyncMock()
+        async_client.chat_postMessage = AsyncMock()
+        with _patch("slack_sdk.web.async_client.AsyncWebClient", return_value=async_client):
+            asyncio.run(platform._post_reply(ctx, "hello"))
+        async_client.chat_postMessage.assert_awaited_once_with(
+            channel="C1", thread_ts="ts-msg", text="hello",
+        )
+
+    def test_empty_thread_ts_omits_kwarg_for_top_level_post(self) -> None:
+        """A synthetic /status AlertContext has message_id="" — Slack rejects
+        thread_ts="" so the kwarg must be dropped entirely so the message
+        posts at top-level."""
+        from unittest.mock import patch as _patch, AsyncMock
+        platform = SlackChatPlatform(signing_secret="x", bot_token="y")
+        ctx = self._ctx(message_id="", platform_metadata={})
+        async_client = AsyncMock()
+        async_client.chat_postMessage = AsyncMock()
+        with _patch("slack_sdk.web.async_client.AsyncWebClient", return_value=async_client):
+            asyncio.run(platform._post_reply(ctx, "hello"))
+        async_client.chat_postMessage.assert_awaited_once_with(channel="C1", text="hello")
+        # Critical assertion: thread_ts must NOT be in the kwargs
+        call_kwargs = async_client.chat_postMessage.await_args.kwargs
+        assert "thread_ts" not in call_kwargs
+
+
 class TestAck:
     def test_slack_ack_posts_to_response_url(self) -> None:
         from unittest.mock import patch as _patch
