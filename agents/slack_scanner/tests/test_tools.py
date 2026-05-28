@@ -5,6 +5,10 @@ algorithm via ``execute_channel_scan``, including channel history
 retrieval, bot/alert message filtering, investigation window scoping,
 and Slack API error handling.
 
+Also covers ``_execute_capture_snapshot`` — the ``/status`` snapshot
+surface — exercising happy / anomaly / error paths against a mock
+:class:`slack_sdk.WebClient`.
+
 Requirements: 4.1, 4.2, 4.3, 4.4, 4.5
 """
 
@@ -16,7 +20,10 @@ from unittest.mock import MagicMock
 import pytest
 from slack_sdk.errors import SlackApiError
 
-from agents.slack_scanner.tools import SlackMessageSource
+from agents.slack_scanner.tools import (
+    SlackMessageSource,
+    _execute_capture_snapshot,
+)
 from shared.channel_scan import execute_channel_scan
 from shared.models import Finding
 from shared.tool_result import ToolResult, build_agent_result, severity_from_text
@@ -323,3 +330,198 @@ class TestExecuteScan:
         assert len(result.findings) == 1
         assert len(result.errors) == 1
         assert "C001" in result.scanned_items
+
+
+# ---------------------------------------------------------------------------
+# capture_snapshot — /status path
+# ---------------------------------------------------------------------------
+
+REQUESTED_AT = "2026-05-28T19:00:00+00:00"
+
+
+def _slack_api_error(error_code: str) -> SlackApiError:
+    """Build a SlackApiError whose ``.response.get('error')`` returns *error_code*."""
+    return SlackApiError(message=error_code, response={"error": error_code})
+
+
+class TestCaptureSnapshotHappyPath:
+    """Both probes succeed → no anomaly, two sections with informational lines."""
+
+    def _client(self) -> MagicMock:
+        client = MagicMock()
+        client.auth_test.return_value = {
+            "ok": True,
+            "team": "Acme Corp",
+            "team_id": "T12345",
+            "user": "sre-bot",
+            "user_id": "U67890",
+            "url": "https://acme.slack.com/",
+        }
+        client.users_conversations.return_value = {
+            "channels": [{"id": f"C{i:03d}"} for i in range(7)],
+        }
+        return client
+
+    def test_no_anomaly(self):
+        report = _execute_capture_snapshot(self._client(), requested_at=REQUESTED_AT)
+        assert report.anomaly is False
+        assert report.anomaly_summary is None
+
+    def test_captured_at_is_requested_at(self):
+        report = _execute_capture_snapshot(self._client(), requested_at=REQUESTED_AT)
+        assert report.captured_at == REQUESTED_AT
+
+    def test_agent_name_set(self):
+        report = _execute_capture_snapshot(self._client(), requested_at=REQUESTED_AT)
+        assert report.agent_name == "slack_scanner"
+
+    def test_authentication_section_populated(self):
+        report = _execute_capture_snapshot(self._client(), requested_at=REQUESTED_AT)
+        auth = next(s for s in report.sections if s.label == "Authentication")
+        joined = "\n".join(auth.lines)
+        assert "Acme Corp" in joined
+        assert "T12345" in joined
+        assert "sre-bot" in joined
+        assert "U67890" in joined
+        assert "https://acme.slack.com/" in joined
+
+    def test_channel_access_section_reports_count(self):
+        report = _execute_capture_snapshot(self._client(), requested_at=REQUESTED_AT)
+        access = next(s for s in report.sections if s.label == "Channel access")
+        assert any("7 channel" in line for line in access.lines)
+
+    def test_authentication_omits_url_line_when_empty(self):
+        client = self._client()
+        client.auth_test.return_value = {
+            "ok": True,
+            "team": "Acme Corp",
+            "team_id": "T12345",
+            "user": "sre-bot",
+            "user_id": "U67890",
+            # no url key
+        }
+        report = _execute_capture_snapshot(client, requested_at=REQUESTED_AT)
+        auth = next(s for s in report.sections if s.label == "Authentication")
+        # No "workspace URL:" line when Slack didn't return one
+        assert not any("workspace URL" in line for line in auth.lines)
+
+
+class TestCaptureSnapshotAuthAnomalyPaths:
+    """auth.test failures must flip the report to anomaly=True."""
+
+    def test_non_ok_auth_test_flags_anomaly(self):
+        client = MagicMock()
+        client.auth_test.return_value = {"ok": False, "error": "token_expired"}
+        client.users_conversations.return_value = {"channels": []}
+
+        report = _execute_capture_snapshot(client, requested_at=REQUESTED_AT)
+
+        assert report.anomaly is True
+        assert report.anomaly_summary is not None
+        assert "token_expired" in report.anomaly_summary
+        # Authentication section carries an ❌ line
+        auth = next(s for s in report.sections if s.label == "Authentication")
+        assert any("❌" in line and "token_expired" in line for line in auth.lines)
+
+    def test_slack_api_error_on_auth_flags_anomaly(self):
+        client = MagicMock()
+        client.auth_test.side_effect = _slack_api_error("invalid_auth")
+        client.users_conversations.return_value = {"channels": []}
+
+        report = _execute_capture_snapshot(client, requested_at=REQUESTED_AT)
+
+        assert report.anomaly is True
+        assert "invalid_auth" in (report.anomaly_summary or "")
+
+    def test_generic_exception_on_auth_flags_anomaly_no_raise(self):
+        client = MagicMock()
+        client.auth_test.side_effect = RuntimeError("network down")
+        client.users_conversations.return_value = {"channels": []}
+
+        # No raise — the tool honours the no-raise contract.
+        report = _execute_capture_snapshot(client, requested_at=REQUESTED_AT)
+
+        assert report.anomaly is True
+        assert "network down" in (report.anomaly_summary or "")
+        # Channel access probe still ran after the auth failure.
+        access = next(s for s in report.sections if s.label == "Channel access")
+        assert any("0 channel" in line for line in access.lines)
+
+    def test_anomaly_section_lines_describe_the_failure(self):
+        client = MagicMock()
+        client.auth_test.side_effect = _slack_api_error("ratelimited")
+        client.users_conversations.return_value = {"channels": []}
+
+        report = _execute_capture_snapshot(client, requested_at=REQUESTED_AT)
+
+        auth = next(s for s in report.sections if s.label == "Authentication")
+        assert any("ratelimited" in line for line in auth.lines)
+
+
+class TestCaptureSnapshotChannelProbeFailures:
+    """users.conversations failures surface in the section but do NOT trigger
+    anomaly — auth is still healthy, channel listing is a softer signal."""
+
+    def test_slack_api_error_on_channels_does_not_flag_anomaly(self):
+        client = MagicMock()
+        client.auth_test.return_value = {
+            "ok": True,
+            "team": "Acme",
+            "team_id": "T1",
+            "user": "bot",
+            "user_id": "U1",
+        }
+        client.users_conversations.side_effect = _slack_api_error("missing_scope")
+
+        report = _execute_capture_snapshot(client, requested_at=REQUESTED_AT)
+
+        assert report.anomaly is False
+        assert report.anomaly_summary is None
+        access = next(s for s in report.sections if s.label == "Channel access")
+        assert any("❌" in line and "missing_scope" in line for line in access.lines)
+
+    def test_generic_exception_on_channels_does_not_flag_anomaly(self):
+        client = MagicMock()
+        client.auth_test.return_value = {
+            "ok": True,
+            "team": "Acme",
+            "team_id": "T1",
+            "user": "bot",
+            "user_id": "U1",
+        }
+        client.users_conversations.side_effect = RuntimeError("boom")
+
+        report = _execute_capture_snapshot(client, requested_at=REQUESTED_AT)
+
+        assert report.anomaly is False
+        access = next(s for s in report.sections if s.label == "Channel access")
+        assert any("boom" in line for line in access.lines)
+
+
+class TestCaptureSnapshotShape:
+    """Structural invariants of the returned SnapshotReport."""
+
+    def test_returns_two_sections_in_order_auth_then_channels(self):
+        client = MagicMock()
+        client.auth_test.return_value = {
+            "ok": True,
+            "team": "Acme",
+            "team_id": "T1",
+            "user": "bot",
+            "user_id": "U1",
+        }
+        client.users_conversations.return_value = {"channels": []}
+
+        report = _execute_capture_snapshot(client, requested_at=REQUESTED_AT)
+
+        assert [s.label for s in report.sections] == ["Authentication", "Channel access"]
+
+    def test_metadata_defaults_to_empty(self):
+        client = MagicMock()
+        client.auth_test.return_value = {"ok": True, "team": "A", "team_id": "T", "user": "b", "user_id": "U"}
+        client.users_conversations.return_value = {"channels": []}
+
+        report = _execute_capture_snapshot(client, requested_at=REQUESTED_AT)
+
+        assert report.metadata.model_id is None
+        assert report.metadata.input_tokens is None

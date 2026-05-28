@@ -696,3 +696,370 @@ class TestEksIamAuth:
         assert cfg.ssl_ca_cert is not None
         assert pathlib.Path(cfg.ssl_ca_cert).read_bytes() == sample_pem
         fake_eks.describe_cluster.assert_called_once_with(name="eks-uat")
+
+
+# ---------------------------------------------------------------------------
+# capture_snapshot — /status path
+# ---------------------------------------------------------------------------
+
+from datetime import datetime, timedelta, timezone
+
+from agents.eks.tools import _execute_capture_snapshot
+from shared.models import SnapshotReport
+
+
+REQUESTED_AT = "2026-05-28T19:00:00+00:00"
+NOW = datetime(2026, 5, 28, 19, 0, 0, tzinfo=timezone.utc)
+
+
+# ---- helpers --------------------------------------------------------------
+
+
+def _node(name: str, ready: str = "True", *, unschedulable: bool = False) -> SimpleNamespace:
+    return SimpleNamespace(
+        metadata=SimpleNamespace(name=name),
+        spec=SimpleNamespace(unschedulable=unschedulable),
+        status=SimpleNamespace(
+            conditions=[SimpleNamespace(type="Ready", status=ready)],
+        ),
+    )
+
+
+def _snap_pod(
+    *,
+    namespace: str = "default",
+    name: str = "pod-1",
+    phase: str = "Running",
+    restart_counts: list[int] | None = None,
+) -> SimpleNamespace:
+    statuses = [
+        SimpleNamespace(restart_count=r) for r in (restart_counts or [0])
+    ]
+    return SimpleNamespace(
+        metadata=SimpleNamespace(name=name, namespace=namespace),
+        status=SimpleNamespace(phase=phase, container_statuses=statuses),
+    )
+
+
+def _event(
+    *,
+    reason: str,
+    message: str,
+    kind: str = "Pod",
+    name: str = "obj",
+    when: datetime | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        type="Warning",
+        reason=reason,
+        message=message,
+        last_timestamp=when or NOW,
+        event_time=None,
+        involved_object=SimpleNamespace(kind=kind, name=name),
+    )
+
+
+def _make_clients(
+    *,
+    nodes: list | None = None,
+    pods: list | None = None,
+    events: list | None = None,
+    git_version: str = "v1.30.0-eks-abc123",
+) -> tuple[MagicMock, MagicMock]:
+    core_v1 = MagicMock()
+    core_v1.list_node.return_value = SimpleNamespace(items=nodes or [])
+    core_v1.list_pod_for_all_namespaces.return_value = SimpleNamespace(items=pods or [])
+    core_v1.list_namespaced_event.return_value = SimpleNamespace(items=events or [])
+    version_api = MagicMock()
+    version_api.get_code.return_value = SimpleNamespace(git_version=git_version)
+    return core_v1, version_api
+
+
+def _section(report: SnapshotReport, label: str):
+    for s in report.sections:
+        if s.label == label:
+            return s
+    raise AssertionError(f"section {label!r} missing; got {[s.label for s in report.sections]}")
+
+
+# ---- happy path -----------------------------------------------------------
+
+
+class TestCaptureSnapshotHappyPath:
+    def test_no_anomaly_for_clean_cluster(self):
+        core_v1, version_api = _make_clients(
+            nodes=[_node("node-1"), _node("node-2")],
+            pods=[
+                _snap_pod(name="api-1", phase="Running"),
+                _snap_pod(name="api-2", phase="Running"),
+                _snap_pod(name="worker-1", phase="Running"),
+            ],
+            events=[],
+        )
+        report = _execute_capture_snapshot(
+            core_v1, version_api, requested_at=REQUESTED_AT,
+            cluster_name="eks-prod", now=NOW,
+        )
+        assert report.anomaly is False
+        assert report.anomaly_summary is None
+
+    def test_cluster_section_includes_name_and_version(self):
+        core_v1, version_api = _make_clients(git_version="v1.31.4-eks-xyz")
+        report = _execute_capture_snapshot(
+            core_v1, version_api, requested_at=REQUESTED_AT,
+            cluster_name="eks-prod", now=NOW,
+        )
+        cluster = _section(report, "Cluster")
+        joined = "\n".join(cluster.lines)
+        assert "name: eks-prod" in joined
+        assert "v1.31.4-eks-xyz" in joined
+
+    def test_cluster_name_falls_back_to_env(self, monkeypatch):
+        monkeypatch.setenv("EKS_CLUSTER_NAME", "from-env")
+        core_v1, version_api = _make_clients()
+        report = _execute_capture_snapshot(
+            core_v1, version_api, requested_at=REQUESTED_AT, now=NOW,
+        )
+        joined = "\n".join(_section(report, "Cluster").lines)
+        assert "from-env" in joined
+
+    def test_cluster_name_unknown_when_no_env(self, monkeypatch):
+        monkeypatch.delenv("EKS_CLUSTER_NAME", raising=False)
+        core_v1, version_api = _make_clients()
+        report = _execute_capture_snapshot(
+            core_v1, version_api, requested_at=REQUESTED_AT, now=NOW,
+        )
+        joined = "\n".join(_section(report, "Cluster").lines)
+        assert "(unknown)" in joined
+
+    def test_node_section_counts_by_status(self):
+        core_v1, version_api = _make_clients(
+            nodes=[
+                _node("a"),
+                _node("b"),
+                _node("c", ready="False"),
+                _node("d", unschedulable=True),
+            ],
+        )
+        report = _execute_capture_snapshot(
+            core_v1, version_api, requested_at=REQUESTED_AT, now=NOW,
+        )
+        joined = "\n".join(_section(report, "Nodes").lines)
+        assert "2 Ready" in joined
+        assert "1 NotReady" in joined
+        assert "1 SchedulingDisabled" in joined
+
+    def test_pod_section_counts_by_phase(self):
+        core_v1, version_api = _make_clients(
+            pods=[
+                _snap_pod(name="r1", phase="Running"),
+                _snap_pod(name="r2", phase="Running"),
+                _snap_pod(name="p1", phase="Pending"),
+                _snap_pod(name="s1", phase="Succeeded"),
+            ],
+        )
+        report = _execute_capture_snapshot(
+            core_v1, version_api, requested_at=REQUESTED_AT, now=NOW,
+        )
+        joined = "\n".join(_section(report, "Pods").lines)
+        assert "2 Running" in joined
+        assert "1 Pending" in joined
+        assert "1 Succeeded" in joined
+
+
+# ---- anomaly paths --------------------------------------------------------
+
+
+class TestCaptureSnapshotAnomalyPaths:
+    def test_not_ready_node_flags_anomaly(self):
+        core_v1, version_api = _make_clients(
+            nodes=[_node("a"), _node("b", ready="False")],
+        )
+        report = _execute_capture_snapshot(
+            core_v1, version_api, requested_at=REQUESTED_AT, now=NOW,
+        )
+        assert report.anomaly is True
+        assert "NotReady" in (report.anomaly_summary or "")
+
+    def test_failed_pod_flags_anomaly(self):
+        core_v1, version_api = _make_clients(
+            pods=[
+                _snap_pod(name="api", phase="Running"),
+                _snap_pod(name="dead", phase="Failed"),
+            ],
+        )
+        report = _execute_capture_snapshot(
+            core_v1, version_api, requested_at=REQUESTED_AT, now=NOW,
+        )
+        assert report.anomaly is True
+        assert "Failed" in (report.anomaly_summary or "")
+
+    def test_high_restart_count_flags_anomaly(self):
+        core_v1, version_api = _make_clients(
+            pods=[
+                _snap_pod(name="crashloop", phase="Pending", restart_counts=[5]),
+            ],
+        )
+        report = _execute_capture_snapshot(
+            core_v1, version_api, requested_at=REQUESTED_AT, now=NOW,
+        )
+        assert report.anomaly is True
+        assert "restarts" in (report.anomaly_summary or "")
+        assert "≥ 3" in (report.anomaly_summary or "")
+
+    def test_two_restarts_does_not_flag_anomaly(self):
+        core_v1, version_api = _make_clients(
+            pods=[_snap_pod(name="p", phase="Pending", restart_counts=[2])],
+        )
+        report = _execute_capture_snapshot(
+            core_v1, version_api, requested_at=REQUESTED_AT, now=NOW,
+        )
+        # Pending is fine on its own; restart count only flips at >= 3
+        assert report.anomaly is False
+
+    def test_recent_kube_system_warning_event_flags_anomaly(self):
+        core_v1, version_api = _make_clients(
+            events=[
+                _event(
+                    reason="FailedScheduling",
+                    message="0/3 nodes available",
+                    kind="Pod", name="bad",
+                    when=NOW - timedelta(minutes=2),
+                )
+            ],
+        )
+        report = _execute_capture_snapshot(
+            core_v1, version_api, requested_at=REQUESTED_AT, now=NOW,
+        )
+        assert report.anomaly is True
+        assert "kube-system warning" in (report.anomaly_summary or "")
+
+    def test_old_event_outside_5min_window_does_not_flag(self):
+        core_v1, version_api = _make_clients(
+            events=[
+                _event(
+                    reason="OldStuff", message="x",
+                    when=NOW - timedelta(minutes=20),
+                )
+            ],
+        )
+        report = _execute_capture_snapshot(
+            core_v1, version_api, requested_at=REQUESTED_AT, now=NOW,
+        )
+        assert report.anomaly is False
+
+    def test_multiple_anomalies_concatenated_in_summary(self):
+        core_v1, version_api = _make_clients(
+            nodes=[_node("a", ready="False")],
+            pods=[
+                _snap_pod(name="dead", phase="Failed"),
+                _snap_pod(name="restart", phase="Pending", restart_counts=[10]),
+            ],
+        )
+        report = _execute_capture_snapshot(
+            core_v1, version_api, requested_at=REQUESTED_AT, now=NOW,
+        )
+        summary = report.anomaly_summary or ""
+        assert "NotReady" in summary
+        assert "Failed" in summary
+        assert "restarts" in summary
+
+
+# ---- non-Running pods list ------------------------------------------------
+
+
+class TestCaptureSnapshotNonRunningList:
+    def test_lists_non_running_pods_with_namespace_phase_restarts(self):
+        core_v1, version_api = _make_clients(
+            pods=[
+                _snap_pod(namespace="prod", name="api-1", phase="Running"),
+                _snap_pod(namespace="prod", name="api-2", phase="Pending", restart_counts=[1]),
+                _snap_pod(namespace="data", name="worker", phase="Failed", restart_counts=[2]),
+            ],
+        )
+        report = _execute_capture_snapshot(
+            core_v1, version_api, requested_at=REQUESTED_AT, now=NOW,
+        )
+        nr = _section(report, "Non-Running pods (top 10)")
+        # Failed sorts before Pending; "prod/api-1" (Running) excluded
+        joined = "\n".join(nr.lines)
+        assert "data/worker · phase=Failed · restarts=2" in joined
+        assert "prod/api-2 · phase=Pending · restarts=1" in joined
+        assert "prod/api-1" not in joined
+
+    def test_truncates_to_10_with_tail_count(self):
+        pods = [
+            _snap_pod(namespace="ns", name=f"p-{i:02d}", phase="Pending")
+            for i in range(15)
+        ]
+        core_v1, version_api = _make_clients(pods=pods)
+        report = _execute_capture_snapshot(
+            core_v1, version_api, requested_at=REQUESTED_AT, now=NOW,
+        )
+        nr_lines = _section(report, "Non-Running pods (top 10)").lines
+        # 10 entries + 1 tail line
+        assert len(nr_lines) == 11
+        assert "5 more not shown" in nr_lines[-1]
+
+
+# ---- error paths ----------------------------------------------------------
+
+
+class TestCaptureSnapshotErrorPaths:
+    def test_list_node_api_failure_renders_error_in_section(self):
+        core_v1, version_api = _make_clients()
+        from kubernetes.client.exceptions import ApiException
+        core_v1.list_node.side_effect = ApiException(reason="forbidden")
+
+        report = _execute_capture_snapshot(
+            core_v1, version_api, requested_at=REQUESTED_AT, now=NOW,
+        )
+        joined = "\n".join(_section(report, "Nodes").lines)
+        assert "❌" in joined
+        assert "forbidden" in joined
+        # API failure on nodes does not flip anomaly on its own
+        assert report.anomaly is False
+
+    def test_list_pods_api_failure_returns_partial_report_no_raise(self):
+        core_v1, version_api = _make_clients()
+        from kubernetes.client.exceptions import ApiException
+        core_v1.list_pod_for_all_namespaces.side_effect = ApiException(
+            reason="cluster unreachable"
+        )
+
+        report = _execute_capture_snapshot(
+            core_v1, version_api, requested_at=REQUESTED_AT, now=NOW,
+        )
+        joined = "\n".join(_section(report, "Pods").lines)
+        assert "cluster unreachable" in joined
+        # Cluster + Nodes + Pods + Non-Running list still present
+        labels = [s.label for s in report.sections]
+        assert "Cluster" in labels
+        assert "Pods" in labels
+        assert "Non-Running pods (top 10)" in labels
+
+    def test_version_api_failure_does_not_block_other_sections(self):
+        core_v1, version_api = _make_clients()
+        version_api.get_code.side_effect = RuntimeError("connection refused")
+
+        report = _execute_capture_snapshot(
+            core_v1, version_api, requested_at=REQUESTED_AT, now=NOW,
+        )
+        joined = "\n".join(_section(report, "Cluster").lines)
+        assert "connection refused" in joined
+        # All five sections still rendered
+        assert len(report.sections) == 5
+
+    def test_event_api_failure_renders_in_section(self):
+        core_v1, version_api = _make_clients()
+        from kubernetes.client.exceptions import ApiException
+        core_v1.list_namespaced_event.side_effect = ApiException(reason="rbac denied")
+
+        report = _execute_capture_snapshot(
+            core_v1, version_api, requested_at=REQUESTED_AT, now=NOW,
+        )
+        joined = "\n".join(
+            _section(report, "kube-system warning events (last 5 min)").lines
+        )
+        assert "rbac denied" in joined
+        assert report.anomaly is False

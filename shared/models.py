@@ -87,3 +87,38 @@ class CommandRequest:
     thread_ts: str | None  # Thread context; None if invoked outside a thread
     response_url: str  # Platform callback URL for async responses
     platform_metadata: dict = field(default_factory=dict)
+
+
+@dataclass
+class SnapshotSection:
+    """A labelled list of pre-rendered bullet lines within an agent's snapshot.
+
+    The agent's ``capture_snapshot`` tool produces these as the structural
+    units of its :class:`SnapshotReport`. The renderer lays each one out as
+    a bold label followed by ``- {line}`` bullets, with no further
+    transformation — agents own their own truncation and humanisation.
+    """
+
+    label: str
+    lines: list[str]
+
+
+@dataclass
+class SnapshotReport:
+    """A specialized agent's snapshot of its observed infrastructure.
+
+    Returned by the agent's ``capture_snapshot`` tool. Carries the agent's
+    name, the wall-clock instant the snapshot was taken, the labelled
+    per-section content lines, and an anomaly flag the master uses to
+    drive the section's status marker (✅ ok / ⚠️ anomaly) in the rendered
+    ``SnapshotSections``. The renderer-side counterpart is
+    :class:`shared.report_renderer.SnapshotBlock`, which the master
+    composes by adding registry-derived display info and a status marker.
+    """
+
+    agent_name: str
+    captured_at: str  # ISO 8601
+    sections: list[SnapshotSection]
+    anomaly: bool = False
+    anomaly_summary: str | None = None  # one-liner for the deterministic top-line summary
+    metadata: AgentMetadata = field(default_factory=AgentMetadata)

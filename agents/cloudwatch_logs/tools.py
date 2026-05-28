@@ -7,16 +7,18 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime, timedelta, timezone
 
 import boto3
 from botocore.exceptions import ClientError
 from strands import tool
 
-from shared.models import Finding
+from shared.models import Finding, SnapshotReport, SnapshotSection
 from shared.tool_result import (
     ToolResult,
     build_agent_result,
     format_result,
+    format_snapshot_result,
     severity_from_text,
 )
 
@@ -243,3 +245,332 @@ def _execute_query(
     result.findings.extend(_results_to_findings(rows, existing))
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# /status snapshot — top log groups by ingestion (i-a)
+# ---------------------------------------------------------------------------
+
+
+_SNAPSHOT_LOOKBACK_MINUTES: int = 15
+_SNAPSHOT_TOP_N: int = 10
+_SNAPSHOT_MAX_GROUPS_SCANNED: int = 500
+_SNAPSHOT_METRIC_BATCH_SIZE: int = 500
+_SNAPSHOT_INSIGHTS_QUERY = (
+    "filter @message like /(?i)error|exception|fail/ "
+    "| stats count() by @logGroup"
+)
+
+
+@tool
+def capture_snapshot(requested_at: str) -> str:
+    """Capture a snapshot of the top 10 CloudWatch Log groups by ingestion.
+
+    Implementation (i-a from the spec):
+
+    1. ``DescribeLogGroups`` (paginated) to enumerate up to 500 groups.
+    2. Single ``GetMetricData`` call against ``AWS/Logs/IncomingBytes`` to
+       sum bytes per group over the last 15 minutes.
+    3. Sort, take the top 10.
+    4. Bounded Logs Insights query against just those 10 groups to count
+       error/exception/fail lines.
+
+    The tool never raises — any failure is folded into the snapshot.
+
+    Args:
+        requested_at: ISO 8601 timestamp from the master, used as the
+            ``captured_at`` field of the returned report.
+
+    Returns:
+        A short human-readable string ending with a
+        ``<<<SNAPSHOT_RESULT ... SNAPSHOT_RESULT>>>`` footer.
+    """
+    try:
+        logs_client = boto3.client("logs")
+        cw_client = boto3.client("cloudwatch")
+    except Exception as exc:
+        return format_snapshot_result(
+            SnapshotReport(
+                agent_name="cloudwatch_logs",
+                captured_at=requested_at,
+                sections=[
+                    SnapshotSection(
+                        label="Top log groups by ingestion (last 15 min)",
+                        lines=[f"❌ failed to construct AWS clients: {exc}"],
+                    )
+                ],
+                anomaly=True,
+                anomaly_summary=f"CloudWatch Logs snapshot failed: {exc}",
+            )
+        )
+
+    report = _execute_capture_snapshot(
+        logs_client, cw_client, requested_at=requested_at,
+    )
+    return format_snapshot_result(report)
+
+
+def _execute_capture_snapshot(
+    logs_client,
+    cw_client,
+    *,
+    requested_at: str,
+    now: datetime | None = None,
+    top_n: int = _SNAPSHOT_TOP_N,
+    max_groups_scanned: int = _SNAPSHOT_MAX_GROUPS_SCANNED,
+) -> SnapshotReport:
+    """Pure snapshot builder. All I/O goes through *logs_client* / *cw_client*.
+
+    Tests pass mock boto3 clients to drive every branch: empty account,
+    happy path with metric ranking, anomaly when any top-N has errors,
+    Insights query failure (soft — top-N still renders), and primary
+    probe failures (DescribeLogGroups / GetMetricData).
+    """
+    section_label = f"Top log groups by ingestion (last {_SNAPSHOT_LOOKBACK_MINUTES} min)"
+    now = now or datetime.now(tz=timezone.utc)
+    start = now - timedelta(minutes=_SNAPSHOT_LOOKBACK_MINUTES)
+
+    # Step 1: enumerate log groups (paginated).
+    try:
+        groups = _list_log_groups(logs_client, max_groups=max_groups_scanned)
+    except ClientError as exc:
+        return _snapshot_anomaly(
+            requested_at,
+            section_label,
+            f"❌ describe_log_groups failed: {_client_error_message(exc)}",
+        )
+    except Exception as exc:
+        return _snapshot_anomaly(
+            requested_at,
+            section_label,
+            f"❌ describe_log_groups failed: {exc}",
+        )
+
+    if not groups:
+        return SnapshotReport(
+            agent_name="cloudwatch_logs",
+            captured_at=requested_at,
+            sections=[
+                SnapshotSection(
+                    label=section_label,
+                    lines=["(no log groups in this account/region)"],
+                )
+            ],
+            anomaly=False,
+        )
+
+    # Step 2: GetMetricData for IncomingBytes per group.
+    try:
+        volumes = _bytes_per_group(cw_client, groups, start, now)
+    except ClientError as exc:
+        return _snapshot_anomaly(
+            requested_at,
+            section_label,
+            f"❌ get_metric_data failed: {_client_error_message(exc)}",
+        )
+    except Exception as exc:
+        return _snapshot_anomaly(
+            requested_at,
+            section_label,
+            f"❌ get_metric_data failed: {exc}",
+        )
+
+    # Step 3: sort, take top N (drop zero-volume groups).
+    ranked = sorted(
+        ((name, vol) for name, vol in volumes.items() if vol > 0),
+        key=lambda kv: kv[1],
+        reverse=True,
+    )[:top_n]
+
+    if not ranked:
+        return SnapshotReport(
+            agent_name="cloudwatch_logs",
+            captured_at=requested_at,
+            sections=[
+                SnapshotSection(
+                    label=section_label,
+                    lines=["(no log group received any traffic in the window)"],
+                )
+            ],
+            anomaly=False,
+        )
+
+    # Step 4: bounded Insights query for error counts on the top N.
+    error_counts: dict[str, int] = {}
+    error_query_failed = False
+    try:
+        error_counts = _query_error_counts(
+            logs_client,
+            [name for name, _ in ranked],
+            start,
+            now,
+        )
+    except (ClientError, Exception):
+        # Soft failure — render top-N without error counts. Don't flip anomaly
+        # just because we couldn't measure errors.
+        error_query_failed = True
+        logger.warning("CloudWatch snapshot Insights query failed", exc_info=True)
+
+    # Build section lines.
+    lines: list[str] = []
+    for name, bytes_val in ranked:
+        line = f"{name} · {_humanize_bytes(bytes_val)}"
+        if name in error_counts:
+            line += f" · {error_counts[name]} errors"
+        elif error_query_failed:
+            line += " · ⚠️ error count unavailable"
+        lines.append(line)
+
+    # Anomaly: any of the top N has error_count > 0.
+    anomaly_count = sum(1 for c in error_counts.values() if c > 0)
+    anomaly = anomaly_count > 0
+    anomaly_summary = (
+        f"{anomaly_count} log group(s) with errors in last "
+        f"{_SNAPSHOT_LOOKBACK_MINUTES} min"
+        if anomaly
+        else None
+    )
+
+    return SnapshotReport(
+        agent_name="cloudwatch_logs",
+        captured_at=requested_at,
+        sections=[SnapshotSection(label=section_label, lines=lines)],
+        anomaly=anomaly,
+        anomaly_summary=anomaly_summary,
+    )
+
+
+def _list_log_groups(client, *, max_groups: int) -> list[str]:
+    """Enumerate log group names via paginated ``describe_log_groups``."""
+    names: list[str] = []
+    next_token: str | None = None
+    while True:
+        kwargs = {"limit": 50}
+        if next_token:
+            kwargs["nextToken"] = next_token
+        response = client.describe_log_groups(**kwargs)
+        for lg in response.get("logGroups", []):
+            name = lg.get("logGroupName")
+            if name:
+                names.append(name)
+                if len(names) >= max_groups:
+                    return names
+        next_token = response.get("nextToken")
+        if not next_token:
+            break
+    return names
+
+
+def _bytes_per_group(
+    cw_client,
+    log_group_names: list[str],
+    start: datetime,
+    end: datetime,
+) -> dict[str, float]:
+    """Single-window IncomingBytes sum per log group via ``get_metric_data``.
+
+    Chunked into 500-query batches to respect the API's per-call limit.
+    Returns ``{name: bytes}``; missing/zero-volume groups simply don't
+    appear with a non-zero value.
+    """
+    period_seconds = int((end - start).total_seconds()) or 60
+    totals: dict[str, float] = {}
+    for batch_start in range(0, len(log_group_names), _SNAPSHOT_METRIC_BATCH_SIZE):
+        batch = log_group_names[batch_start : batch_start + _SNAPSHOT_METRIC_BATCH_SIZE]
+        queries = []
+        id_to_name: dict[str, str] = {}
+        for i, name in enumerate(batch):
+            qid = f"q{batch_start + i}"
+            id_to_name[qid] = name
+            queries.append({
+                "Id": qid,
+                "MetricStat": {
+                    "Metric": {
+                        "Namespace": "AWS/Logs",
+                        "MetricName": "IncomingBytes",
+                        "Dimensions": [
+                            {"Name": "LogGroupName", "Value": name}
+                        ],
+                    },
+                    "Period": period_seconds,
+                    "Stat": "Sum",
+                },
+                "ReturnData": True,
+            })
+        response = cw_client.get_metric_data(
+            MetricDataQueries=queries,
+            StartTime=start,
+            EndTime=end,
+        )
+        for r in response.get("MetricDataResults", []):
+            qid = r.get("Id")
+            name = id_to_name.get(qid)
+            if name is None:
+                continue
+            values = r.get("Values") or []
+            totals[name] = sum(values)
+    return totals
+
+
+def _query_error_counts(
+    client,
+    log_group_names: list[str],
+    start: datetime,
+    end: datetime,
+) -> dict[str, int]:
+    """Run a bounded Insights query for error-line counts on the given groups.
+
+    Uses the ``@logGroup`` aliasing field so we can map results back to
+    log group names without parsing ARNs.
+    """
+    response = client.start_query(
+        logGroupNames=log_group_names,
+        startTime=int(start.timestamp()),
+        endTime=int(end.timestamp()),
+        queryString=_SNAPSHOT_INSIGHTS_QUERY,
+    )
+    query_id = response["queryId"]
+    status, rows = _poll_query_results(client, query_id)
+    if status != "Complete":
+        return {}
+
+    counts: dict[str, int] = {}
+    for row in rows:
+        row_dict = {item["field"]: item["value"] for item in row}
+        log_group = row_dict.get("@logGroup", "")
+        count_str = row_dict.get("count()") or row_dict.get("count(*)") or "0"
+        try:
+            counts[log_group] = int(count_str)
+        except (TypeError, ValueError):
+            counts[log_group] = 0
+    return counts
+
+
+def _humanize_bytes(n: float) -> str:
+    """Format a byte count as `12.3 MB`-style string."""
+    val = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if val < 1024 or unit == "TB":
+            return f"{val:.1f} {unit}"
+        val /= 1024
+    return f"{val:.1f} TB"
+
+
+def _client_error_message(exc: ClientError) -> str:
+    err = getattr(exc, "response", {}).get("Error", {}) if exc.response else {}
+    code = err.get("Code") or "Unknown"
+    message = err.get("Message") or str(exc)
+    return f"{code}: {message}"
+
+
+def _snapshot_anomaly(
+    requested_at: str, section_label: str, line: str
+) -> SnapshotReport:
+    """Build a single-section anomaly snapshot for primary-probe failures."""
+    return SnapshotReport(
+        agent_name="cloudwatch_logs",
+        captured_at=requested_at,
+        sections=[SnapshotSection(label=section_label, lines=[line])],
+        anomaly=True,
+        anomaly_summary=line.lstrip("❌ ").strip(),
+    )

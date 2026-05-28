@@ -474,3 +474,345 @@ class TestExecuteQuery:
 
         assert len(result.errors) >= 1
         assert "failed" in result.errors[-1].lower()
+
+
+# ---------------------------------------------------------------------------
+# capture_snapshot — /status path (i-a: IncomingBytes ranking + bounded Insights)
+# ---------------------------------------------------------------------------
+
+from datetime import datetime, timezone
+
+from agents.cloudwatch_logs.tools import (
+    _bytes_per_group,
+    _execute_capture_snapshot,
+    _humanize_bytes,
+    _list_log_groups,
+    _query_error_counts,
+)
+from shared.models import SnapshotReport
+
+
+REQUESTED_AT = "2026-05-28T19:00:00+00:00"
+NOW = datetime(2026, 5, 28, 19, 0, 0, tzinfo=timezone.utc)
+
+
+# ---- helpers --------------------------------------------------------------
+
+
+def _describe_response(group_names: list[str], next_token: str | None = None) -> dict:
+    response = {"logGroups": [{"logGroupName": n} for n in group_names]}
+    if next_token:
+        response["nextToken"] = next_token
+    return response
+
+
+def _metric_data_response(volumes: dict[str, float], *, id_start: int = 0) -> dict:
+    """Build a get_metric_data response from {qid: bytes} pairs.
+
+    Helper that maps query IDs `q<id_start>..q<id_start+N-1>` to the order
+    log groups were passed in. Tests construct {<group>: bytes} and the
+    helper internally figures out the q-id mapping. ``id_start`` lets
+    tests build successive batches with the correct offsets.
+    """
+    results = []
+    for i, (_, vol) in enumerate(volumes.items()):
+        results.append({
+            "Id": f"q{id_start + i}",
+            "Label": "IncomingBytes",
+            "Timestamps": [NOW.isoformat()],
+            "Values": [vol] if vol else [],
+            "StatusCode": "Complete",
+        })
+    return {"MetricDataResults": results}
+
+
+def _insights_results(counts: dict[str, int]) -> list[list[dict]]:
+    return [
+        [{"field": "@logGroup", "value": group}, {"field": "count()", "value": str(c)}]
+        for group, c in counts.items()
+    ]
+
+
+def _setup_happy_clients(
+    *,
+    groups: list[str] | None = None,
+    volumes: dict[str, float] | None = None,
+    error_counts: dict[str, int] | None = None,
+) -> tuple[MagicMock, MagicMock]:
+    groups = groups or ["/aws/lambda/foo"]
+    volumes = volumes or {g: 1024.0 for g in groups}
+    error_counts = error_counts or {}
+
+    logs_client = MagicMock()
+    logs_client.describe_log_groups.return_value = _describe_response(groups)
+    logs_client.start_query.return_value = {"queryId": "qid-1"}
+    logs_client.get_query_results.return_value = {
+        "status": "Complete",
+        "results": _insights_results(error_counts),
+    }
+
+    cw_client = MagicMock()
+    cw_client.get_metric_data.return_value = _metric_data_response(volumes)
+    return logs_client, cw_client
+
+
+def _section_lines(report: SnapshotReport, label_substring: str = "Top log groups") -> list[str]:
+    for s in report.sections:
+        if label_substring in s.label:
+            return s.lines
+    raise AssertionError(f"section matching {label_substring!r} not found")
+
+
+# ---- _humanize_bytes ------------------------------------------------------
+
+
+class TestHumanizeBytes:
+    def test_zero_bytes(self):
+        assert _humanize_bytes(0) == "0.0 B"
+
+    def test_kilobytes(self):
+        assert _humanize_bytes(2048) == "2.0 KB"
+
+    def test_megabytes(self):
+        assert _humanize_bytes(5 * 1024 * 1024) == "5.0 MB"
+
+    def test_gigabytes(self):
+        assert _humanize_bytes(1.5 * 1024 ** 3) == "1.5 GB"
+
+
+# ---- _list_log_groups -----------------------------------------------------
+
+
+class TestListLogGroups:
+    def test_single_page(self):
+        client = MagicMock()
+        client.describe_log_groups.return_value = _describe_response(["a", "b"])
+        result = _list_log_groups(client, max_groups=500)
+        assert result == ["a", "b"]
+
+    def test_paginated(self):
+        client = MagicMock()
+        client.describe_log_groups.side_effect = [
+            _describe_response(["a", "b"], next_token="t1"),
+            _describe_response(["c"], next_token=None),
+        ]
+        result = _list_log_groups(client, max_groups=500)
+        assert result == ["a", "b", "c"]
+        assert client.describe_log_groups.call_count == 2
+
+    def test_max_groups_caps_pagination(self):
+        client = MagicMock()
+        client.describe_log_groups.side_effect = [
+            _describe_response(["a", "b", "c"], next_token="t1"),
+            # Should never be called — cap reached after first page
+        ]
+        result = _list_log_groups(client, max_groups=2)
+        assert result == ["a", "b"]
+
+
+# ---- _bytes_per_group -----------------------------------------------------
+
+
+class TestBytesPerGroup:
+    def test_maps_results_back_to_group_names(self):
+        cw = MagicMock()
+        cw.get_metric_data.return_value = _metric_data_response(
+            {"a": 100.0, "b": 200.0, "c": 0.0},
+        )
+        totals = _bytes_per_group(cw, ["a", "b", "c"], NOW, NOW)
+        assert totals == {"a": 100.0, "b": 200.0, "c": 0.0}
+
+    def test_chunks_in_500_query_batches(self):
+        cw = MagicMock()
+        cw.get_metric_data.side_effect = [
+            _metric_data_response({f"g{i}": 1.0 for i in range(500)}, id_start=0),
+            _metric_data_response({f"g{i}": 2.0 for i in range(500, 510)}, id_start=500),
+        ]
+        groups = [f"g{i}" for i in range(510)]
+        totals = _bytes_per_group(cw, groups, NOW, NOW)
+        assert len(totals) == 510
+        assert cw.get_metric_data.call_count == 2
+
+
+# ---- _query_error_counts --------------------------------------------------
+
+
+class TestQueryErrorCounts:
+    def test_parses_at_log_group_and_count(self):
+        client = MagicMock()
+        client.start_query.return_value = {"queryId": "q1"}
+        client.get_query_results.return_value = {
+            "status": "Complete",
+            "results": _insights_results({"/aws/lambda/foo": 5, "/aws/lambda/bar": 0}),
+        }
+        counts = _query_error_counts(
+            client, ["/aws/lambda/foo", "/aws/lambda/bar"], NOW, NOW,
+        )
+        assert counts == {"/aws/lambda/foo": 5, "/aws/lambda/bar": 0}
+
+    def test_non_complete_status_returns_empty(self):
+        client = MagicMock()
+        client.start_query.return_value = {"queryId": "q1"}
+        client.get_query_results.return_value = {
+            "status": "Failed",
+            "results": [],
+        }
+        counts = _query_error_counts(client, ["/aws/lambda/foo"], NOW, NOW)
+        assert counts == {}
+
+
+# ---- happy path -----------------------------------------------------------
+
+
+class TestCaptureSnapshotHappyPath:
+    def test_no_anomaly_with_zero_error_counts(self):
+        logs, cw = _setup_happy_clients(
+            groups=["/aws/lambda/foo", "/aws/lambda/bar"],
+            volumes={"/aws/lambda/foo": 5_000_000, "/aws/lambda/bar": 1_000_000},
+            error_counts={"/aws/lambda/foo": 0, "/aws/lambda/bar": 0},
+        )
+        report = _execute_capture_snapshot(logs, cw, requested_at=REQUESTED_AT, now=NOW)
+        assert report.anomaly is False
+
+    def test_top_n_lines_include_byte_volume_and_error_count(self):
+        logs, cw = _setup_happy_clients(
+            groups=["/aws/lambda/foo", "/aws/lambda/bar"],
+            volumes={"/aws/lambda/foo": 5_242_880, "/aws/lambda/bar": 1_048_576},
+            error_counts={"/aws/lambda/foo": 0, "/aws/lambda/bar": 0},
+        )
+        report = _execute_capture_snapshot(logs, cw, requested_at=REQUESTED_AT, now=NOW)
+        joined = "\n".join(_section_lines(report))
+        assert "/aws/lambda/foo · 5.0 MB · 0 errors" in joined
+        assert "/aws/lambda/bar · 1.0 MB · 0 errors" in joined
+
+    def test_results_sorted_by_volume_desc(self):
+        logs, cw = _setup_happy_clients(
+            groups=["small", "large", "medium"],
+            volumes={"small": 100, "large": 10_000, "medium": 1_000},
+            error_counts={"small": 0, "large": 0, "medium": 0},
+        )
+        report = _execute_capture_snapshot(logs, cw, requested_at=REQUESTED_AT, now=NOW)
+        lines = _section_lines(report)
+        # Order: large, medium, small
+        assert lines[0].startswith("large")
+        assert lines[1].startswith("medium")
+        assert lines[2].startswith("small")
+
+    def test_truncated_to_top_n(self):
+        groups = [f"g{i}" for i in range(20)]
+        volumes = {g: float(i) for i, g in enumerate(groups, start=1)}
+        logs, cw = _setup_happy_clients(
+            groups=groups,
+            volumes=volumes,
+            error_counts={g: 0 for g in groups},
+        )
+        report = _execute_capture_snapshot(
+            logs, cw, requested_at=REQUESTED_AT, now=NOW, top_n=10,
+        )
+        lines = _section_lines(report)
+        assert len(lines) == 10
+
+    def test_zero_volume_groups_excluded(self):
+        logs, cw = _setup_happy_clients(
+            groups=["live", "dead"],
+            volumes={"live": 1024, "dead": 0},
+            error_counts={"live": 0},
+        )
+        report = _execute_capture_snapshot(logs, cw, requested_at=REQUESTED_AT, now=NOW)
+        lines = _section_lines(report)
+        # "dead" volume=0 is not in the top-N; "live" is
+        assert any("live" in line for line in lines)
+        assert not any("dead" in line for line in lines)
+
+
+# ---- anomaly path ---------------------------------------------------------
+
+
+class TestCaptureSnapshotAnomalyPath:
+    def test_any_top_n_with_errors_flips_anomaly(self):
+        logs, cw = _setup_happy_clients(
+            groups=["a", "b"],
+            volumes={"a": 1024, "b": 1024},
+            error_counts={"a": 47, "b": 0},
+        )
+        report = _execute_capture_snapshot(logs, cw, requested_at=REQUESTED_AT, now=NOW)
+        assert report.anomaly is True
+        summary = report.anomaly_summary or ""
+        assert "1 log group" in summary
+        assert "errors" in summary
+
+    def test_error_count_in_section_line(self):
+        logs, cw = _setup_happy_clients(
+            groups=["api"],
+            volumes={"api": 5_242_880},
+            error_counts={"api": 47},
+        )
+        report = _execute_capture_snapshot(logs, cw, requested_at=REQUESTED_AT, now=NOW)
+        joined = "\n".join(_section_lines(report))
+        assert "api · 5.0 MB · 47 errors" in joined
+
+
+# ---- empty / soft-failure paths -------------------------------------------
+
+
+class TestCaptureSnapshotEdgeCases:
+    def test_no_log_groups_in_account(self):
+        logs = MagicMock()
+        logs.describe_log_groups.return_value = _describe_response([])
+        cw = MagicMock()
+        report = _execute_capture_snapshot(logs, cw, requested_at=REQUESTED_AT, now=NOW)
+        assert report.anomaly is False
+        joined = "\n".join(_section_lines(report))
+        assert "no log groups" in joined.lower()
+        # GetMetricData is never called when there are no groups
+        cw.get_metric_data.assert_not_called()
+
+    def test_no_traffic_in_window(self):
+        logs, cw = _setup_happy_clients(
+            groups=["idle"],
+            volumes={"idle": 0.0},
+            error_counts={},
+        )
+        report = _execute_capture_snapshot(logs, cw, requested_at=REQUESTED_AT, now=NOW)
+        assert report.anomaly is False
+        joined = "\n".join(_section_lines(report))
+        assert "no log group received any traffic" in joined.lower()
+
+    def test_insights_query_failure_is_soft(self):
+        # Top-N still renders; error_count column is replaced with a notice.
+        logs, cw = _setup_happy_clients(
+            groups=["foo"],
+            volumes={"foo": 1024},
+        )
+        logs.start_query.side_effect = _client_error("AccessDenied", "no logs perms")
+        report = _execute_capture_snapshot(logs, cw, requested_at=REQUESTED_AT, now=NOW)
+        # NOT anomaly — error count is informational
+        assert report.anomaly is False
+        joined = "\n".join(_section_lines(report))
+        assert "foo · 1.0 KB" in joined
+        assert "error count unavailable" in joined.lower()
+
+
+# ---- primary-probe failures ----------------------------------------------
+
+
+class TestCaptureSnapshotPrimaryFailures:
+    def test_describe_log_groups_failure_is_anomaly(self):
+        logs = MagicMock()
+        logs.describe_log_groups.side_effect = _client_error("AccessDenied", "no")
+        cw = MagicMock()
+        report = _execute_capture_snapshot(logs, cw, requested_at=REQUESTED_AT, now=NOW)
+        assert report.anomaly is True
+        assert "describe_log_groups" in (report.anomaly_summary or "")
+        cw.get_metric_data.assert_not_called()
+
+    def test_get_metric_data_failure_is_anomaly(self):
+        logs = MagicMock()
+        logs.describe_log_groups.return_value = _describe_response(["foo"])
+        cw = MagicMock()
+        cw.get_metric_data.side_effect = _client_error("Throttling", "slow down")
+        report = _execute_capture_snapshot(logs, cw, requested_at=REQUESTED_AT, now=NOW)
+        assert report.anomaly is True
+        assert "get_metric_data" in (report.anomaly_summary or "")
+        # Insights query never attempted when ranking failed
+        logs.start_query.assert_not_called()

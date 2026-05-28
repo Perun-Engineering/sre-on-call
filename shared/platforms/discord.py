@@ -31,6 +31,7 @@ from shared.report_renderer import (
     InvestigationStartedSections,
     PIRSections,
     ReportSections,
+    SnapshotSections,
 )
 from shared.secrets import resolve_secret
 
@@ -217,6 +218,8 @@ class DiscordChatPlatform:
             return self._renderer.render_investigation_started(payload)
         if isinstance(payload, PIRSections):
             return self._renderer.render_pir(payload)
+        if isinstance(payload, SnapshotSections):
+            return self._renderer.render_snapshot(payload)
         raise TypeError(
             f"Unsupported deliver payload: {type(payload).__name__}"
         )
