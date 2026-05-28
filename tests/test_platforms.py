@@ -373,10 +373,23 @@ class TestDiscordRenderingRegression:
         from ``alert_context.platform`` — fixing the bug where Discord
         alerts rendered with Slack mrkdwn."""
         from agents.master.orchestrator import InvestigationOrchestrator
+        from shared.agents import AgentRegistry
+        from shared.config import AgentConfig, Defaults, ProjectConfig
 
+        registry = AgentRegistry(
+            ProjectConfig(
+                project="test",
+                environment="dev",
+                defaults=Defaults(model_id="anthropic.claude-test"),
+                agents={
+                    "master": AgentConfig(skills=["investigate_alert"]),
+                    "eks": AgentConfig(enabled=True, network_mode="VPC"),
+                },
+            )
+        )
         orch = InvestigationOrchestrator(
             http_client=MagicMock(),
-            agent_endpoints={"eks": "http://localhost:9999"},
+            registry=registry,
         )
 
         slack_ctx = AlertContext(

@@ -22,19 +22,21 @@ aws ecr get-login-password --profile "$PROFILE" --region "$REGION" \
 
 cd "$(dirname "$0")/.."
 
-# Master is always built. Specialized agents are read from config.yaml and
-# filtered by their `enabled` flag (defaults true if omitted) so a disabled
-# agent (e.g. discord_scanner) is neither built nor pushed.
+# Master is always built. Specialized agents are read from config.yaml's
+# `agents:` block — *all* listed agents are built, regardless of the
+# `enabled` flag. Disabled-in-config means "operator turned it off in this
+# deployment," not "remove its image" — keeping the image lets the operator
+# flip `enabled: true` and skip the build cycle on re-enablement. Agents
+# absent from config.yaml entirely (e.g. prometheus today) are skipped.
 mapfile -t SPECIALIZED < <(
     python3 -c '
 import sys, yaml
 with open("config.yaml") as f:
     cfg = yaml.safe_load(f)
-for name, spec in cfg.get("agents", {}).items():
+for name in cfg.get("agents", {}):
     if name == "master":
         continue
-    if spec.get("enabled", True):
-        print(name)
+    print(name)
 '
 )
 AGENTS=(master "${SPECIALIZED[@]}")
@@ -61,5 +63,5 @@ for agent in "${AGENTS[@]}"; do
 done
 
 echo
-echo "All 5 images pushed at tag: ${TAG}"
+echo "All ${#AGENTS[@]} images pushed at tag: ${TAG}"
 echo "Pass to terraform: -var 'agent_image_tag=${TAG}'"

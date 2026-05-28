@@ -15,6 +15,8 @@ from agents.master.orchestrator import (
     _parse_agent_result,
 )
 from shared.a2a_protocol import build_a2a_request
+from shared.agents import AgentRegistry
+from shared.config import AgentConfig, Defaults, ProjectConfig
 from shared.platforms import ChatPlatform
 from shared.report_renderer import (
     EnrichmentSections,
@@ -25,6 +27,75 @@ from shared.report_renderer import (
 )
 from agents.master.report_formatter import ReportFormatter
 from shared.models import AgentFailure, AgentMetadata, AgentResult, AlertContext, Finding
+
+
+# ---------------------------------------------------------------------------
+# Endpoint constants — match the catalogue defaults so resolve_endpoint()
+# returns these when the corresponding env vars are unset (which is what
+# `_clean_env` ensures via the autouse fixture below).
+# ---------------------------------------------------------------------------
+
+SLACK_URL = "http://localhost:9001"
+DISCORD_URL = "http://localhost:9002"
+CLOUDWATCH_URL = "http://localhost:9004"
+EKS_URL = "http://localhost:9005"
+
+
+@pytest.fixture(autouse=True)
+def _clean_env(monkeypatch):
+    """Clear runtime/URL env vars before each test so :meth:`Agent.resolve_endpoint`
+    falls back to catalogue defaults. Tests that exercise specific overrides
+    set them explicitly via monkeypatch."""
+    for var in (
+        "SLACK_SCANNER_AGENT_RUNTIME_ARN",
+        "SLACK_SCANNER_AGENT_URL",
+        "DISCORD_SCANNER_AGENT_RUNTIME_ARN",
+        "DISCORD_SCANNER_AGENT_URL",
+        "CLOUDWATCH_LOGS_AGENT_RUNTIME_ARN",
+        "CLOUDWATCH_LOGS_AGENT_URL",
+        "EKS_AGENT_RUNTIME_ARN",
+        "EKS_AGENT_URL",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+
+def _build_registry(
+    *,
+    active_specialized: list[str] | None = None,
+    disabled_specialized: list[str] | None = None,
+) -> AgentRegistry:
+    """Build an :class:`AgentRegistry` for tests with a custom deployment manifest.
+
+    Default is the three specialized agents the legacy fixture used:
+    slack_scanner, cloudwatch_logs, eks — all enabled.
+    """
+    if active_specialized is None:
+        active_specialized = ["slack_scanner", "cloudwatch_logs", "eks"]
+    if disabled_specialized is None:
+        disabled_specialized = []
+
+    agents: dict[str, AgentConfig] = {
+        "master": AgentConfig(skills=["investigate_alert"]),
+    }
+    for aid in active_specialized:
+        kwargs: dict = {"enabled": True}
+        if aid == "eks":
+            kwargs["network_mode"] = "VPC"
+        agents[aid] = AgentConfig(**kwargs)
+    for aid in disabled_specialized:
+        kwargs = {"enabled": False}
+        if aid == "eks":
+            kwargs["network_mode"] = "VPC"
+        agents[aid] = AgentConfig(**kwargs)
+
+    return AgentRegistry(
+        ProjectConfig(
+            project="test",
+            environment="dev",
+            defaults=Defaults(model_id="anthropic.claude-test"),
+            agents=agents,
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -143,17 +214,20 @@ def _make_orchestrator(
     chat_platform: ChatPlatform | None = None,
     initial_deadline: float = 0.1,
     hard_cutoff: float = 0.5,
+    registry: AgentRegistry | None = None,
 ) -> InvestigationOrchestrator:
-    """Create an orchestrator with short timeouts for testing."""
+    """Create an orchestrator with short timeouts for testing.
+
+    Endpoints come from the registry's :meth:`Agent.resolve_endpoint` —
+    with env vars cleared by the autouse fixture, that resolves to the
+    catalogue defaults (slack=9001, cloudwatch=9004, eks=9005).
+    """
+    registry = registry or _build_registry()
     orch = InvestigationOrchestrator(
         http_client=http_client or FakeHTTPClient(),
         chat_platform=chat_platform or FakeChatPlatform(),
-        report_formatter=ReportFormatter(),
-        agent_endpoints={
-            "slack_scanner": "http://localhost:9001",
-            "cloudwatch_logs": "http://localhost:9002",
-            "eks": "http://localhost:9003",
-        },
+        report_formatter=ReportFormatter(registry),
+        registry=registry,
     )
     # Override deadlines for fast tests
     orch.INITIAL_DEADLINE_SECONDS = initial_deadline
@@ -450,11 +524,7 @@ class TestOrchestratorFanOut:
         await orch.investigate(alert_context)
 
         called_urls = {url for url, _ in http_client.calls}
-        assert called_urls == {
-            "http://localhost:9001",
-            "http://localhost:9002",
-            "http://localhost:9003",
-        }
+        assert called_urls == {SLACK_URL, CLOUDWATCH_URL, EKS_URL}
 
     @pytest.mark.asyncio
     async def test_a2a_request_format(self, alert_context):
@@ -546,7 +616,7 @@ class TestOrchestratorLateResults:
 
             async def post_json(self, url: str, payload: dict) -> dict:
                 self.calls.append((url, payload))
-                if url in ("http://localhost:9003", "http://localhost:9004"):
+                if url in (EKS_URL, CLOUDWATCH_URL):
                     await asyncio.sleep(slow_delay)
                 return _default_a2a_response(payload)
 
@@ -574,7 +644,7 @@ class TestOrchestratorLateResults:
 
             async def post_json(self, url: str, payload: dict) -> dict:
                 self.calls.append((url, payload))
-                if url == "http://localhost:9003":  # EKS is slow
+                if url == EKS_URL:  # EKS is slow
                     await asyncio.sleep(0.15)
                 return _default_a2a_response(payload)
 
@@ -611,7 +681,7 @@ class TestOrchestratorErrorHandling:
 
             async def post_json(self, url: str, payload: dict) -> dict:
                 self.calls.append((url, payload))
-                if url == "http://localhost:9002":  # cloudwatch_logs fails
+                if url == CLOUDWATCH_URL:  # cloudwatch_logs fails
                     raise ConnectionError("Connection refused")
                 return _default_a2a_response(payload)
 
@@ -676,149 +746,100 @@ class TestOrchestratorInvokeAgent:
 
         assert len(http_client.calls) == 1
         url, payload = http_client.calls[0]
-        assert url == "http://localhost:9001"
+        assert url == SLACK_URL
         assert payload["method"] == "message/send"
         assert "req-slack_scanner-inv-test-001" == payload["id"]
 
 
 class TestOrchestratorEndpointConfig:
-    """Test agent endpoint configuration."""
+    """Test agent endpoint configuration via the registry.
 
-    def test_default_endpoints(self):
-        orch = InvestigationOrchestrator(
-            http_client=FakeHTTPClient(),
-            chat_platform=FakeChatPlatform(),
+    Most endpoint-resolution mechanics are tested directly in
+    :mod:`tests.test_agent_registry` (see ``TestResolveEndpoint``); this
+    class only covers the orchestrator's interaction with the registry.
+    """
+
+    def test_default_registry_includes_all_active_specialized(self):
+        # The repo's config.yaml has slack_scanner, cloudwatch_logs, eks active
+        # and discord_scanner disabled. The orchestrator's fan-out endpoints
+        # should match exactly the active specialized agents.
+        from shared.agents import reset_cache as reset_registry
+        from shared.config import reset_cache as reset_cfg
+
+        reset_cfg()
+        reset_registry()
+        try:
+            orch = InvestigationOrchestrator(
+                http_client=FakeHTTPClient(),
+                chat_platform=FakeChatPlatform(),
+            )
+            assert sorted(orch.agent_endpoints.keys()) == [
+                "cloudwatch_logs",
+                "eks",
+                "slack_scanner",
+            ]
+        finally:
+            reset_cfg()
+            reset_registry()
+
+    def test_disabled_in_config_agent_surfaced_to_orchestrator(self):
+        registry = _build_registry(
+            active_specialized=["slack_scanner", "eks"],
+            disabled_specialized=["discord_scanner"],
         )
-        # Should have all 4 agents (Prometheus deferred)
-        assert len(orch.agent_endpoints) == 4
-        assert "slack_scanner" in orch.agent_endpoints
-        assert "discord_scanner" in orch.agent_endpoints
-        assert "cloudwatch_logs" in orch.agent_endpoints
-        assert "eks" in orch.agent_endpoints
-
-    def test_custom_endpoints(self):
-        custom = {
-            "slack_scanner": "http://custom:8001",
-            "cloudwatch_logs": "http://custom:8003",
-            "eks": "http://custom:8004",
-        }
         orch = InvestigationOrchestrator(
             http_client=FakeHTTPClient(),
             chat_platform=FakeChatPlatform(),
-            agent_endpoints=custom,
+            registry=registry,
         )
-        assert orch.agent_endpoints == custom
+        # disabled agents are NOT dispatched to but ARE tracked for evidence
+        assert sorted(orch.agent_endpoints.keys()) == ["eks", "slack_scanner"]
+        assert orch.disabled_agents == {"discord_scanner"}
 
-    @patch.dict(
-        "os.environ",
-        {"CLOUDWATCH_LOGS_AGENT_URL": "http://env-cw:9999"},
-    )
-    def test_endpoints_from_environment(self):
-        orch = InvestigationOrchestrator(
-            http_client=FakeHTTPClient(),
-            chat_platform=FakeChatPlatform(),
+    def test_runtime_arn_env_var_overrides_url(self, monkeypatch):
+        monkeypatch.setenv(
+            "EKS_AGENT_RUNTIME_ARN",
+            "arn:aws:bedrock-agentcore:us-east-1:0:agent-runtime/eks",
         )
-        assert orch.agent_endpoints["cloudwatch_logs"] == "http://env-cw:9999"
+        monkeypatch.setenv("EKS_AGENT_URL", "http://should-be-ignored:1234")
 
-    @patch.dict(
-        "os.environ",
-        {
-            "EKS_AGENT_RUNTIME_ARN": "arn:aws:bedrock-agentcore:us-east-1:0:agent-runtime/eks",
-            "EKS_AGENT_URL": "http://should-be-ignored:1234",
-        },
-    )
-    def test_runtime_arn_env_var_overrides_url(self):
         orch = InvestigationOrchestrator(
             http_client=FakeHTTPClient(),
             chat_platform=FakeChatPlatform(),
+            registry=_build_registry(active_specialized=["eks"]),
         )
         assert (
             orch.agent_endpoints["eks"]
             == "arn:aws:bedrock-agentcore:us-east-1:0:agent-runtime/eks"
         )
 
-    @patch.dict(
-        "os.environ",
-        {
-            "ENABLED_AGENTS": "eks",
-            "EKS_AGENT_RUNTIME_ARN": "arn:aws:bedrock-agentcore:us-east-1:0:agent-runtime/eks",
-            "SLACK_SCANNER_AGENT_RUNTIME_ARN": "arn:aws:bedrock-agentcore:us-east-1:0:agent-runtime/slack",
-        },
-        clear=False,
-    )
-    def test_enabled_agents_filters_to_allowlist(self):
+    def test_url_env_var_overrides_default(self, monkeypatch):
+        monkeypatch.setenv("CLOUDWATCH_LOGS_AGENT_URL", "http://env-cw:9999")
         orch = InvestigationOrchestrator(
             http_client=FakeHTTPClient(),
             chat_platform=FakeChatPlatform(),
+            registry=_build_registry(active_specialized=["cloudwatch_logs"]),
         )
-        assert list(orch.agent_endpoints.keys()) == ["eks"]
+        assert orch.agent_endpoints["cloudwatch_logs"] == "http://env-cw:9999"
 
-    @patch.dict(
-        "os.environ",
-        {
-            "ENABLED_AGENTS": " eks , cloudwatch_logs ",
-            "EKS_AGENT_RUNTIME_ARN": "arn:eks",
-            "CLOUDWATCH_LOGS_AGENT_RUNTIME_ARN": "arn:cw",
-        },
-        clear=False,
-    )
-    def test_enabled_agents_handles_whitespace_and_multiples(self):
-        orch = InvestigationOrchestrator(
-            http_client=FakeHTTPClient(),
-            chat_platform=FakeChatPlatform(),
-        )
-        assert sorted(orch.agent_endpoints.keys()) == ["cloudwatch_logs", "eks"]
-
-    def test_enabled_agent_without_endpoint_is_skipped(self, monkeypatch):
-        # An explicit allowlist must NOT silently fall back to the localhost
-        # default — that would mean deployed runtimes fan out to localhost.
-        for k in (
+    def test_auto_selects_agentcore_client_for_arn_endpoints(self, monkeypatch):
+        monkeypatch.setenv(
             "EKS_AGENT_RUNTIME_ARN",
-            "EKS_AGENT_URL",
-            "SLACK_SCANNER_AGENT_RUNTIME_ARN",
-            "SLACK_SCANNER_AGENT_URL",
-            "DISCORD_SCANNER_AGENT_RUNTIME_ARN",
-            "DISCORD_SCANNER_AGENT_URL",
-            "CLOUDWATCH_LOGS_AGENT_RUNTIME_ARN",
-            "CLOUDWATCH_LOGS_AGENT_URL",
-        ):
-            monkeypatch.delenv(k, raising=False)
-        monkeypatch.setenv("ENABLED_AGENTS", "eks")
-
-        orch = InvestigationOrchestrator(
-            http_client=FakeHTTPClient(),
-            chat_platform=FakeChatPlatform(),
+            "arn:aws:bedrock-agentcore:us-east-1:0:runtime/x",
         )
-        assert orch.agent_endpoints == {}
-
-    def test_auto_selects_agentcore_client_for_arn_endpoints(self):
         orch = InvestigationOrchestrator(
             chat_platform=FakeChatPlatform(),
-            agent_endpoints={"eks": "arn:aws:bedrock-agentcore:us-east-1:0:runtime/x"},
+            registry=_build_registry(active_specialized=["eks"]),
         )
         assert isinstance(orch.http_client, AgentCoreClient)
 
     def test_auto_selects_aiohttp_client_for_url_endpoints(self):
         orch = InvestigationOrchestrator(
             chat_platform=FakeChatPlatform(),
-            agent_endpoints={"eks": "http://localhost:9005"},
+            registry=_build_registry(active_specialized=["eks"]),
         )
         from agents.master.orchestrator import AiohttpClient
         assert isinstance(orch.http_client, AiohttpClient)
-
-    @patch.dict("os.environ", {"ENABLED_AGENTS": ""}, clear=False)
-    def test_empty_enabled_agents_keeps_default_behaviour(self):
-        orch = InvestigationOrchestrator(
-            http_client=FakeHTTPClient(),
-            chat_platform=FakeChatPlatform(),
-        )
-        # No allowlist => all four agents present (with localhost fallbacks).
-        assert sorted(orch.agent_endpoints.keys()) == [
-            "cloudwatch_logs",
-            "discord_scanner",
-            "eks",
-            "slack_scanner",
-        ]
 
 
 # ---------------------------------------------------------------------------
@@ -846,14 +867,20 @@ class TestInvestigationStartedAnnouncement:
     @pytest.mark.asyncio
     async def test_no_started_message_when_no_agents_configured(self, alert_context):
         chat_platform = FakeChatPlatform()
+        # Empty registry — no specialized agents in the deployment manifest.
+        empty_registry = AgentRegistry(
+            ProjectConfig(
+                project="test",
+                environment="dev",
+                defaults=Defaults(model_id="anthropic.claude-test"),
+                agents={"master": AgentConfig(skills=["investigate_alert"])},
+            )
+        )
         orch = InvestigationOrchestrator(
             http_client=FakeHTTPClient(),
             chat_platform=chat_platform,
-            report_formatter=ReportFormatter(),
-            agent_endpoints={"placeholder": "x"},  # avoid env fallback
+            registry=empty_registry,
         )
-        # Now drop to empty so the orchestrator sees no dispatched agents.
-        orch.agent_endpoints = {}
         orch.INITIAL_DEADLINE_SECONDS = 0.05
         orch.HARD_CUTOFF_SECONDS = 0.1
 
@@ -876,7 +903,7 @@ class TestLateFailureEnrichment:
 
             async def post_json(self, url: str, payload: dict) -> dict:
                 self.calls.append((url, payload))
-                if url == "http://localhost:9003":  # slow + fails
+                if url == EKS_URL:  # slow + fails
                     await asyncio.sleep(0.15)
                     raise ConnectionError("boom")
                 return _default_a2a_response(payload)
@@ -941,8 +968,7 @@ class TestAgentMetadataPropagation:
         orch = InvestigationOrchestrator(
             http_client=StubClient(),
             chat_platform=FakeChatPlatform(),
-            report_formatter=ReportFormatter(),
-            agent_endpoints={"eks": "http://localhost:9999"},
+            registry=_build_registry(active_specialized=["eks"]),
         )
 
         result = await orch.invoke_agent("eks", alert_context)
@@ -956,3 +982,64 @@ class TestAgentMetadataPropagation:
         # Orchestrator stamps timing wall-clock around the call
         assert result.metadata.started_at is not None
         assert result.metadata.completed_at is not None
+
+
+
+class TestDisabledInConfigPropagation:
+    """Disabled-in-config agents are excluded from fan-out but rendered in
+    the Incident Report's evidence section as 🚫 disabled blocks."""
+
+    @pytest.mark.asyncio
+    async def test_disabled_agent_skipped_from_fan_out(self, alert_context):
+        registry = _build_registry(
+            active_specialized=["eks"],
+            disabled_specialized=["discord_scanner"],
+        )
+        http_client = FakeHTTPClient()
+        orch = _make_orchestrator(http_client=http_client, registry=registry)
+
+        await orch.investigate(alert_context)
+
+        # Only EKS was dispatched; discord_scanner was disabled.
+        called_urls = {url for url, _ in http_client.calls}
+        assert called_urls == {EKS_URL}
+
+    @pytest.mark.asyncio
+    async def test_disabled_agent_appears_in_incident_report_evidence(self, alert_context):
+        registry = _build_registry(
+            active_specialized=["eks"],
+            disabled_specialized=["slack_scanner"],
+        )
+        chat_platform = FakeChatPlatform()
+        orch = _make_orchestrator(chat_platform=chat_platform, registry=registry)
+
+        await orch.investigate(alert_context)
+
+        _, _, report_text = _find_report_msg(chat_platform.messages)
+        # 🚫 marker on the disabled agent's evidence block
+        assert "📡 *Slack Scanner* 🚫" in report_text
+        assert "is disabled in this deployment" in report_text
+        # EKS was dispatched normally — no 🚫 on it
+        assert "☸️ *EKS Cluster State* 🚫" not in report_text
+
+    @pytest.mark.asyncio
+    async def test_disabled_agent_not_in_started_notice(self, alert_context):
+        registry = _build_registry(
+            active_specialized=["eks", "cloudwatch_logs"],
+            disabled_specialized=["slack_scanner"],
+        )
+        chat_platform = FakeChatPlatform()
+        orch = _make_orchestrator(chat_platform=chat_platform, registry=registry)
+
+        await orch.investigate(alert_context)
+
+        # The Started notice lists active agents only.
+        started_msgs = [
+            text for _, _, text in chat_platform.messages
+            if "Investigation Started" in text
+        ]
+        assert started_msgs, "Expected a Started notice"
+        started = started_msgs[0]
+        assert "EKS Cluster State" in started
+        assert "CloudWatch Logs" in started
+        assert "Slack Scanner" not in started

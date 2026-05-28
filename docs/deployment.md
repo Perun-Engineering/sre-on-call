@@ -111,31 +111,46 @@ Each AgentCore runtime updates in place; AWS provisions a new version and shifts
 
 For Lambda-only code changes, the Lambda zip is rebuilt by Terraform automatically — `terraform plan` picks up changes under `lambda_adapter/` and `shared/`.
 
-## Scoping the fan-out for testing
+## Scoping the fan-out
 
-`ENABLED_AGENTS` is a CSV allowlist passed to the master agent's environment. The orchestrator filters its fan-out targets to this list at construction time.
+The set of specialized agents the master fans out to is read from
+`config.yaml`'s `agents:` block via the `AgentRegistry`
+(`shared/agents.py`). There are two levers, each with a different
+operational meaning:
 
-```bash
-# EKS-only test (other agents stay deployed but aren't invoked)
-AWS_PROFILE=<profile> terraform apply \
-    -var 'agent_image_tag=<tag>' \
-    -var 'enabled_agents=eks' \
-    /tmp/plan
+- **Add / remove an agent from the deployment** — edit the `agents:` block
+  in `config.yaml`. An agent listed there is built, pushed to ECR, and has
+  its terraform resources created. An agent absent from the block is
+  treated as not-deployed (no ECR repo, no runtime, no IAM role).
+- **Toggle an agent active without re-running terraform** — set
+  `enabled: false` on the agent's entry in `config.yaml`. The runtime is
+  still built and deployed; the orchestrator skips it on fan-out and
+  surfaces a 🚫 disabled evidence block in the Incident Report. Flip the
+  flag back to `true` and re-run terraform to re-activate without a
+  rebuild.
 
-# All agents (default)
-AWS_PROFILE=<profile> terraform apply \
-    -var 'agent_image_tag=<tag>' \
-    -var 'enabled_agents=' \
-    /tmp/plan
+Examples:
 
-# Two-agent subset
-AWS_PROFILE=<profile> terraform apply \
-    -var 'agent_image_tag=<tag>' \
-    -var 'enabled_agents=eks,cloudwatch_logs' \
-    /tmp/plan
+```yaml
+# config.yaml — deploy EKS only, leave Discord built but disabled
+agents:
+  master:
+    skills: [investigate_alert]
+  eks:
+    enabled: true
+    network_mode: VPC
+    skills: [gather_eks_state]
+  discord_scanner:
+    enabled: false   # built and pushed, but orchestrator skips it
+    skills: [scan_discord_channels]
 ```
 
-When `ENABLED_AGENTS` is non-empty, an enabled agent without an explicit `*_AGENT_RUNTIME_ARN` is **skipped** (the master logs a warning), not silently localhost-fallbacked. Local-dev runs (no env vars at all) keep their localhost defaults.
+There is no `ENABLED_AGENTS` env var or `enabled_agents` Terraform
+variable — `config.yaml` is the only switch. Validate before applying:
+
+```bash
+python -m shared.config validate
+```
 
 ## Secret rotation
 

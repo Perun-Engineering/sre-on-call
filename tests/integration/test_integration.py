@@ -263,15 +263,27 @@ def _make_orchestrator(
     hard_cutoff: float = 0.5,
 ) -> InvestigationOrchestrator:
     """Create an orchestrator with short timeouts for fast integration tests."""
+    from shared.agents import AgentRegistry
+    from shared.config import AgentConfig, Defaults, ProjectConfig
+
+    registry = AgentRegistry(
+        ProjectConfig(
+            project="test",
+            environment="dev",
+            defaults=Defaults(model_id="anthropic.claude-test"),
+            agents={
+                "master": AgentConfig(skills=["investigate_alert"]),
+                "slack_scanner": AgentConfig(enabled=True),
+                "cloudwatch_logs": AgentConfig(enabled=True),
+                "eks": AgentConfig(enabled=True, network_mode="VPC"),
+            },
+        )
+    )
     orch = InvestigationOrchestrator(
         http_client=http_client or FakeHTTPClient(),
         chat_platform=chat_platform or FakeChatPlatform(),
-        report_formatter=ReportFormatter(),
-        agent_endpoints={
-            "slack_scanner": "http://localhost:9001",
-            "cloudwatch_logs": "http://localhost:9003",
-            "eks": "http://localhost:9004",
-        },
+        report_formatter=ReportFormatter(registry),
+        registry=registry,
     )
     orch.INITIAL_DEADLINE_SECONDS = initial_deadline
     orch.HARD_CUTOFF_SECONDS = hard_cutoff
@@ -421,9 +433,9 @@ class TestA2ACommunication:
 
         called_urls = {url for url, _ in http_client.calls}
         assert called_urls == {
-            "http://localhost:9001",
-            "http://localhost:9003",
-            "http://localhost:9004",
+            "http://localhost:9001",  # slack_scanner default
+            "http://localhost:9004",  # cloudwatch_logs default
+            "http://localhost:9005",  # eks default
         }
 
         # Every payload is valid JSON-RPC 2.0
@@ -461,7 +473,7 @@ class TestA2ACommunication:
             "error": {"code": -32000, "message": "EKS cluster unreachable"},
         }
         http_client = FakeHTTPClient(
-            responses={"http://localhost:9004": error_resp}
+            responses={"http://localhost:9005": error_resp}
         )
         orch = _make_orchestrator(http_client=http_client)
         ctx = _make_alert_context()

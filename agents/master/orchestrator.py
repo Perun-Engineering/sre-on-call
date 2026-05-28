@@ -1,8 +1,15 @@
 """Master Agent orchestrator — parallel fan-out and deadline management.
 
-Coordinates five specialized agents via A2A JSON-RPC 2.0, enforces a
+Coordinates the active specialized agents (read from the
+:class:`shared.agents.AgentRegistry`) via A2A JSON-RPC 2.0, enforces a
 60-second initial-report deadline and a 5-minute hard cutoff, and posts
-results back to the originating chat platform via a pluggable ChatPoster.
+results back to the originating chat platform via a pluggable :class:`ChatPlatform`.
+
+The set of agents the orchestrator dispatches to is now derived entirely
+from ``config.yaml`` via the registry. There is no ``ENABLED_AGENTS``
+allowlist — operators control fan-out by flipping ``enabled: true|false``
+on each agent in ``config.yaml``. Disabled-in-config specialized agents
+appear in the Incident Report's Evidence section as 🚫 disabled blocks.
 
 Requirements: 3.1, 3.2, 3.3, 3.4, 3.6, 9.2
 """
@@ -19,6 +26,7 @@ from typing import Any, Protocol
 
 from shared.a2a_protocol import build_a2a_request, extract_response_text
 from shared.agent_telemetry import extract_metadata
+from shared.agents import Agent, AgentRegistry, get_registry
 from shared.constants import HARD_CUTOFF_SECONDS, INITIAL_DEADLINE_SECONDS
 from shared.models import AgentFailure, AgentMetadata, AgentResult, AlertContext, Finding
 from shared.time_utils import now_iso
@@ -29,91 +37,6 @@ from shared.tool_result import extract_agent_result
 from agents.master.report_formatter import ReportFormatter
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Agent endpoint configuration (overridable via environment variables)
-# ---------------------------------------------------------------------------
-
-DEFAULT_AGENT_ENDPOINTS: dict[str, str] = {
-    "slack_scanner": "http://localhost:9001",
-    "discord_scanner": "http://localhost:9002",
-    "cloudwatch_logs": "http://localhost:9004",
-    "eks": "http://localhost:9005",
-}
-
-_ENV_KEYS: dict[str, str] = {
-    "slack_scanner": "SLACK_SCANNER_AGENT_URL",
-    "discord_scanner": "DISCORD_SCANNER_AGENT_URL",
-    "cloudwatch_logs": "CLOUDWATCH_LOGS_AGENT_URL",
-    "eks": "EKS_AGENT_URL",
-}
-
-_RUNTIME_ARN_ENV_KEYS: dict[str, str] = {
-    "slack_scanner": "SLACK_SCANNER_AGENT_RUNTIME_ARN",
-    "discord_scanner": "DISCORD_SCANNER_AGENT_RUNTIME_ARN",
-    "cloudwatch_logs": "CLOUDWATCH_LOGS_AGENT_RUNTIME_ARN",
-    "eks": "EKS_AGENT_RUNTIME_ARN",
-}
-
-ENABLED_AGENTS_ENV_KEY = "ENABLED_AGENTS"
-
-
-def _parse_enabled_agents() -> set[str]:
-    """Parse the ``ENABLED_AGENTS`` env var into a set of agent IDs.
-
-    Empty/unset returns an empty set, which means "no allowlist — include
-    every known agent".
-    """
-    raw = os.environ.get(ENABLED_AGENTS_ENV_KEY, "").strip()
-    if not raw:
-        return set()
-    return {part.strip() for part in raw.split(",") if part.strip()}
-
-
-def _load_agent_endpoints() -> dict[str, str]:
-    """Return agent endpoints, preferring runtime ARNs over URLs.
-
-    The ``ENABLED_AGENTS`` env var (comma-separated agent IDs) is an
-    allowlist: when set, only those agents are included in the fan-out.
-    When unset, every known agent is included.
-
-    Per-agent lookup order: ``*_AGENT_RUNTIME_ARN`` env var (used in
-    deployed AgentCore environments with :class:`AgentCoreClient`), then
-    ``*_AGENT_URL`` env var (local A2A servers with :class:`AiohttpClient`),
-    then the default localhost URL — but only when ``ENABLED_AGENTS`` is
-    unset; an explicit allowlist with no endpoint configured is treated
-    as a misconfiguration and the agent is skipped with a warning.
-    """
-    enabled = _parse_enabled_agents()
-    unknown = enabled - DEFAULT_AGENT_ENDPOINTS.keys()
-    if unknown:
-        logger.warning(
-            "ENABLED_AGENTS contains unknown agent IDs (ignored): %s",
-            sorted(unknown),
-        )
-
-    endpoints: dict[str, str] = {}
-    for agent_id, default_url in DEFAULT_AGENT_ENDPOINTS.items():
-        if enabled and agent_id not in enabled:
-            continue
-        arn = os.environ.get(_RUNTIME_ARN_ENV_KEYS[agent_id])
-        if arn:
-            endpoints[agent_id] = arn
-            continue
-        url = os.environ.get(_ENV_KEYS[agent_id])
-        if url:
-            endpoints[agent_id] = url
-            continue
-        if enabled:
-            logger.warning(
-                "Agent %s is in ENABLED_AGENTS but has no %s or %s set; skipping",
-                agent_id,
-                _RUNTIME_ARN_ENV_KEYS[agent_id],
-                _ENV_KEYS[agent_id],
-            )
-            continue
-        endpoints[agent_id] = default_url
-    return endpoints
 
 
 # ---------------------------------------------------------------------------
@@ -261,10 +184,17 @@ def _merge_metadata(
 
 
 class InvestigationOrchestrator:
-    """Orchestrates a parallel investigation across five specialized agents.
+    """Orchestrates a parallel investigation across the active specialized agents.
+
+    The set of dispatch targets is read from the :class:`AgentRegistry`'s
+    ``active(kind="specialized")`` view. Agents that are deployed but
+    disabled in ``config.yaml`` (``enabled: false``) are passed to the
+    formatter as ``disabled_agents`` and rendered as 🚫 evidence blocks
+    in the Incident Report.
 
     Lifecycle:
-        1. Fan out to all 5 agents via A2A JSON-RPC 2.0 ``message/send``
+        1. Fan out to all active specialized agents via A2A JSON-RPC 2.0
+           ``message/send``
         2. Wait up to 60 s for initial results
         3. Synthesize and post the Incident Report
         4. Continue collecting late-arriving results until the 5-min cutoff
@@ -280,12 +210,21 @@ class InvestigationOrchestrator:
         http_client: AsyncHTTPClient | None = None,
         chat_platform: ChatPlatform | None = None,
         report_formatter: ReportFormatter | None = None,
-        agent_endpoints: dict[str, str] | None = None,
+        registry: AgentRegistry | None = None,
         results_store: ExperimentResultsStore | None = None,
     ) -> None:
         self._chat_platform: ChatPlatform | None = chat_platform
-        self.report_formatter = report_formatter or ReportFormatter()
-        self.agent_endpoints = agent_endpoints or _load_agent_endpoints()
+        self._registry: AgentRegistry = registry or get_registry()
+        self.report_formatter = report_formatter or ReportFormatter(self._registry)
+
+        active_specialized = self._registry.active(kind="specialized")
+        self.agent_endpoints: dict[str, str] = {
+            a.id: a.resolve_endpoint() for a in active_specialized
+        }
+        self.disabled_agents: set[str] = {
+            a.id for a in self._registry.disabled_in_config(kind="specialized")
+        }
+
         if http_client is None:
             any_arn = any(
                 ep.startswith("arn:") for ep in self.agent_endpoints.values()
@@ -293,6 +232,10 @@ class InvestigationOrchestrator:
             http_client = AgentCoreClient() if any_arn else AiohttpClient()
         self.http_client: AsyncHTTPClient = http_client
         self._results_store = results_store
+
+    @property
+    def registry(self) -> AgentRegistry:
+        return self._registry
 
     def _get_platform(self, alert_context: AlertContext) -> ChatPlatform:
         """Return the ChatPlatform, selecting from alert_context.platform when not injected."""
@@ -313,7 +256,10 @@ class InvestigationOrchestrator:
 
         # --- Phase 0: announce which agents will be queried ------------------
         # Fire-and-forget so fan-out starts immediately; a slow chat post
-        # would otherwise add an RTT to every investigation.
+        # would otherwise add an RTT to every investigation. The "started"
+        # notice lists only agents we're actively dispatching to — disabled-
+        # in-config agents only appear in the Incident Report's Evidence
+        # section, not the kick-off announcement.
         dispatched_agents = list(self.agent_endpoints.keys())
         if dispatched_agents:
             started_sections = self.report_formatter.build_started_sections(
@@ -355,7 +301,10 @@ class InvestigationOrchestrator:
         pending_ids = {task_to_agent[t] for t in pending}
 
         report_sections = self.report_formatter.build_incident_sections(
-            alert_context, results, pending_agents=pending_ids,
+            alert_context,
+            results,
+            pending_agents=pending_ids,
+            disabled_agents=self.disabled_agents,
         )
 
         try:

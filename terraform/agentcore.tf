@@ -26,12 +26,6 @@ variable "model_id" {
   default     = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 }
 
-variable "enabled_agents" {
-  description = "Comma-separated allowlist override of specialized agents the master fans out to (e.g. \"eks\" to test against EKS only). Empty string = derive from config.yaml's per-agent `enabled` flag."
-  type        = string
-  default     = ""
-}
-
 # ── Locals ───────────────────────────────────────────────────────────────────
 
 locals {
@@ -45,19 +39,15 @@ locals {
     eks             = "${var.agent_container_registry}/${var.project_name}-eks:${var.agent_image_tag}"
   }
 
-  # Single source of truth for which specialized agents are deployed.
-  # `enabled` defaults to true if omitted (matches shared/config.py).
+  # Single source of truth for which specialized agents are deployed and active.
+  # `enabled` defaults to true if omitted (matches shared/config.py / shared/agents.py).
+  # An agent absent from config.yaml is treated as not deployed (resources are
+  # not created for it) — see shared/agents.py docstring for the lifecycle.
   config_yaml = yamldecode(file("${path.module}/../config.yaml"))
   agent_enabled = {
     for name in ["slack_scanner", "discord_scanner", "cloudwatch_logs", "eks"] :
-    name => lookup(local.config_yaml.agents[name], "enabled", true)
+    name => contains(keys(local.config_yaml.agents), name) && lookup(local.config_yaml.agents[name], "enabled", true)
   }
-
-  effective_enabled_agents = (
-    var.enabled_agents != ""
-    ? var.enabled_agents
-    : join(",", [for name, on in local.agent_enabled : name if on])
-  )
 }
 
 # ── Specialized Agents ──────────────────────────────────────────────────────
@@ -223,7 +213,6 @@ resource "aws_bedrockagentcore_agent_runtime" "master" {
       MODEL_ID          = var.model_id
       SLACK_BOT_TOKEN   = aws_secretsmanager_secret.slack_bot_token.arn
       DISCORD_BOT_TOKEN = aws_secretsmanager_secret.discord_bot_token.arn
-      ENABLED_AGENTS    = local.effective_enabled_agents
     },
     local.agent_enabled["slack_scanner"] ? {
       SLACK_SCANNER_AGENT_RUNTIME_ARN = aws_bedrockagentcore_agent_runtime.slack_scanner[0].agent_runtime_arn

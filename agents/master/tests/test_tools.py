@@ -103,4 +103,4 @@ class TestInvestigateAlertTool:
         result = await investigate_alert(payload)
 
         assert "aborted" in result.lower()
-        assert "ENABLED_AGENTS" in result
+        assert "config.yaml" in result

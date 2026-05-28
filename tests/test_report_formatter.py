@@ -10,7 +10,8 @@ build-then-render pipeline.
 
 import pytest
 
-from agents.master.report_formatter import ReportFormatter, AGENT_DISPLAY
+from agents.master.report_formatter import ReportFormatter
+from shared.agents import get_registry
 from shared.models import AgentResult, AgentFailure, AlertContext, Finding
 from shared.report_renderer import (
     DiscordDialect,
@@ -18,6 +19,14 @@ from shared.report_renderer import (
     SlackDialect,
     SlackReportRenderer,
 )
+
+
+# Display lookup sourced from the registry — replaces the old `AGENT_DISPLAY`
+# constant that lived in report_formatter.py.
+AGENT_DISPLAY = {
+    a.id: (a.emoji, a.display_name)
+    for a in get_registry().all(kind="specialized")
+}
 
 
 @pytest.fixture
@@ -407,3 +416,120 @@ class TestRendererSlackNormalizationIntegration:
         # Discord supports both — they pass through untouched.
         assert "## Investigation Summary" in report
         assert "**Trigger Time:**" in report
+
+
+
+class TestDisabledInConfigEvidence:
+    """Disabled-in-config agents render as 🚫 evidence blocks in the Incident Report."""
+
+    def test_disabled_agent_renders_as_disabled_block(self, formatter, alert_context):
+        # Discord scanner is disabled in the deployment; orchestrator passes
+        # its id in `disabled_agents` (not in `agent_results`).
+        sections = formatter.build_incident_sections(
+            alert_context,
+            agent_results={},
+            disabled_agents={"discord_scanner"},
+        )
+        report = SlackReportRenderer().render_report(sections)
+
+        assert "🎮 *Discord Scanner* 🚫" in report
+        assert "is disabled in this deployment" in report
+        # The disabled agent should NOT be presented as a failure.
+        assert "⚠️ Discord Scanner data unavailable" not in report
+
+    def test_disabled_agent_does_not_appear_in_started_notice(self, formatter, alert_context):
+        # The Started notice lists what we're actively dispatching to.
+        # Disabled agents only appear in the Incident Report's Evidence section.
+        sections = formatter.build_started_sections(
+            alert_context,
+            dispatched_agents=["slack_scanner", "cloudwatch_logs", "eks"],
+        )
+        rendered = SlackReportRenderer().render_investigation_started(sections)
+
+        assert "Slack Scanner" in rendered
+        assert "CloudWatch Logs" in rendered
+        assert "EKS Cluster State" in rendered
+        # discord_scanner is not in the dispatched list — must not appear.
+        assert "Discord Scanner" not in rendered
+
+    def test_disabled_alongside_active_agents(self, formatter, alert_context):
+        results = {
+            "slack_scanner": _make_success_result(
+                "slack_scanner",
+                [_make_finding("Alert in #ops", source="ops")],
+                "Found alerts",
+            ),
+        }
+        sections = formatter.build_incident_sections(
+            alert_context,
+            agent_results=results,
+            disabled_agents={"discord_scanner", "eks"},
+        )
+        report = SlackReportRenderer().render_report(sections)
+
+        # Active agent renders normally.
+        assert "📡 *Slack Scanner*" in report
+        assert "Alert in #ops" in report
+        # Disabled agents render with 🚫.
+        assert "🎮 *Discord Scanner* 🚫" in report
+        assert "☸️ *EKS Cluster State* 🚫" in report
+
+
+class TestUnhealthyAgentEvidence:
+    """Agents reporting status='unhealthy' render as 🚫 with an 'investigate
+    agent configuration' nudge — distinct from status='error' which is a
+    transient failure of one request."""
+
+    def test_unhealthy_status_renders_as_disabled_block_with_reason(
+        self, formatter, alert_context,
+    ):
+        unhealthy = AgentResult(
+            agent_name="eks",
+            status="unhealthy",
+            findings=[],
+            summary="",
+            error_message="EKS cluster API unreachable from agent VPC",
+        )
+        sections = formatter.build_incident_sections(
+            alert_context, agent_results={"eks": unhealthy},
+        )
+        report = SlackReportRenderer().render_report(sections)
+
+        assert "☸️ *EKS Cluster State* 🚫" in report
+        assert "reported unhealthy: EKS cluster API unreachable" in report
+        assert "investigate agent configuration" in report
+        # Unhealthy is NOT a "data unavailable" — those are transient errors.
+        assert "⚠️ EKS Cluster State data unavailable" not in report
+
+    def test_unhealthy_status_drives_recommended_action(
+        self, formatter, alert_context,
+    ):
+        unhealthy = AgentResult(
+            agent_name="eks",
+            status="unhealthy",
+            findings=[],
+            summary="",
+            error_message="missing IAM credentials",
+        )
+        sections = formatter.build_incident_sections(
+            alert_context, agent_results={"eks": unhealthy},
+        )
+        report = SlackReportRenderer().render_report(sections)
+
+        # Distinct from "Manually check X — automated data collection failed"
+        # (which is the error path).
+        assert "Investigate EKS Cluster State configuration" in report
+        assert "agent reported unhealthy" in report
+
+    def test_error_path_still_uses_warning_marker(
+        self, formatter, alert_context,
+    ):
+        # Sanity: the existing 'error' path is unchanged — still ⚠️, not 🚫.
+        error = _make_error_result("cloudwatch_logs", "Connection timeout")
+        sections = formatter.build_incident_sections(
+            alert_context, agent_results={"cloudwatch_logs": error},
+        )
+        report = SlackReportRenderer().render_report(sections)
+
+        assert "⚠️ CloudWatch Logs data unavailable: Connection timeout" in report
+        assert "🚫" not in report

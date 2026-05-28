@@ -1,7 +1,7 @@
 """Pydantic schema for config.yaml — the project's single source of truth.
 
 Loaded once at agent startup (cached). Validates:
-- Only known agents are listed.
+- Only known agents are listed (delegated to :func:`shared.agents.catalogue_ids`).
 - Master agent is always enabled.
 - EKS agent must use VPC network mode (its cluster API is private).
 - MCP transports are restricted to streamable_http | sse | stdio.
@@ -17,10 +17,6 @@ import yaml
 
 NetworkMode = Literal["PUBLIC", "VPC"]
 Transport = Literal["streamable_http", "sse", "stdio"]
-
-KNOWN_AGENTS: frozenset[str] = frozenset({
-    "master", "slack_scanner", "discord_scanner", "cloudwatch_logs", "eks",
-})
 
 
 class MCPConfig(pydantic.BaseModel):
@@ -51,7 +47,11 @@ class ProjectConfig(pydantic.BaseModel):
     @pydantic.field_validator("agents")
     @classmethod
     def _known_agents_only(cls, agents: dict[str, AgentConfig]) -> dict[str, AgentConfig]:
-        unknown = set(agents) - KNOWN_AGENTS
+        # Imported lazily to avoid load-order coupling with shared.agents,
+        # which doesn't import shared.config at module-import time.
+        from shared.agents import catalogue_ids
+
+        unknown = set(agents) - catalogue_ids()
         if unknown:
             raise ValueError(f"Unknown agent names in config.yaml: {sorted(unknown)}")
         return agents
@@ -86,9 +86,16 @@ def load(path: str | Path | None = None) -> ProjectConfig:
 
 
 def reset_cache() -> None:
-    """Clear the cached ProjectConfig — for tests that load multiple configs."""
+    """Clear the cached ProjectConfig — for tests that load multiple configs.
+
+    Also clears the :class:`AgentRegistry` cache, since the registry is built
+    against the cached :class:`ProjectConfig` and would otherwise reflect a
+    stale config the next time it's queried.
+    """
     global _CACHED
     _CACHED = None
+    from shared import agents as _agents_module
+    _agents_module.reset_cache()
 
 
 def _find_config_yaml() -> Path:

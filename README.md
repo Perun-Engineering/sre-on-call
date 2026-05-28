@@ -18,7 +18,7 @@ Slack/Discord webhook
                             ▼                      ▼                      ▼
                      Slack Scanner   Discord Scanner
                      CloudWatch Logs  EKS              (4 specialized agents,
-                                                        filtered by ENABLED_AGENTS)
+                                                        configured via config.yaml)
 ```
 
 - **Lambda Adapter** — receives Slack/Discord webhooks, verifies signatures, deduplicates via DynamoDB, posts ack, then invokes the Master Agent runtime.
@@ -153,7 +153,7 @@ See **[docs/deployment.md](docs/deployment.md)** for the full procedure (build i
 1. Configure the AWS profile and required Terraform variables.
 2. `terraform apply -target=aws_ecr_repository.agents` to create the repos.
 3. `./scripts/build_and_push_agents.sh <tag>` to build + push the 5 agent images.
-4. `terraform apply -var "agent_image_tag=<tag>" [-var "enabled_agents=<csv>"]` for the rest.
+4. `terraform apply -var "agent_image_tag=<tag>"` for the rest.
 5. `./scripts/hydrate_secrets.sh` to populate Slack/Discord secret values.
 
 ### Required Terraform variables
@@ -173,7 +173,6 @@ Optional:
 | `project_name` | `sre-on-call` | Resource-name prefix |
 | `agent_image_tag` | `latest` | Pin image tag at apply time |
 | `model_id` | `us.anthropic.claude-haiku-4-5-20251001-v1:0` | Bedrock model used by all agents |
-| `enabled_agents` | `""` (all) | CSV allowlist passed to master, e.g. `eks` to scope the fan-out for testing |
 | `lambda_memory_size` | `256` | |
 | `lambda_timeout` | `30` | |
 
@@ -210,7 +209,6 @@ These are set on the Lambda function and the AgentCore runtimes by Terraform; yo
 | `DISCORD_SCANNER_AGENT_RUNTIME_ARN` | Master | AgentCore runtime ARN of the Discord Scanner |
 | `CLOUDWATCH_LOGS_AGENT_RUNTIME_ARN` | Master | AgentCore runtime ARN of CloudWatch Logs |
 | `EKS_AGENT_RUNTIME_ARN` | Master | AgentCore runtime ARN of EKS |
-| `ENABLED_AGENTS` | Master | CSV allowlist (e.g. `eks`); empty = all known agents |
 | `MODEL_ID` | All agents | Bedrock model ID or cross-region inference profile |
 | `EKS_CLUSTER_NAME` | EKS agent | Cluster the EKS agent inspects |
 | `A2A_PORT` / `A2A_HOST` | All agents | A2A server bind port (9000) / host (0.0.0.0) |

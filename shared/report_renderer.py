@@ -11,7 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
-EvidenceStatus = Literal["ok", "pending", "error"]
+EvidenceStatus = Literal["ok", "pending", "error", "disabled"]
 EnrichmentStatus = Literal["ok", "error"]
 
 
@@ -350,6 +350,8 @@ class MarkupReportRenderer:
                 status_marker = " ⏳"
             elif b.status == "error":
                 status_marker = " ⚠️"
+            elif b.status == "disabled":
+                status_marker = " 🚫"
             parts.append(f"\n{b.emoji} {d.bold(b.display_name)}{status_marker}")
             if b.metadata_line:
                 parts.append(f"_{b.metadata_line}_")

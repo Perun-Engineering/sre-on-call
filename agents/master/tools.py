@@ -1,10 +1,10 @@
 """Master Agent tool — bridges the LLM to the deterministic orchestrator.
 
-A single async tool wraps :class:`InvestigationOrchestrator`. The tool's
-fan-out target list is derived from the runtime's ``ENABLED_AGENTS`` env
-var (see :func:`_load_agent_endpoints`), so deploys can scope the master
-to a subset of specialized agents (e.g. only ``eks``) without code
-changes.
+A single async tool wraps :class:`InvestigationOrchestrator`. The fan-out
+target list is derived from the :class:`shared.agents.AgentRegistry`'s
+``active(kind="specialized")`` view — i.e. specialized agents listed in
+``config.yaml`` with ``enabled: true``. There is no ``ENABLED_AGENTS``
+allowlist; operators control fan-out by editing ``config.yaml``.
 
 The tool kicks off the investigation as a background asyncio task and
 returns immediately so the upstream Lambda invoker isn't held open for
@@ -47,11 +47,11 @@ def _alert_context_from_payload(payload: dict) -> AlertContext:
 async def investigate_alert(alert_context_json: str) -> str:
     """Run the full incident investigation lifecycle for an alert.
 
-    Fans out to every agent in the runtime's ``ENABLED_AGENTS`` allowlist
-    (or all known agents when unset), enforces the 60-second initial
-    deadline and 5-minute hard cutoff, and posts the Incident Report plus
-    enrichment updates to the originating chat platform directly. The
-    return string is a status line for the LLM and is not user-visible.
+    Fans out to every active specialized agent (per the registry's view of
+    ``config.yaml``), enforces the 60-second initial deadline and 5-minute
+    hard cutoff, and posts the Incident Report plus enrichment updates to
+    the originating chat platform directly. The return string is a status
+    line for the LLM and is not user-visible.
 
     Args:
         alert_context_json: The verbatim JSON payload received in the A2A
@@ -70,7 +70,8 @@ async def investigate_alert(alert_context_json: str) -> str:
     if not enabled_agents:
         msg = (
             f"Investigation {alert_context.investigation_id} aborted: "
-            f"no agents enabled (check ENABLED_AGENTS and *_AGENT_RUNTIME_ARN env vars)."
+            f"no active specialized agents in config.yaml "
+            f"(check the `enabled: true` flag on each agent)."
         )
         logger.error(msg)
         return msg
