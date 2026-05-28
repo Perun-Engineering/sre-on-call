@@ -5,12 +5,17 @@ from agent results. Platform-specific markup is owned by
 :class:`shared.platforms.ChatPlatform` implementations, which call the
 ``build_*_sections`` methods on :class:`ReportFormatter` and render the
 returned sections in their native dialect.
+
+Display info (emoji, name, render order) is sourced from the
+:class:`shared.agents.AgentRegistry` — there is no longer a separate
+``AGENT_DISPLAY`` / ``AGENT_ORDER`` table here.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
 
+from shared.agents import Agent, AgentRegistry, get_registry
 from shared.models import AgentMetadata, AgentResult, AgentFailure, AlertContext, Finding
 from shared.report_renderer import (
     EnrichmentSections,
@@ -21,24 +26,6 @@ from shared.report_renderer import (
     ReportSections,
 )
 
-
-# Display configuration for each agent: (emoji, display name)
-AGENT_DISPLAY: dict[str, tuple[str, str]] = {
-    "slack_scanner": ("📡", "Slack Scanner"),
-    "discord_scanner": ("🎮", "Discord Scanner"),
-    "cloudwatch_logs": ("📋", "CloudWatch Logs"),
-    "eks": ("☸️", "EKS Cluster State"),
-    "prometheus": ("📈", "Prometheus"),
-}
-
-# Preferred render order; unlisted agents render last alphabetically.
-AGENT_ORDER: list[str] = [
-    "slack_scanner",
-    "discord_scanner",
-    "cloudwatch_logs",
-    "eks",
-    "prometheus",
-]
 
 # Severity emoji mapping
 SEVERITY_EMOJI: dict[str, str] = {
@@ -53,7 +40,7 @@ def _enrichment_error(result: AgentResult | AgentFailure) -> str | None:
     """Return an error message when ``result`` represents a failure, else ``None``."""
     if isinstance(result, AgentFailure):
         return result.error_message
-    if result.status == "error":
+    if isinstance(result, AgentResult) and result.status in ("error", "unhealthy"):
         return result.error_message or "unknown error"
     return None
 
@@ -136,25 +123,50 @@ class ReportFormatter:
 
     The formatter knows nothing about platform-specific markup; rendering
     is owned by :class:`shared.platforms.ChatPlatform` implementations.
+    Display info (emoji, name, order) is sourced from the
+    :class:`AgentRegistry` — pass one for tests; production paths default
+    to the cached process-wide registry.
     """
+
+    def __init__(self, registry: AgentRegistry | None = None) -> None:
+        self._registry: AgentRegistry | None = registry
+
+    @property
+    def registry(self) -> AgentRegistry:
+        if self._registry is None:
+            self._registry = get_registry()
+        return self._registry
+
+    # --- Public builders ---
 
     def build_incident_sections(
         self,
         alert_context: AlertContext,
         agent_results: dict[str, AgentResult | AgentFailure],
         pending_agents: set[str] | None = None,
+        disabled_agents: set[str] | None = None,
     ) -> ReportSections:
         """Build the structured Incident Report sections.
 
         ``pending_agents`` are agents that were dispatched but hadn't
-        responded by the 60-second deadline. They render with a ``⏳``
+        responded by the 60-second deadline. They render with a ⏳
         marker and trigger a late enrichment update if they respond
-        before the hard cutoff. Agents not in ``agent_results`` and not
-        in ``pending_agents`` are treated as not configured for this
-        investigation and omitted entirely.
+        before the hard cutoff.
+
+        ``disabled_agents`` are agents the orchestrator deliberately did
+        not dispatch because they are deployed-but-inactive in
+        ``config.yaml`` (``enabled: false``). They render as 🚫 disabled
+        evidence blocks for transparency. Their ids must be in the
+        registry; otherwise ``KeyError`` propagates.
+
+        Agents not in any of the three sets are treated as not configured
+        for this investigation and omitted entirely.
         """
         sections = self._build_report_sections(
-            alert_context, agent_results, pending_agents or set(),
+            alert_context,
+            agent_results,
+            pending_agents or set(),
+            disabled_agents or set(),
         )
         sections.variant_label = alert_context.variant_label
         return sections
@@ -164,13 +176,17 @@ class ReportFormatter:
         alert_context: AlertContext,
         dispatched_agents: list[str],
     ) -> InvestigationStartedSections:
-        """Build the "investigation kicked off" announcement sections."""
+        """Build the "investigation kicked off" announcement sections.
+
+        Lists only the agents the orchestrator is actively dispatching to —
+        disabled-in-config agents do *not* appear here (they only appear in
+        the Incident Report's Evidence section as 🚫 blocks). The started
+        notice is aspirational; it should reflect what we're actually doing.
+        """
         return InvestigationStartedSections(
             alert_text=alert_context.alert_text,
             investigation_id=alert_context.investigation_id,
-            dispatched=[
-                AGENT_DISPLAY.get(aid, ("📌", aid)) for aid in dispatched_agents
-            ],
+            dispatched=[self._display(aid) for aid in dispatched_agents],
         )
 
     def build_enrichment_sections(
@@ -181,7 +197,7 @@ class ReportFormatter:
         variant_label: str | None = None,
     ) -> EnrichmentSections:
         """Build sections for a late-arriving result (success or failure)."""
-        emoji, display_name = AGENT_DISPLAY.get(source_agent, ("📌", source_agent))
+        emoji, display_name = self._display(source_agent)
         error_message = _enrichment_error(new_findings)
 
         if error_message is not None:
@@ -231,6 +247,25 @@ class ReportFormatter:
             lessons_learned="(To be filled in by the team during the post-incident review.)",
         )
 
+    # --- Registry helpers ---
+
+    def _display(self, agent_id: str) -> tuple[str, str]:
+        """Look up an agent's (emoji, display_name) from the registry.
+
+        Falls back to (📌, agent_id) for ids the registry doesn't recognise —
+        this should only happen if an agent record is removed mid-flight while
+        an in-progress investigation still references it.
+        """
+        try:
+            a = self.registry.lookup(agent_id)
+            return a.emoji, a.display_name
+        except KeyError:
+            return "📌", agent_id
+
+    def _ordered_specialized_ids(self) -> list[str]:
+        """Specialized agent ids in canonical render order (per registry)."""
+        return [a.id for a in self.registry.all(kind="specialized")]
+
     # --- Private helpers ---
 
     def _build_pir_timeline(
@@ -242,7 +277,7 @@ class ReportFormatter:
         entries: list[str] = [
             f"- {alert_context.alert_timestamp} — Alert detected: {alert_context.alert_text}",
         ]
-        for agent_key in AGENT_ORDER:
+        for agent_key in self._ordered_specialized_ids():
             result = agent_results.get(agent_key)
             if isinstance(result, AgentResult) and result.status == "success":
                 for finding in result.findings:
@@ -256,6 +291,7 @@ class ReportFormatter:
         alert_context: AlertContext,
         agent_results: dict[str, AgentResult | AgentFailure],
         pending_agents: set[str],
+        disabled_agents: set[str],
     ) -> ReportSections:
         summary_parts = self._collect_summary_parts(agent_results)
         root_cause_parts = self._collect_root_cause_parts(agent_results)
@@ -265,7 +301,9 @@ class ReportFormatter:
             time_of_detection=alert_context.alert_timestamp,
             summary=self._joined_summary_or_fallback(alert_context, summary_parts),
             root_cause=self._joined_root_cause_or_fallback(root_cause_parts),
-            evidence_blocks=self._build_evidence_blocks(agent_results, pending_agents),
+            evidence_blocks=self._build_evidence_blocks(
+                agent_results, pending_agents, disabled_agents,
+            ),
             impact_assessment=self._build_impact_assessment(alert_context, agent_results),
             recommended_actions=self._build_recommended_actions(agent_results, pending_agents),
             links=self._build_links(agent_results),
@@ -305,7 +343,7 @@ class ReportFormatter:
     ) -> list[str]:
         """Per-agent raw summaries in render order. Renderer normalizes each."""
         parts: list[str] = []
-        for agent_key in AGENT_ORDER:
+        for agent_key in self._ordered_specialized_ids():
             result = agent_results.get(agent_key)
             if (
                 isinstance(result, AgentResult)
@@ -338,14 +376,14 @@ class ReportFormatter:
     ) -> list[tuple[str, str]]:
         """Per-agent (display_name, raw_summary) tuples in render order."""
         parts: list[tuple[str, str]] = []
-        for agent_key in AGENT_ORDER:
+        for agent_key in self._ordered_specialized_ids():
             result = agent_results.get(agent_key)
             if (
                 isinstance(result, AgentResult)
                 and result.status == "success"
                 and result.summary
             ):
-                _, display_name = AGENT_DISPLAY.get(agent_key, ("", agent_key))
+                _, display_name = self._display(agent_key)
                 parts.append((display_name, result.summary))
         return parts
 
@@ -363,22 +401,33 @@ class ReportFormatter:
         self,
         agent_results: dict[str, AgentResult | AgentFailure],
         pending_agents: set[str],
+        disabled_agents: set[str],
     ) -> list[EvidenceBlock]:
-        """Build one evidence block per agent the orchestrator dispatched.
+        """Build one evidence block per agent the orchestrator considered.
 
-        Agents not in ``agent_results`` and not in ``pending_agents`` are
-        skipped — emitting "data unavailable" for an agent the orchestrator
-        chose not to invoke (e.g. ``ENABLED_AGENTS`` exclusion) would mislead.
+        Includes:
+        - Agents that returned a result (success / error / unhealthy).
+        - Agents still pending at the initial deadline (⏳).
+        - Agents that are deployed-but-inactive in this deployment (🚫).
+
+        Agents not in any of the three sets are skipped — emitting "data
+        unavailable" for an agent the orchestrator chose not to invoke would
+        mislead. Order follows the registry's specialized agent order;
+        unknown ids fall to the end alphabetically.
         """
-        configured = set(agent_results.keys()) | pending_agents
-        ordered = [a for a in AGENT_ORDER if a in configured]
-        ordered += sorted(configured - set(AGENT_ORDER))
+        configured = set(agent_results.keys()) | pending_agents | disabled_agents
+        ordered_known = [a for a in self._ordered_specialized_ids() if a in configured]
+        ordered = ordered_known + sorted(configured - set(ordered_known))
 
         blocks: list[EvidenceBlock] = []
         for agent_key in ordered:
-            emoji, display_name = AGENT_DISPLAY.get(agent_key, ("📌", agent_key))
+            emoji, display_name = self._display(agent_key)
             lines, status, metadata_line = self._render_evidence_lines(
-                agent_key, agent_results.get(agent_key), pending_agents, display_name,
+                agent_key,
+                agent_results.get(agent_key),
+                pending_agents,
+                disabled_agents,
+                display_name,
             )
             blocks.append(
                 EvidenceBlock(
@@ -396,8 +445,18 @@ class ReportFormatter:
         agent_key: str,
         result: AgentResult | AgentFailure | None,
         pending_agents: set[str],
+        disabled_agents: set[str],
         display_name: str,
     ) -> tuple[list[str], EvidenceStatus, str | None]:
+        if result is None and agent_key in disabled_agents:
+            return (
+                [
+                    f"🚫 {display_name} is disabled in this deployment "
+                    f"— investigate manually if relevant"
+                ],
+                "disabled",
+                None,
+            )
         if result is None and agent_key in pending_agents:
             return (
                 [
@@ -411,6 +470,16 @@ class ReportFormatter:
             return (
                 [f"⚠️ {display_name} data unavailable: {result.error_message}"],
                 "error",
+                _format_metadata_line(result.metadata),
+            )
+        if isinstance(result, AgentResult) and result.status == "unhealthy":
+            reason = result.error_message or "agent reported unhealthy"
+            return (
+                [
+                    f"🚫 {display_name} reported unhealthy: {reason} "
+                    f"— investigate agent configuration"
+                ],
+                "disabled",
                 _format_metadata_line(result.metadata),
             )
         if isinstance(result, AgentResult) and result.status == "error":
@@ -470,7 +539,14 @@ class ReportFormatter:
         for agent_key, result in agent_results.items():
             if agent_key in pending_agents:
                 continue
-            _, display_name = AGENT_DISPLAY.get(agent_key, ("", agent_key))
+            _, display_name = self._display(agent_key)
+            if isinstance(result, AgentResult) and result.status == "unhealthy":
+                actions.append(
+                    f"{action_num}. Investigate {display_name} configuration "
+                    f"— agent reported unhealthy"
+                )
+                action_num += 1
+                continue
             if isinstance(result, AgentFailure) or (
                 isinstance(result, AgentResult) and result.status == "error"
             ):

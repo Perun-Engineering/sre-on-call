@@ -177,36 +177,53 @@ def agent_main(agent_dir: str | pathlib.Path) -> None:
     """Full agent lifecycle entry point.
 
     1. Read agent name from the trailing path component of *agent_dir*.
-    2. Load ``config.yaml`` and look up the agent's entry.
+    2. Look up the :class:`shared.agents.Agent` record in the registry
+       (which has folded ``config.yaml`` in at load time). Refuse to start
+       when the agent is unknown to the catalogue, not deployed in this
+       account's ``config.yaml``, or marked ``enabled: false``.
     3. Resolve attached SKILL.md bundles + MCP connections.
     4. Compose system prompt = card.system_prompt + skill bodies.
     5. Build :class:`strands.Agent`.
     6. Start :class:`A2AServer` with skills surfaced from resolved bundles.
     """
+    from shared.agents import get_registry
     from shared.config import load as load_config
     from shared import skill_loader, mcp_loader
 
     agent_path = pathlib.Path(agent_dir).resolve()
     agent_name = agent_path.name
 
+    # Triggers config.yaml load + validation as a side effect; surfaces
+    # config errors with a clear message at startup rather than during the
+    # first registry query.
     project_config = load_config()
-    if agent_name not in project_config.agents:
+
+    registry = get_registry()
+    try:
+        agent_record = registry.lookup(agent_name)
+    except KeyError as exc:
+        raise RuntimeError(
+            f"agent {agent_name!r} is not in the registry catalogue "
+            f"(shared/agents.py)"
+        ) from exc
+    if not agent_record.deployed:
         raise RuntimeError(f"agent {agent_name!r} not in config.yaml")
-    agent_cfg = project_config.agents[agent_name]
-    if not agent_cfg.enabled:
+    if not agent_record.is_active:
         raise RuntimeError(f"agent {agent_name!r} is disabled in config.yaml")
 
     card = _load_card(agent_path)
 
     # Resolve skills: gather Skill objects, import their @tool functions,
     # and append their bodies to the agent's base system_prompt.
-    skills_resolved = [skill_loader.resolve(name, agent_name) for name in agent_cfg.skills]
+    skills_resolved = [
+        skill_loader.resolve(name, agent_name) for name in (agent_record.skills or [])
+    ]
     skill_tools = [skill_loader.import_tool(s.tool_symbol) for s in skills_resolved]
 
     # MCP connections live for the uvicorn server's lifetime. uvicorn.run
     # blocks until shutdown, so the `with` cleanly tears down all MCP
     # transports (HTTP sessions, stdio subprocesses) on SIGTERM/SIGINT.
-    with mcp_loader.open(agent_cfg.mcps) as mcp_handle:
+    with mcp_loader.open(agent_record.mcps or []) as mcp_handle:
         tools = skill_tools + list(mcp_handle.tools)
 
         system_prompt = _compose_system_prompt(card["system_prompt"], skills_resolved)

@@ -5,9 +5,22 @@ from __future__ import annotations
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from agents.master.report_formatter import AGENT_DISPLAY, AGENT_ORDER, ReportFormatter
+from agents.master.report_formatter import ReportFormatter
+from shared.agents import get_registry
 from shared.models import AgentFailure, AgentResult, AlertContext, Finding
 from shared.report_renderer import SlackReportRenderer
+
+# Specialized agent ids in canonical render order, sourced from the registry.
+# Replaces the old `AGENT_ORDER` constant that lived in report_formatter.py.
+AGENT_ORDER = [a.id for a in get_registry().all(kind="specialized")]
+
+# Map of agent id -> (emoji, display_name) — replaces the old `AGENT_DISPLAY`
+# dict; sourced from the registry so the property tests stay aligned with the
+# single source of truth.
+AGENT_DISPLAY = {
+    a.id: (a.emoji, a.display_name)
+    for a in get_registry().all(kind="specialized")
+}
 
 # ---------------------------------------------------------------------------
 # Strategies
@@ -260,7 +273,8 @@ def test_agent_findings_appear_in_evidence_section(
     """
     agent_results, status_map = data
     formatter = ReportFormatter()
-    report = SlackReportRenderer().render_report(
+    renderer = SlackReportRenderer()
+    report = renderer.render_report(
         formatter.build_incident_sections(ALERT_CONTEXT, agent_results)
     )
 
@@ -309,10 +323,15 @@ def test_agent_findings_appear_in_evidence_section(
 
         agent_subsection = evidence_section[agent_subsection_start:next_heading_pos]
 
-        # Verify each finding's content appears in this agent's subsection
+        # Verify each finding's content appears in this agent's subsection.
+        # The renderer normalizes CommonMark to Slack mrkdwn (e.g. __x__ → *x*),
+        # so we search for the *rendered* form of each finding's content rather
+        # than the raw value.
         for finding in result.findings:
-            assert finding.content in agent_subsection, (
-                f"Finding content '{finding.content}' from agent '{agent_key}' "
+            rendered = renderer.normalize(finding.content)
+            assert rendered in agent_subsection, (
+                f"Finding content '{rendered}' (normalized from "
+                f"{finding.content!r}) from agent '{agent_key}' "
                 f"not found under its Evidence subsection.\n"
                 f"Agent subsection:\n{agent_subsection}"
             )

@@ -63,6 +63,30 @@ def build_agent_result(agent_name: str, result: ToolResult) -> AgentResult:
     )
 
 
+def build_unhealthy_agent_result(agent_name: str, reason: str) -> AgentResult:
+    """Build an :class:`AgentResult` marking an agent as fundamentally unhealthy.
+
+    Distinct from :func:`build_agent_result` with ``status="error"``: an
+    ``error`` is a request-level failure (transient — the orchestrator's
+    "Recommended Actions" suggests "manually check / retry"). An
+    ``unhealthy`` result indicates the agent cannot do work in this deployment
+    at all (operator-actionable — the recommended action is "investigate agent
+    configuration"). Renders as a 🚫 disabled-style evidence block, matching
+    the static disabled-in-config presentation.
+
+    Use from a specialized agent's ``@tool`` entry point when its setup-time
+    check fails (e.g. EKS cluster API unreachable from the agent's network,
+    Prometheus URL not configured, missing IAM credentials).
+    """
+    return AgentResult(
+        agent_name=agent_name,
+        status="unhealthy",
+        findings=[],
+        summary=f"{agent_name} reported unhealthy: {reason}",
+        error_message=reason,
+    )
+
+
 def format_result(agent_result: AgentResult) -> str:
     """Produce a human-readable summary string from an AgentResult."""
     lines: list[str] = [f"Status: {agent_result.status}"]

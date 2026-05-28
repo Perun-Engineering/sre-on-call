@@ -10,6 +10,8 @@ from moto import mock_aws
 
 from agents.master.orchestrator import InvestigationOrchestrator
 from agents.master.report_formatter import ReportFormatter
+from shared.agents import AgentRegistry
+from shared.config import AgentConfig, Defaults, ProjectConfig
 from shared.experiment import ExperimentResult
 from shared.experiment_results_store import (
     DEFAULT_TABLE_NAME as RESULTS_TABLE,
@@ -17,6 +19,21 @@ from shared.experiment_results_store import (
 )
 from shared.models import AgentFailure, AgentResult, AlertContext
 from shared.report_renderer import SlackReportRenderer, DiscordReportRenderer
+
+
+def _eks_only_registry() -> AgentRegistry:
+    """Registry with only EKS active — matches the legacy single-agent fan-out."""
+    return AgentRegistry(
+        ProjectConfig(
+            project="test",
+            environment="dev",
+            defaults=Defaults(model_id="anthropic.claude-test"),
+            agents={
+                "master": AgentConfig(skills=["investigate_alert"]),
+                "eks": AgentConfig(enabled=True, network_mode="VPC"),
+            },
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +203,7 @@ class TestOrchestratorExperimentStorage:
         orch = InvestigationOrchestrator(
             http_client=FakeHTTPClient(),
             chat_platform=platform,
-            agent_endpoints={"eks": "http://localhost:9004"},
+            registry=_eks_only_registry(),
             results_store=store,
         )
         ctx = _alert(variant_id="a", variant_label="A: Claude", experiment_id="exp-001")
@@ -203,7 +220,7 @@ class TestOrchestratorExperimentStorage:
         orch = InvestigationOrchestrator(
             http_client=FakeHTTPClient(),
             chat_platform=platform,
-            agent_endpoints={"eks": "http://localhost:9004"},
+            registry=_eks_only_registry(),
             results_store=store,
         )
         ctx = _alert()
@@ -216,7 +233,7 @@ class TestOrchestratorExperimentStorage:
         orch = InvestigationOrchestrator(
             http_client=FakeHTTPClient(),
             chat_platform=platform,
-            agent_endpoints={"eks": "http://localhost:9004"},
+            registry=_eks_only_registry(),
         )
         ctx = _alert(variant_id="b", variant_label="B: Nova Pro")
         await orch.investigate(ctx)
