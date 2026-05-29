@@ -19,16 +19,20 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import time
 from dataclasses import asdict, replace
-from typing import Any, Protocol
 
-from shared.a2a_protocol import build_a2a_request, extract_response_text
+from shared.a2a_client import (
+    A2AClient,
+    A2AReply,
+    AgentCoreClient,
+    AiohttpClient,
+    AsyncHTTPClient,
+)
 from shared.agent_telemetry import AGENT_METADATA
-from shared.agents import Agent, AgentRegistry, get_registry
+from shared.agents import AgentRegistry, get_registry
 from shared.constants import HARD_CUTOFF_SECONDS, INITIAL_DEADLINE_SECONDS
-from shared.models import AgentFailure, AgentMetadata, AgentResult, AlertContext, Finding
+from shared.models import AgentFailure, AgentMetadata, AgentResult, AlertContext
 from shared.time_utils import now_iso
 from shared.platforms import ChatPlatform, deliver_with_retry, for_platform
 from shared.experiment import ExperimentResult
@@ -49,72 +53,12 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# HTTP client protocol (for dependency injection / mocking)
-# ---------------------------------------------------------------------------
-
-
-class AsyncHTTPClient(Protocol):
-    """Minimal async HTTP client interface for A2A calls."""
-
-    async def post_json(self, url: str, payload: dict) -> dict:
-        """POST *payload* as JSON to *url* and return the parsed response."""
-        ...  # pragma: no cover
-
-
-class AiohttpClient:
-    """Default :class:`AsyncHTTPClient` backed by ``aiohttp``."""
-
-    async def post_json(self, url: str, payload: dict) -> dict:
-        import aiohttp
-
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                url,
-                json=payload,
-                headers={"Content-Type": "application/json"},
-                timeout=aiohttp.ClientTimeout(total=HARD_CUTOFF_SECONDS),
-            ) as resp:
-                return await resp.json()
-
-
-class AgentCoreClient:
-    """:class:`AsyncHTTPClient` that invokes Bedrock AgentCore runtimes.
-
-    ``url`` is interpreted as an Agent Runtime ARN. Use this client when
-    the orchestrator's per-agent ``*_AGENT_RUNTIME_ARN`` env vars are set
-    in deployed environments. Local-dev paths can still use
-    :class:`AiohttpClient`.
-    """
-
-    def __init__(self, *, client: Any = None, region_name: str | None = None):
-        if client is not None:
-            self._client = client
-        else:
-            import boto3
-
-            self._client = boto3.client(
-                "bedrock-agentcore",
-                region_name=region_name or os.environ.get("AWS_REGION", "us-east-1"),
-            )
-
-    async def post_json(self, url: str, payload: dict) -> dict:
-        response = await asyncio.to_thread(
-            self._client.invoke_agent_runtime,
-            agentRuntimeArn=url,
-            payload=json.dumps(payload).encode("utf-8"),
-            contentType="application/json",
-            accept="application/json",
-        )
-        body = response["response"]
-        if hasattr(body, "read"):
-            body = body.read()
-        if isinstance(body, bytes):
-            body = body.decode("utf-8")
-        return json.loads(body)
-
-
-# ---------------------------------------------------------------------------
 # A2A JSON-RPC 2.0 helpers
+#
+# The transport adapters (AsyncHTTPClient / AiohttpClient / AgentCoreClient)
+# and the request/response round-trip now live in shared.a2a_client; they are
+# re-exported above so existing ``from agents.master.orchestrator import ...``
+# call sites keep working.
 # ---------------------------------------------------------------------------
 
 
@@ -123,58 +67,51 @@ def _serialize_alert_context(alert_context: AlertContext) -> str:
     return json.dumps(asdict(alert_context))
 
 
-def _parse_agent_result(
+def _result_from_reply(
     agent_name: str,
-    response: dict,
+    reply: A2AReply[AgentResult],
     base_metadata: AgentMetadata | None = None,
 ) -> AgentResult:
-    """Parse an A2A JSON-RPC response into an :class:`AgentResult`.
+    """Map a parsed :class:`A2AReply` onto an :class:`AgentResult`.
 
-    ``base_metadata`` carries the orchestrator-owned wall-clock window;
-    fields populated by the agent's footer (model, tokens, cost) overlay it.
+    Owns the alert path's domain knowledge — the wire parsing already
+    happened in :meth:`shared.a2a_client.A2AClient.send`. A JSON-RPC error
+    becomes an ``error`` result. The ``AGENT_METADATA`` footer (which
+    ``send`` leaves in ``reply.text`` — it only strips the requested
+    ``AGENT_RESULT`` footer) is peeled here and merged with the
+    orchestrator's wall-clock window (``base_metadata``) and any
+    footer-supplied metadata (model, tokens, cost).
     """
     base_metadata = base_metadata or AgentMetadata()
-    try:
-        if "error" in response:
-            error_msg = response["error"].get("message", "Unknown A2A error")
-            return AgentResult(
-                agent_name=agent_name,
-                status="error",
-                findings=[],
-                summary="",
-                error_message=error_msg,
-                metadata=base_metadata,
-            )
 
-        result_data = response.get("result", {})
-        raw_summary = extract_response_text(result_data)
-        clean_summary, structured = AGENT_RESULT.extract(raw_summary)
-        clean_summary, footer_metadata = AGENT_METADATA.extract(clean_summary)
-        merged = _merge_metadata(base_metadata, structured.metadata if structured else None)
-        merged = _merge_metadata(merged, footer_metadata)
-
-        if structured is not None:
-            structured.metadata = merged
-            if not structured.summary:
-                structured.summary = clean_summary
-            return structured
-
-        return AgentResult(
-            agent_name=agent_name,
-            status="success",
-            findings=[],
-            summary=clean_summary,
-            metadata=merged,
-        )
-    except Exception as exc:
+    if reply.error is not None:
         return AgentResult(
             agent_name=agent_name,
             status="error",
             findings=[],
             summary="",
-            error_message=f"Failed to parse agent response: {exc}",
+            error_message=reply.error,
             metadata=base_metadata,
         )
+
+    clean_summary, footer_metadata = AGENT_METADATA.extract(reply.text)
+    structured = reply.payload
+    merged = _merge_metadata(base_metadata, structured.metadata if structured else None)
+    merged = _merge_metadata(merged, footer_metadata)
+
+    if structured is not None:
+        structured.metadata = merged
+        if not structured.summary:
+            structured.summary = clean_summary
+        return structured
+
+    return AgentResult(
+        agent_name=agent_name,
+        status="success",
+        findings=[],
+        summary=clean_summary,
+        metadata=merged,
+    )
 
 
 def _merge_metadata(
@@ -241,6 +178,7 @@ class InvestigationOrchestrator:
             )
             http_client = AgentCoreClient() if any_arn else AiohttpClient()
         self.http_client: AsyncHTTPClient = http_client
+        self._client = A2AClient(self.http_client)
         self._results_store = results_store
         # Trace archive is opt-in via env vars; from_env() returns None when
         # TRACES_BUCKET_NAME / TRACES_TABLE_NAME are unset (e.g. local dev,
@@ -409,18 +347,19 @@ class InvestigationOrchestrator:
     ) -> AgentResult:
         """Send an A2A JSON-RPC ``message/send`` to a specialized agent."""
         endpoint = self.agent_endpoints[agent_id]
-        payload = build_a2a_request(
-            text=_serialize_alert_context(alert_context),
-            request_id=f"req-{agent_id}-{alert_context.investigation_id}",
-        )
 
         started_at = now_iso()
         start = time.monotonic()
-        response = await self.http_client.post_json(endpoint, payload)
+        reply = await self._client.send(
+            endpoint,
+            _serialize_alert_context(alert_context),
+            footer=AGENT_RESULT,
+            request_id=f"req-{agent_id}-{alert_context.investigation_id}",
+        )
         duration = time.monotonic() - start
 
         base_metadata = AgentMetadata(started_at=started_at, completed_at=now_iso())
-        result = _parse_agent_result(agent_id, response, base_metadata)
+        result = _result_from_reply(agent_id, reply, base_metadata)
         result.duration_seconds = duration
         return result
 

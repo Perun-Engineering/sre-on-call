@@ -26,8 +26,7 @@ import logging
 import os
 from typing import Any
 
-from agents.master.orchestrator import AgentCoreClient, AiohttpClient, AsyncHTTPClient
-from shared.a2a_protocol import build_a2a_request, extract_response_text
+from shared.a2a_client import A2AClient, AgentCoreClient, AiohttpClient, AsyncHTTPClient
 from shared.agents import Agent, AgentRegistry, get_registry
 from shared.models import AlertContext, SnapshotReport, SnapshotSection
 from shared.platforms import ChatPlatform, deliver_with_retry, for_platform
@@ -151,6 +150,7 @@ class StatusSnapshotOrchestrator:
             )
             http_client = AgentCoreClient() if any_arn else AiohttpClient()
         self.http_client: AsyncHTTPClient = http_client
+        self._client = A2AClient(self.http_client)
 
     @property
     def registry(self) -> AgentRegistry:
@@ -247,22 +247,15 @@ class StatusSnapshotOrchestrator:
     async def _invoke_snapshot_safe(
         self, agent_id: str, requested_at: str
     ) -> SnapshotReport | None:
-        endpoint = self.agent_endpoints[agent_id]
-        text_payload = json.dumps({"task": "snapshot", "requested_at": requested_at})
-        request = build_a2a_request(
-            text=text_payload,
+        reply = await self._client.send(
+            self.agent_endpoints[agent_id],
+            json.dumps({"task": "snapshot", "requested_at": requested_at}),
+            footer=SNAPSHOT_RESULT,
             request_id=f"req-snapshot-{agent_id}-{requested_at}",
         )
-        response = await self.http_client.post_json(endpoint, request)
-        if "error" in response:
-            raise RuntimeError(
-                f"a2a error from {agent_id}: "
-                f"{response['error'].get('message', 'unknown')}"
-            )
-        result_data = response.get("result", {})
-        text = extract_response_text(result_data)
-        _, report = SNAPSHOT_RESULT.extract(text)
-        return report
+        if reply.error is not None:
+            raise RuntimeError(f"a2a error from {agent_id}: {reply.error}")
+        return reply.payload
 
     # ------------------------------------------------------------------
     # Block builders

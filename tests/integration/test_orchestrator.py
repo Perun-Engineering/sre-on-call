@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -12,7 +11,6 @@ from agents.master.orchestrator import (
     AsyncHTTPClient,
     InvestigationOrchestrator,
     _serialize_alert_context,
-    _parse_agent_result,
 )
 from shared.a2a_protocol import build_a2a_request
 from shared.agents import AgentRegistry
@@ -270,129 +268,38 @@ class TestSerializeAlertContext:
         assert data["alert_text"] == alert_context.alert_text
 
 
-class TestParseAgentResult:
-    def test_success_response(self):
-        response = {
-            "jsonrpc": "2.0",
-            "id": "req-cloudwatch_logs-inv-001",
-            "result": {
-                "message": {
-                    "role": "agent",
-                    "parts": [{"kind": "text", "text": "CPU spike detected."}],
-                    "messageId": "resp-001",
-                }
-            },
-        }
-        result = _parse_agent_result("cloudwatch_logs", response)
-        assert result.agent_name == "cloudwatch_logs"
-        assert result.status == "success"
-        assert "CPU spike detected" in result.summary
+class TestInvokeAgentMapping:
+    """invoke_agent maps a parsed A2AReply onto an AgentResult.
 
-    def test_error_response(self):
-        response = {
-            "jsonrpc": "2.0",
-            "id": "req-eks-inv-001",
-            "error": {"code": -32000, "message": "Agent unavailable"},
-        }
-        result = _parse_agent_result("eks", response)
+    Wire-format parsing (the three Strands response shapes, footer
+    extraction, JSON-RPC error detection) is tested directly against
+    ``A2AClient.send`` in :mod:`tests.test_a2a_client`. These tests cover
+    the alert path's *mapping* knowledge through the public ``invoke_agent``
+    seam: a JSON-RPC error becomes an ``error`` result, structured findings
+    round-trip, and the ``AGENT_METADATA`` footer merges with the
+    orchestrator's wall-clock timing.
+    """
+
+    async def test_jsonrpc_error_maps_to_error_result(self, alert_context):
+        http_client = FakeHTTPClient(responses={
+            EKS_URL: {
+                "jsonrpc": "2.0",
+                "id": "x",
+                "error": {"code": -32000, "message": "Agent unavailable"},
+            },
+        })
+        orch = _make_orchestrator(http_client=http_client)
+
+        result = await orch.invoke_agent("eks", alert_context)
+
         assert result.agent_name == "eks"
         assert result.status == "error"
         assert result.error_message is not None
         assert "Agent unavailable" in result.error_message
 
-    def test_malformed_response(self):
-        result = _parse_agent_result("cloudwatch_logs", {"unexpected": True})
-        assert result.agent_name == "cloudwatch_logs"
-        # Should not crash — returns a result (possibly with error or empty summary)
-        assert result.status in ("success", "error")
-
-    def test_task_envelope_response(self):
-        """Strands A2AServer wraps tool-driven agents as a completed Task.
-
-        The canonical reply lives in artifacts[*].parts[*].text under an
-        artifact named ``agent_response`` — not in ``result.message.parts``.
-        Regression for the dict-repr leak where the parser fell through to
-        ``str(result_data)`` and dumped the whole Task envelope into the
-        Incident Report's Summary section.
-        """
-        canonical_text = "**Investigation Summary** — CPU spike on service-api at 14:32 UTC."
-        response = {
-            "jsonrpc": "2.0",
-            "id": "req-slack_scanner-inv-001",
-            "result": {
-                "kind": "task",
-                "id": "df20b7af-93d0-45a7-99ac-3c9c0a3baa87",
-                "contextId": "8afcdb4e-e48e-4bce-8631-6041a60542a9",
-                "status": {"state": "completed", "timestamp": "2026-05-09T03:05:28Z"},
-                "artifacts": [
-                    {
-                        "artifactId": "b03d53ae-7f04-4f3c-b68b-5bb44e774ace",
-                        "name": "agent_response",
-                        "parts": [{"kind": "text", "text": canonical_text}],
-                    }
-                ],
-                # Streaming chunks accumulate here; must NOT leak into summary.
-                "history": [
-                    {"role": "agent", "parts": [{"kind": "text", "text": "I'll scan"}]},
-                    {"role": "agent", "parts": [{"kind": "text", "text": " the channels"}]},
-                ],
-            },
-        }
-        result = _parse_agent_result("slack_scanner", response)
-        assert result.status == "success"
-        assert result.summary == canonical_text
-        # Hard guards against the regression: no dict-repr leakage.
-        for marker in ("artifacts", "history", "taskId", "contextId", "kind"):
-            assert marker not in result.summary, (
-                f"summary leaked Task envelope key '{marker}': {result.summary!r}"
-            )
-
-    def test_task_envelope_picks_named_artifact(self):
-        """When multiple artifacts exist, prefer the one named ``agent_response``."""
-        response = {
-            "jsonrpc": "2.0",
-            "result": {
-                "kind": "task",
-                "status": {"state": "completed"},
-                "artifacts": [
-                    {"name": "trace", "parts": [{"kind": "text", "text": "trace data"}]},
-                    {"name": "agent_response", "parts": [{"kind": "text", "text": "the answer"}]},
-                ],
-            },
-        }
-        result = _parse_agent_result("eks", response)
-        assert result.summary == "the answer"
-
-    def test_task_envelope_with_metadata_footer(self):
-        """Telemetry footer must still be stripped on the Task path."""
-        from shared.agent_telemetry import AGENT_METADATA
-
-        footer = (
-            f'{AGENT_METADATA.prefix}'
-            '{"model_id":"us.anthropic.claude-haiku-4-5-20251001-v1:0",'
-            '"input_tokens":100,"output_tokens":50}'
-            f'{AGENT_METADATA.suffix}'
-        )
-        response = {
-            "jsonrpc": "2.0",
-            "result": {
-                "kind": "task",
-                "status": {"state": "completed"},
-                "artifacts": [
-                    {
-                        "name": "agent_response",
-                        "parts": [{"kind": "text", "text": f"clean text {footer}"}],
-                    }
-                ],
-            },
-        }
-        result = _parse_agent_result("eks", response)
-        assert result.summary == "clean text"
-        assert result.metadata.input_tokens == 100
-        assert result.metadata.output_tokens == 50
-
-    def test_task_envelope_with_structured_agent_result(self):
-        """Structured findings survive the A2A text seam."""
+    async def test_structured_findings_and_metadata_round_trip(self, alert_context):
+        """Structured findings survive the A2A text seam and the footer's
+        model id overlays the orchestrator's wall-clock metadata."""
         structured_footer = (
             '<<<AGENT_RESULT '
             '{"agent_name":"eks","status":"success",'
@@ -406,30 +313,22 @@ class TestParseAgentResult:
             '"metadata":{"model_id":"model-from-agent"}}'
             ' AGENT_RESULT>>>'
         )
-        response = {
-            "jsonrpc": "2.0",
-            "result": {
-                "kind": "task",
-                "status": {"state": "completed"},
-                "artifacts": [
-                    {
-                        "name": "agent_response",
-                        "parts": [
-                            {
-                                "kind": "text",
-                                "text": f"Inspected 1 item(s). Found 1 finding(s). {structured_footer}",
-                            }
-                        ],
-                    }
-                ],
+        text = f"Inspected 1 item(s). Found 1 finding(s). {structured_footer}"
+        http_client = FakeHTTPClient(responses={
+            EKS_URL: {
+                "jsonrpc": "2.0",
+                "result": {
+                    "kind": "task",
+                    "status": {"state": "completed"},
+                    "artifacts": [
+                        {"name": "agent_response", "parts": [{"kind": "text", "text": text}]},
+                    ],
+                },
             },
-        }
+        })
+        orch = _make_orchestrator(http_client=http_client)
 
-        result = _parse_agent_result(
-            "eks",
-            response,
-            AgentMetadata(started_at="2025-01-15T14:32:00+00:00"),
-        )
+        result = await orch.invoke_agent("eks", alert_context)
 
         assert result.agent_name == "eks"
         assert result.status == "success"
@@ -442,75 +341,15 @@ class TestParseAgentResult:
             severity="critical",
             metadata={"kind": "pod_status", "pod": "api-123"},
         )
-        assert result.metadata.started_at == "2025-01-15T14:32:00+00:00"
+        # Footer model id overlays the orchestrator's wall-clock window.
         assert result.metadata.model_id == "model-from-agent"
+        assert result.metadata.started_at is not None
+        assert result.duration_seconds > 0
 
 
 # ---------------------------------------------------------------------------
 # Tests: InvestigationOrchestrator
 # ---------------------------------------------------------------------------
-
-
-class TestAgentCoreClient:
-    """AgentCoreClient invokes Bedrock AgentCore runtime ARNs via boto3."""
-
-    @pytest.mark.asyncio
-    async def test_invokes_runtime_with_arn_and_encoded_payload(self):
-        fake_boto = MagicMock()
-        fake_boto.invoke_agent_runtime.return_value = {
-            "response": b'{"jsonrpc": "2.0", "id": "1", "result": {"ok": true}}',
-            "contentType": "application/json",
-            "statusCode": 200,
-        }
-        client = AgentCoreClient(client=fake_boto)
-        arn = "arn:aws:bedrock-agentcore:us-east-1:111111111111:agent-runtime/abc"
-
-        result = await client.post_json(arn, {"jsonrpc": "2.0", "method": "ping"})
-
-        fake_boto.invoke_agent_runtime.assert_called_once()
-        kwargs = fake_boto.invoke_agent_runtime.call_args.kwargs
-        assert kwargs["agentRuntimeArn"] == arn
-        assert kwargs["contentType"] == "application/json"
-        assert kwargs["accept"] == "application/json"
-        # payload is JSON-encoded bytes
-        import json as _json
-
-        assert _json.loads(kwargs["payload"].decode("utf-8")) == {
-            "jsonrpc": "2.0",
-            "method": "ping",
-        }
-        assert result == {"jsonrpc": "2.0", "id": "1", "result": {"ok": True}}
-
-    @pytest.mark.asyncio
-    async def test_decodes_streaming_body_response(self):
-        class FakeStreamingBody:
-            def __init__(self, data: bytes):
-                self._data = data
-
-            def read(self) -> bytes:
-                return self._data
-
-        fake_boto = MagicMock()
-        fake_boto.invoke_agent_runtime.return_value = {
-            "response": FakeStreamingBody(b'{"result": "streamed"}'),
-        }
-        client = AgentCoreClient(client=fake_boto)
-
-        result = await client.post_json("arn:aws:bedrock-agentcore:us-east-1:0:r/x", {})
-
-        assert result == {"result": "streamed"}
-
-    @pytest.mark.asyncio
-    async def test_decodes_str_response(self):
-        fake_boto = MagicMock()
-        fake_boto.invoke_agent_runtime.return_value = {
-            "response": '{"result": "as-string"}',
-        }
-        client = AgentCoreClient(client=fake_boto)
-
-        result = await client.post_json("arn:aws:bedrock-agentcore:us-east-1:0:r/x", {})
-
-        assert result == {"result": "as-string"}
 
 
 class TestOrchestratorFanOut:
