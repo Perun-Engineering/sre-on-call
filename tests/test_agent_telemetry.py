@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-from shared.agent_telemetry import (
-    compute_cost_usd,
-    encode_metadata_footer,
-    extract_metadata,
-)
+from shared.agent_telemetry import AGENT_METADATA, compute_cost_usd
 from shared.models import AgentMetadata
 
 
@@ -43,21 +39,21 @@ class TestMetadataFooterRoundTrip:
             total_tokens=30,
             cost_usd=0.00012,
         )
-        text = "Agent says pods are healthy.\n\n" + encode_metadata_footer(original)
+        text = "Agent says pods are healthy.\n\n" + AGENT_METADATA.encode(original)
 
-        clean, recovered = extract_metadata(text)
+        clean, recovered = AGENT_METADATA.extract(text)
 
         assert clean == "Agent says pods are healthy."
         assert recovered == original
 
     def test_no_footer_returns_text_unchanged(self):
-        clean, meta = extract_metadata("plain agent reply")
+        clean, meta = AGENT_METADATA.extract("plain agent reply")
         assert clean == "plain agent reply"
         assert meta is None
 
     def test_malformed_footer_dropped_silently(self):
         text = "reply\n\n<<<AGENT_METADATA not-json AGENT_METADATA>>>"
-        clean, meta = extract_metadata(text)
+        clean, meta = AGENT_METADATA.extract(text)
         assert clean == "reply"
         assert meta is None
 
@@ -67,6 +63,6 @@ class TestMetadataFooterRoundTrip:
             '{"model_id": "x", "future_field": "ignore me"}'
             " AGENT_METADATA>>>"
         )
-        _clean, meta = extract_metadata(text)
+        _clean, meta = AGENT_METADATA.extract(text)
         assert meta is not None
         assert meta.model_id == "x"

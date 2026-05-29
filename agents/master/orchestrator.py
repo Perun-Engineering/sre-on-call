@@ -25,7 +25,7 @@ from dataclasses import asdict, replace
 from typing import Any, Protocol
 
 from shared.a2a_protocol import build_a2a_request, extract_response_text
-from shared.agent_telemetry import extract_metadata
+from shared.agent_telemetry import AGENT_METADATA
 from shared.agents import Agent, AgentRegistry, get_registry
 from shared.constants import HARD_CUTOFF_SECONDS, INITIAL_DEADLINE_SECONDS
 from shared.models import AgentFailure, AgentMetadata, AgentResult, AlertContext, Finding
@@ -33,7 +33,7 @@ from shared.time_utils import now_iso
 from shared.platforms import ChatPlatform, deliver_with_retry, for_platform
 from shared.experiment import ExperimentResult
 from shared.experiment_results_store import ExperimentResultsStore
-from shared.tool_result import extract_agent_result
+from shared.tool_result import AGENT_RESULT
 from shared.trace_store import (
     EVENT_A2A_REQUEST,
     EVENT_A2A_RESPONSE,
@@ -148,8 +148,8 @@ def _parse_agent_result(
 
         result_data = response.get("result", {})
         raw_summary = extract_response_text(result_data)
-        clean_summary, structured = extract_agent_result(raw_summary)
-        clean_summary, footer_metadata = extract_metadata(clean_summary)
+        clean_summary, structured = AGENT_RESULT.extract(raw_summary)
+        clean_summary, footer_metadata = AGENT_METADATA.extract(clean_summary)
         merged = _merge_metadata(base_metadata, structured.metadata if structured else None)
         merged = _merge_metadata(merged, footer_metadata)
 

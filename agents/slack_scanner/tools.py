@@ -111,7 +111,7 @@ def capture_snapshot(requested_at: str) -> str:
     and ``users.conversations`` (channel-membership count). Returns a
     human-readable summary with an embedded :class:`SnapshotReport` footer
     that the master orchestrator extracts via
-    :func:`shared.tool_result.extract_snapshot_report`.
+    :data:`shared.tool_result.SNAPSHOT_RESULT`.
 
     The tool never raises — any failure of either probe is folded into the
     snapshot. ``auth.test`` failure flips the report to ``anomaly=True``;

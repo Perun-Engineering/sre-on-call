@@ -365,13 +365,13 @@ class TestParseAgentResult:
 
     def test_task_envelope_with_metadata_footer(self):
         """Telemetry footer must still be stripped on the Task path."""
-        from shared.agent_telemetry import METADATA_PREFIX, METADATA_SUFFIX
+        from shared.agent_telemetry import AGENT_METADATA
 
         footer = (
-            f'{METADATA_PREFIX}'
+            f'{AGENT_METADATA.prefix}'
             '{"model_id":"us.anthropic.claude-haiku-4-5-20251001-v1:0",'
             '"input_tokens":100,"output_tokens":50}'
-            f'{METADATA_SUFFIX}'
+            f'{AGENT_METADATA.suffix}'
         )
         response = {
             "jsonrpc": "2.0",
@@ -934,7 +934,7 @@ class TestAgentMetadataPropagation:
     async def test_metadata_footer_extracted_and_stripped_from_summary(
         self, alert_context,
     ):
-        from shared.agent_telemetry import encode_metadata_footer
+        from shared.agent_telemetry import AGENT_METADATA
         from shared.models import AgentMetadata
 
         meta = AgentMetadata(
@@ -944,7 +944,7 @@ class TestAgentMetadataPropagation:
             total_tokens=162,
             cost_usd=0.00033,
         )
-        footer = encode_metadata_footer(meta)
+        footer = AGENT_METADATA.encode(meta)
 
         async def post_json(url: str, payload: dict) -> dict:
             return {

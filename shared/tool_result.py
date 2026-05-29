@@ -1,11 +1,17 @@
-"""Shared result-building utilities for agent tool functions."""
+"""Shared result-building utilities for agent tool functions.
+
+Owns the two transport-payload dataclasses an agent's text response carries
+to the master orchestrator: :class:`shared.models.AgentResult` (alert path)
+and :class:`shared.models.SnapshotReport` (``/status`` path). Each is round-
+tripped through an :class:`shared.agent_footer.AgentFooter` instance defined
+at the bottom of this module — :data:`AGENT_RESULT` and :data:`SNAPSHOT_RESULT`.
+"""
 
 from __future__ import annotations
 
-import json
-import re
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import dataclass, field
 
+from shared.agent_footer import AgentFooter
 from shared.models import (
     AgentMetadata,
     AgentResult,
@@ -15,19 +21,6 @@ from shared.models import (
 )
 
 _MAX_CONTENT_LENGTH: int = 200
-AGENT_RESULT_PREFIX = "<<<AGENT_RESULT "
-AGENT_RESULT_SUFFIX = " AGENT_RESULT>>>"
-_AGENT_RESULT_RE = re.compile(
-    re.escape(AGENT_RESULT_PREFIX) + r"(.*?)" + re.escape(AGENT_RESULT_SUFFIX),
-    re.DOTALL,
-)
-
-SNAPSHOT_RESULT_PREFIX = "<<<SNAPSHOT_RESULT "
-SNAPSHOT_RESULT_SUFFIX = " SNAPSHOT_RESULT>>>"
-_SNAPSHOT_RESULT_RE = re.compile(
-    re.escape(SNAPSHOT_RESULT_PREFIX) + r"(.*?)" + re.escape(SNAPSHOT_RESULT_SUFFIX),
-    re.DOTALL,
-)
 
 
 @dataclass
@@ -101,7 +94,11 @@ def build_unhealthy_agent_result(agent_name: str, reason: str) -> AgentResult:
 
 
 def format_result(agent_result: AgentResult) -> str:
-    """Produce a human-readable summary string from an AgentResult."""
+    """Produce a human-readable summary string from an AgentResult.
+
+    The trailing block is the :data:`AGENT_RESULT` footer; the master
+    orchestrator strips and decodes it via :meth:`AgentFooter.extract`.
+    """
     lines: list[str] = [f"Status: {agent_result.status}"]
     lines.append(agent_result.summary)
 
@@ -116,33 +113,37 @@ def format_result(agent_result: AgentResult) -> str:
                 f"{f.content[:_MAX_CONTENT_LENGTH]}"
             )
 
-    return "\n".join(lines) + "\n\n" + encode_agent_result(agent_result)
+    return "\n".join(lines) + "\n\n" + AGENT_RESULT.encode(agent_result)
 
 
-def encode_agent_result(agent_result: AgentResult) -> str:
-    """Serialise an AgentResult for appending to an agent text response."""
-    payload = json.dumps(asdict(agent_result), separators=(",", ":"))
-    return f"{AGENT_RESULT_PREFIX}{payload}{AGENT_RESULT_SUFFIX}"
+def format_snapshot_result(report: SnapshotReport) -> str:
+    """Produce a human-readable snapshot summary string with embedded footer.
+
+    The string is what the agent's ``capture_snapshot`` tool returns. The
+    master orchestrator extracts the structured :class:`SnapshotReport` via
+    :meth:`AgentFooter.extract` on :data:`SNAPSHOT_RESULT` from the trailing
+    ``<<<SNAPSHOT_RESULT ... SNAPSHOT_RESULT>>>`` block.
+    """
+    lines: list[str] = [
+        f"Snapshot of {report.agent_name} captured at {report.captured_at}",
+    ]
+    if report.anomaly:
+        lines.append(f"⚠️ {report.anomaly_summary or 'anomaly detected'}")
+    for section in report.sections:
+        lines.append("")
+        lines.append(f"{section.label}:")
+        if section.lines:
+            for entry in section.lines:
+                lines.append(f"  - {entry}")
+        else:
+            lines.append("  (no data)")
+    return "\n".join(lines) + "\n\n" + SNAPSHOT_RESULT.encode(report)
 
 
-def extract_agent_result(text: str) -> tuple[str, AgentResult | None]:
-    """Strip and decode an embedded AgentResult from *text* if present."""
-    match = _AGENT_RESULT_RE.search(text)
-    if match is None:
-        return text, None
-
-    cleaned = _AGENT_RESULT_RE.sub("", text).strip()
-    try:
-        payload = json.loads(match.group(1))
-        return cleaned, _agent_result_from_dict(payload)
-    except (TypeError, ValueError, KeyError, json.JSONDecodeError):
-        return cleaned, None
-
-
-def find_agent_result_footer(text: str) -> str | None:
-    """Return the raw embedded AgentResult footer from *text*, if present."""
-    match = _AGENT_RESULT_RE.search(text)
-    return match.group(0) if match is not None else None
+# ---------------------------------------------------------------------------
+# Parsers — private. Must be defined before the AgentFooter instances below
+# (the instances bind these callables at module-load time).
+# ---------------------------------------------------------------------------
 
 
 def _agent_result_from_dict(payload: dict) -> AgentResult:
@@ -180,68 +181,10 @@ def _finding_from_dict(payload: dict) -> Finding:
 
 
 def _metadata_from_dict(payload: dict) -> AgentMetadata:
+    from dataclasses import fields
+
     valid_keys = {f.name for f in fields(AgentMetadata)}
     return AgentMetadata(**{k: v for k, v in payload.items() if k in valid_keys})
-
-
-# ---------------------------------------------------------------------------
-# SnapshotReport transport — parallel to AgentResult, used by /status path
-# ---------------------------------------------------------------------------
-
-
-def format_snapshot_result(report: SnapshotReport) -> str:
-    """Produce a human-readable snapshot summary string with embedded footer.
-
-    The string is what the agent's ``capture_snapshot`` tool returns. The
-    master orchestrator extracts the structured :class:`SnapshotReport` via
-    :func:`extract_snapshot_report` from the trailing
-    ``<<<SNAPSHOT_RESULT ... SNAPSHOT_RESULT>>>`` block.
-    """
-    lines: list[str] = [
-        f"Snapshot of {report.agent_name} captured at {report.captured_at}",
-    ]
-    if report.anomaly:
-        lines.append(f"⚠️ {report.anomaly_summary or 'anomaly detected'}")
-    for section in report.sections:
-        lines.append("")
-        lines.append(f"{section.label}:")
-        if section.lines:
-            for entry in section.lines:
-                lines.append(f"  - {entry}")
-        else:
-            lines.append("  (no data)")
-    return "\n".join(lines) + "\n\n" + encode_snapshot_report(report)
-
-
-def encode_snapshot_report(report: SnapshotReport) -> str:
-    """Serialise a :class:`SnapshotReport` for appending to an agent text response."""
-    payload = json.dumps(asdict(report), separators=(",", ":"))
-    return f"{SNAPSHOT_RESULT_PREFIX}{payload}{SNAPSHOT_RESULT_SUFFIX}"
-
-
-def extract_snapshot_report(text: str) -> tuple[str, SnapshotReport | None]:
-    """Strip and decode an embedded :class:`SnapshotReport` from *text* if present.
-
-    Returns ``(cleaned_text, report)``. ``report`` is ``None`` when the
-    footer is absent or malformed; ``cleaned_text`` is *text* with the
-    footer block removed and trailing whitespace trimmed.
-    """
-    match = _SNAPSHOT_RESULT_RE.search(text)
-    if match is None:
-        return text, None
-
-    cleaned = _SNAPSHOT_RESULT_RE.sub("", text).strip()
-    try:
-        payload = json.loads(match.group(1))
-        return cleaned, _snapshot_report_from_dict(payload)
-    except (TypeError, ValueError, KeyError, json.JSONDecodeError):
-        return cleaned, None
-
-
-def find_snapshot_report_footer(text: str) -> str | None:
-    """Return the raw embedded :class:`SnapshotReport` footer from *text*, if present."""
-    match = _SNAPSHOT_RESULT_RE.search(text)
-    return match.group(0) if match is not None else None
 
 
 def _snapshot_report_from_dict(payload: dict) -> SnapshotReport:
@@ -268,3 +211,19 @@ def _snapshot_report_from_dict(payload: dict) -> SnapshotReport:
         anomaly_summary=str(anomaly_summary) if anomaly_summary is not None else None,
         metadata=metadata,
     )
+
+
+# ---------------------------------------------------------------------------
+# AgentFooter instances — the marker-delimited transport for AgentResult and
+# SnapshotReport. Defined alongside their dataclasses + parsers; the footer
+# module exposes only the generic AgentFooter class, no instances.
+# ---------------------------------------------------------------------------
+
+
+AGENT_RESULT: AgentFooter[AgentResult] = AgentFooter(
+    "AGENT_RESULT", parse=_agent_result_from_dict,
+)
+
+SNAPSHOT_RESULT: AgentFooter[SnapshotReport] = AgentFooter(
+    "SNAPSHOT_RESULT", parse=_snapshot_report_from_dict,
+)

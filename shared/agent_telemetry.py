@@ -1,28 +1,17 @@
 """Agent telemetry helpers — token usage capture and cost computation.
 
 Specialized agents emit a metadata footer in the final A2A text response so
-the orchestrator can surface model + token + cost in the Incident Report. The
-footer is delimited so it can be cleanly stripped before display.
+the orchestrator can surface model + token + cost in the Incident Report.
+The footer is delimited via the :data:`AGENT_METADATA` :class:`AgentFooter`
+instance below so it can be cleanly stripped before display.
 """
 
 from __future__ import annotations
 
-import json
-import re
-from dataclasses import asdict, fields
+from dataclasses import fields
 
+from shared.agent_footer import AgentFooter
 from shared.models import AgentMetadata
-
-
-# Delimiters for the metadata footer. Chosen to be unambiguous in plain text
-# (no Markdown collisions) and survive A2A JSON-RPC text-part round-trips.
-METADATA_PREFIX = "<<<AGENT_METADATA "
-METADATA_SUFFIX = " AGENT_METADATA>>>"
-
-_METADATA_RE = re.compile(
-    re.escape(METADATA_PREFIX) + r"(.*?)" + re.escape(METADATA_SUFFIX),
-    re.DOTALL,
-)
 
 
 # Per-million-token pricing for Bedrock-hosted Claude models (USD).
@@ -53,28 +42,21 @@ def compute_cost_usd(
     return (input_tokens * in_price + output_tokens * out_price) / 1_000_000
 
 
-def encode_metadata_footer(metadata: AgentMetadata) -> str:
-    """Serialise an :class:`AgentMetadata` for appending to the agent's response."""
-    payload = json.dumps(asdict(metadata), separators=(",", ":"))
-    return f"{METADATA_PREFIX}{payload}{METADATA_SUFFIX}"
+def _metadata_from_dict(payload: dict) -> AgentMetadata:
+    """Reconstruct an :class:`AgentMetadata` from a JSON-decoded dict.
 
-
-def extract_metadata(text: str) -> tuple[str, AgentMetadata | None]:
-    """Strip and decode the metadata footer from an agent's response text.
-
-    Returns ``(clean_text, metadata)``. ``metadata`` is ``None`` when no
-    footer is present. Malformed footers are silently dropped — they're
-    telemetry, not load-bearing data.
+    Unknown keys are silently filtered out; missing keys fall back to the
+    dataclass defaults. Used as the parser callable for :data:`AGENT_METADATA`.
     """
-    match = _METADATA_RE.search(text)
-    if match is None:
-        return text, None
-    cleaned = _METADATA_RE.sub("", text).strip()
-    try:
-        payload = json.loads(match.group(1))
-    except json.JSONDecodeError:
-        return cleaned, None
-
     valid_keys = {f.name for f in fields(AgentMetadata)}
-    metadata = AgentMetadata(**{k: v for k, v in payload.items() if k in valid_keys})
-    return cleaned, metadata
+    return AgentMetadata(**{k: v for k, v in payload.items() if k in valid_keys})
+
+
+# ---------------------------------------------------------------------------
+# AgentFooter instance — the marker-delimited transport for AgentMetadata.
+# ---------------------------------------------------------------------------
+
+
+AGENT_METADATA: AgentFooter[AgentMetadata] = AgentFooter(
+    "AGENT_METADATA", parse=_metadata_from_dict,
+)
