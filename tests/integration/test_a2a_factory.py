@@ -9,7 +9,7 @@ import pytest
 
 from shared.a2a_factory import DEFAULT_MODEL_ID, TelemetryCapturingA2AExecutor, _resolve_model
 from shared.models import AgentResult, Finding
-from shared.tool_result import encode_agent_result
+from shared.tool_result import AGENT_RESULT
 
 
 def test_default_model_is_claude_haiku_4_5():
@@ -107,7 +107,7 @@ async def test_executor_appends_structured_tool_result_footer():
                 {
                     "toolResult": {
                         "content": [
-                            {"text": "Tool text\n\n" + encode_agent_result(structured)}
+                            {"text": "Tool text\n\n" + AGENT_RESULT.encode(structured)}
                         ]
                     }
                 }

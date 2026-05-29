@@ -8,10 +8,8 @@ from shared.models import (
     SnapshotSection,
 )
 from shared.tool_result import (
-    encode_snapshot_report,
-    extract_agent_result,
-    extract_snapshot_report,
-    find_snapshot_report_footer,
+    AGENT_RESULT,
+    SNAPSHOT_RESULT,
     format_result,
     format_snapshot_result,
 )
@@ -35,7 +33,7 @@ def test_format_result_embeds_structured_agent_result_footer():
     )
 
     text = format_result(agent_result)
-    clean_text, recovered = extract_agent_result(text)
+    clean_text, recovered = AGENT_RESULT.extract(text)
 
     assert "Status: success" in clean_text
     assert "Pod api-123: phase=Failed" in clean_text
@@ -97,7 +95,7 @@ def test_format_snapshot_result_empty_section_renders_no_data():
 def test_extract_snapshot_report_round_trip():
     report = _basic_report(anomaly=True)
     text = format_snapshot_result(report)
-    cleaned, recovered = extract_snapshot_report(text)
+    cleaned, recovered = SNAPSHOT_RESULT.extract(text)
     # Footer is stripped from the cleaned text
     assert "<<<SNAPSHOT_RESULT " not in cleaned
     assert "SNAPSHOT_RESULT>>>" not in cleaned
@@ -106,14 +104,14 @@ def test_extract_snapshot_report_round_trip():
 
 
 def test_extract_snapshot_report_returns_none_when_absent():
-    cleaned, recovered = extract_snapshot_report("plain text, no footer here")
+    cleaned, recovered = SNAPSHOT_RESULT.extract("plain text, no footer here")
     assert cleaned == "plain text, no footer here"
     assert recovered is None
 
 
 def test_extract_snapshot_report_handles_malformed_json():
     bad = "preamble\n\n<<<SNAPSHOT_RESULT not-json SNAPSHOT_RESULT>>>"
-    cleaned, recovered = extract_snapshot_report(bad)
+    cleaned, recovered = SNAPSHOT_RESULT.extract(bad)
     # Footer is stripped even when JSON is invalid
     assert "<<<SNAPSHOT_RESULT" not in cleaned
     assert recovered is None
@@ -121,14 +119,14 @@ def test_extract_snapshot_report_handles_malformed_json():
 
 def test_find_snapshot_report_footer_returns_raw_block():
     text = format_snapshot_result(_basic_report())
-    footer = find_snapshot_report_footer(text)
+    footer = SNAPSHOT_RESULT.find(text)
     assert footer is not None
     assert footer.startswith("<<<SNAPSHOT_RESULT ")
     assert footer.endswith(" SNAPSHOT_RESULT>>>")
 
 
 def test_find_snapshot_report_footer_returns_none_when_absent():
-    assert find_snapshot_report_footer("nothing here") is None
+    assert SNAPSHOT_RESULT.find("nothing here") is None
 
 
 def test_encode_snapshot_report_uses_compact_separators():
@@ -139,7 +137,7 @@ def test_encode_snapshot_report_uses_compact_separators():
         captured_at="2026-05-28T19:00:00+00:00",
         sections=[],
     )
-    encoded = encode_snapshot_report(report)
+    encoded = SNAPSHOT_RESULT.encode(report)
     # Compact JSON: no whitespace after `,` or `:` separators.
     assert ", " not in encoded
     assert ": " not in encoded
@@ -153,7 +151,7 @@ def test_extract_snapshot_report_preserves_metadata_when_round_tripped():
         metadata=AgentMetadata(model_id="claude-haiku-4-5", input_tokens=100),
     )
     text = format_snapshot_result(report)
-    _, recovered = extract_snapshot_report(text)
+    _, recovered = SNAPSHOT_RESULT.extract(text)
     assert recovered is not None
     assert recovered.metadata.model_id == "claude-haiku-4-5"
     assert recovered.metadata.input_tokens == 100

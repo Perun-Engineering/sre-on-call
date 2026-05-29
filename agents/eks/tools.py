@@ -437,7 +437,7 @@ def capture_snapshot(requested_at: str) -> str:
     Probes nodes, pods across all namespaces, and recent kube-system
     warning events. Returns a human-readable summary with an embedded
     :class:`SnapshotReport` footer that the master orchestrator extracts
-    via :func:`shared.tool_result.extract_snapshot_report`.
+    via :data:`shared.tool_result.SNAPSHOT_RESULT`.
 
     The tool never raises: if the cluster config cannot be loaded or the
     API is unreachable, the failure is folded into a single anomaly

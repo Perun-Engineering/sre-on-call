@@ -12,7 +12,7 @@ Differs materially from :class:`agents.master.orchestrator.InvestigationOrchestr
   ``{"task": "snapshot", "requested_at": <ISO>}``, not a serialised
   :class:`AlertContext`. Specialized agents return their snapshot
   via a ``<<<SNAPSHOT_RESULT ... SNAPSHOT_RESULT>>>`` footer that the
-  orchestrator extracts via :func:`shared.tool_result.extract_snapshot_report`.
+  orchestrator extracts via :data:`shared.tool_result.SNAPSHOT_RESULT`.
 * **Posts a :class:`SnapshotSections` payload** at top-level (not a thread
   reply) — ``/status`` is a deliberate operational broadcast, not an
   incident-thread reply.
@@ -33,7 +33,7 @@ from shared.models import AlertContext, SnapshotReport, SnapshotSection
 from shared.platforms import ChatPlatform, deliver_with_retry, for_platform
 from shared.report_renderer import SnapshotBlock, SnapshotSections
 from shared.time_utils import now_iso
-from shared.tool_result import extract_snapshot_report
+from shared.tool_result import SNAPSHOT_RESULT
 
 logger = logging.getLogger(__name__)
 
@@ -261,7 +261,7 @@ class StatusSnapshotOrchestrator:
             )
         result_data = response.get("result", {})
         text = extract_response_text(result_data)
-        _, report = extract_snapshot_report(text)
+        _, report = SNAPSHOT_RESULT.extract(text)
         return report
 
     # ------------------------------------------------------------------

@@ -30,10 +30,10 @@ from strands.models.bedrock import BedrockModel
 from strands.multiagent.a2a import A2AServer
 from strands.multiagent.a2a.executor import StrandsA2AExecutor
 
-from shared.agent_telemetry import compute_cost_usd, encode_metadata_footer
+from shared.agent_telemetry import AGENT_METADATA, compute_cost_usd
 from shared.models import AgentMetadata
 from shared.time_utils import now_iso
-from shared.tool_result import find_agent_result_footer
+from shared.tool_result import AGENT_RESULT
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,7 @@ class TelemetryCapturingA2AExecutor(StrandsA2AExecutor):
     Wraps the upstream Strands executor and intercepts the final ``result``
     event so we can read ``AgentResult.metrics.accumulated_usage`` and embed
     model + token + cost telemetry in the outgoing text. The orchestrator
-    decodes the footer in :func:`shared.agent_telemetry.extract_metadata`.
+    decodes the footer via :data:`shared.agent_telemetry.AGENT_METADATA`.
 
     Also serialises every invocation through an :class:`asyncio.Lock`.
     Strands' :class:`Agent` is single-threaded conversation state and raises
@@ -89,7 +89,7 @@ class TelemetryCapturingA2AExecutor(StrandsA2AExecutor):
                     content.append({"text": "\n" + structured_footer})
 
             metadata = self._build_metadata(result)
-            footer = encode_metadata_footer(metadata)
+            footer = AGENT_METADATA.encode(metadata)
             if streamed:
                 # In A2A-compliant streaming, the parent has already flushed
                 # message content as artifact chunks and only emits an empty
@@ -148,7 +148,7 @@ def _latest_agent_result_footer(messages) -> str | None:
             for item in reversed(tool_content):
                 if not isinstance(item, dict):
                     continue
-                footer = find_agent_result_footer(item.get("text", ""))
+                footer = AGENT_RESULT.find(item.get("text", ""))
                 if footer:
                     return footer
     return None
