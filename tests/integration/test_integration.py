@@ -26,8 +26,6 @@ from moto import mock_aws
 from agents.master.orchestrator import (
     AsyncHTTPClient,
     InvestigationOrchestrator,
-    build_a2a_request,
-    _parse_agent_result,
 )
 from agents.master.report_formatter import ReportFormatter
 from lambda_adapter.handler import lambda_handler
