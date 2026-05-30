@@ -661,24 +661,22 @@ class TestOrchestratorEndpointConfig:
         )
         assert orch.agent_endpoints["cloudwatch_logs"] == "http://env-cw:9999"
 
-    def test_auto_selects_agentcore_client_for_arn_endpoints(self, monkeypatch):
+    def test_default_transport_is_per_endpoint_router(self, monkeypatch):
+        # Transport is no longer picked globally (the old any(arn) rule):
+        # the default http_client is a RoutingHTTPClient that routes each
+        # endpoint independently (ARN -> AgentCore, URL -> aiohttp). The
+        # routing itself is covered by tests/test_fanout.py.
+        from shared.a2a_client import RoutingHTTPClient
+
         monkeypatch.setenv(
             "EKS_AGENT_RUNTIME_ARN",
             "arn:aws:bedrock-agentcore:us-east-1:0:runtime/x",
         )
         orch = InvestigationOrchestrator(
             chat_platform=FakeChatPlatform(),
-            registry=_build_registry(active_specialized=["eks"]),
+            registry=_build_registry(active_specialized=["eks", "cloudwatch_logs"]),
         )
-        assert isinstance(orch.http_client, AgentCoreClient)
-
-    def test_auto_selects_aiohttp_client_for_url_endpoints(self):
-        orch = InvestigationOrchestrator(
-            chat_platform=FakeChatPlatform(),
-            registry=_build_registry(active_specialized=["eks"]),
-        )
-        from agents.master.orchestrator import AiohttpClient
-        assert isinstance(orch.http_client, AiohttpClient)
+        assert isinstance(orch.http_client, RoutingHTTPClient)
 
 
 # ---------------------------------------------------------------------------

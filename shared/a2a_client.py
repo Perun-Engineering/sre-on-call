@@ -97,6 +97,36 @@ class AgentCoreClient:
         return json.loads(body)
 
 
+class RoutingHTTPClient:
+    """:class:`AsyncHTTPClient` that routes each call by endpoint shape.
+
+    ``arn:`` endpoints go to :class:`AgentCoreClient`; everything else is
+    treated as a URL and goes to :class:`AiohttpClient`. This lets a single
+    client serve a mixed deployment (some agents on AgentCore, some on local
+    URLs) correctly — the previous all-or-nothing ``any(arn)`` pick routed
+    every agent through one transport. Sub-transports are built lazily, so no
+    boto3 client is constructed unless an ``arn:`` endpoint is dispatched.
+    """
+
+    def __init__(
+        self,
+        *,
+        aiohttp_client: AsyncHTTPClient | None = None,
+        agentcore_client: AsyncHTTPClient | None = None,
+    ) -> None:
+        self._aiohttp = aiohttp_client
+        self._agentcore = agentcore_client
+
+    async def post_json(self, url: str, payload: dict) -> dict:
+        if url.startswith("arn:"):
+            if self._agentcore is None:
+                self._agentcore = AgentCoreClient()
+            return await self._agentcore.post_json(url, payload)
+        if self._aiohttp is None:
+            self._aiohttp = AiohttpClient()
+        return await self._aiohttp.post_json(url, payload)
+
+
 # ---------------------------------------------------------------------------
 # The seam
 # ---------------------------------------------------------------------------

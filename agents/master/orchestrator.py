@@ -32,6 +32,7 @@ from shared.a2a_client import (
 from shared.agent_telemetry import AGENT_METADATA
 from shared.agents import AgentRegistry, get_registry
 from shared.constants import HARD_CUTOFF_SECONDS, INITIAL_DEADLINE_SECONDS
+from shared.fanout import Fanout
 from shared.models import AgentFailure, AgentMetadata, AgentResult, AlertContext
 from shared.time_utils import now_iso
 from shared.platforms import ChatPlatform, deliver_with_retry, for_platform
@@ -165,20 +166,17 @@ class InvestigationOrchestrator:
         self.report_formatter = report_formatter or ReportFormatter(self._registry)
 
         active_specialized = self._registry.active(kind="specialized")
-        self.agent_endpoints: dict[str, str] = {
-            a.id: a.resolve_endpoint() for a in active_specialized
-        }
         self.disabled_agents: set[str] = {
             a.id for a in self._registry.disabled_in_config(kind="specialized")
         }
 
-        if http_client is None:
-            any_arn = any(
-                ep.startswith("arn:") for ep in self.agent_endpoints.values()
-            )
-            http_client = AgentCoreClient() if any_arn else AiohttpClient()
-        self.http_client: AsyncHTTPClient = http_client
-        self._client = A2AClient(self.http_client)
+        # The Fanout owns endpoint resolution + per-endpoint transport routing
+        # + the one A2AClient. agent_endpoints / http_client / _client are
+        # pass-throughs so existing call sites and tests keep working.
+        self._fanout = Fanout(http_client=http_client, registry=self._registry)
+        self.agent_endpoints: dict[str, str] = self._fanout.agent_endpoints
+        self.http_client = self._fanout.http_client
+        self._client = self._fanout.client
         self._results_store = results_store
         # Trace archive is opt-in via env vars; from_env() returns None when
         # TRACES_BUCKET_NAME / TRACES_TABLE_NAME are unset (e.g. local dev,
@@ -224,34 +222,20 @@ class InvestigationOrchestrator:
             )
 
         # --- Phase 1: fan-out ------------------------------------------------
-        task_map: dict[str, asyncio.Task[AgentResult]] = {}
-        for agent_id in self.agent_endpoints:
-            task = asyncio.create_task(
-                self._invoke_agent_safe(agent_id, alert_context),
-                name=f"invoke-{agent_id}",
-            )
-            task_map[agent_id] = task
-
-        task_to_agent: dict[asyncio.Task[AgentResult], str] = {
-            t: aid for aid, t in task_map.items()
-        }
-
-        pending: set[asyncio.Task[AgentResult]] = set(task_map.values())
+        pending = self._fanout.dispatch(
+            lambda agent_id: self._invoke_agent_safe(agent_id, alert_context)
+        )
 
         # --- Phase 2: wait up to INITIAL_DEADLINE_SECONDS --------------------
         elapsed = asyncio.get_event_loop().time() - start_time
         initial_timeout = max(0, self.INITIAL_DEADLINE_SECONDS - elapsed)
-
-        if pending:
-            done, pending = await asyncio.wait(
-                pending, timeout=initial_timeout
-            )
-            self._collect_done(done, task_to_agent, results)
+        settled, pending = await self._fanout.harvest(pending, initial_timeout)
+        self._merge(settled, results)
 
         # --- Phase 3: synthesize and post initial report ---------------------
         # Agents still pending at the deadline are reported as in-progress;
         # their late results trigger an enrichment update in Phase 4.
-        pending_ids = {task_to_agent[t] for t in pending}
+        pending_ids = set(pending)
 
         report_sections = self.report_formatter.build_incident_sections(
             alert_context,
@@ -272,16 +256,15 @@ class InvestigationOrchestrator:
             )
 
         # --- Phase 4: accept late results until HARD_CUTOFF_SECONDS ----------
+        # Each harvest re-waits the *same* in-flight requests — no re-send.
         while pending:
             elapsed = asyncio.get_event_loop().time() - start_time
             remaining = self.HARD_CUTOFF_SECONDS - elapsed
             if remaining <= 0:
                 break
 
-            done, pending = await asyncio.wait(
-                pending, timeout=remaining
-            )
-            late_results = self._collect_done(done, task_to_agent, results)
+            settled, pending = await self._fanout.harvest(pending, remaining)
+            late_results = self._merge(settled, results)
 
             for agent_id, result in late_results.items():
                 # Late results post regardless of status — a failure that
@@ -305,14 +288,7 @@ class InvestigationOrchestrator:
                     )
 
         # --- Phase 5: terminate — cancel any still-pending tasks -------------
-        for task in pending:
-            task.cancel()
-
-        for task in pending:
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
+        await self._fanout.cancel(pending)
 
         logger.info(
             "Investigation %s terminated. Agents responded: %s",
@@ -561,27 +537,25 @@ class InvestigationOrchestrator:
         self._trace_store.put_manifest(manifest)
 
     @staticmethod
-    def _collect_done(
-        done: set[asyncio.Task[AgentResult]],
-        task_to_agent: dict[asyncio.Task[AgentResult], str],
+    def _merge(
+        settled: dict[str, "AgentResult | BaseException"],
         results: dict[str, AgentResult | AgentFailure],
     ) -> dict[str, AgentResult | AgentFailure]:
-        """Harvest completed tasks into *results* and return the new entries."""
+        """Fold harvested results into *results* and return the new entries.
+
+        ``_invoke_agent_safe`` already maps errors to ``AgentResult(status=
+        "error")``, so a value is normally an :class:`AgentResult`. A raised
+        exception handed back by :meth:`Fanout.harvest` (e.g. a cancellation)
+        is mapped to an :class:`AgentFailure`.
+        """
         new_entries: dict[str, AgentResult | AgentFailure] = {}
-        for task in done:
-            agent_id = task_to_agent.get(task)
-            if agent_id is None:
-                continue
-            try:
-                result = task.result()
-                results[agent_id] = result
-                new_entries[agent_id] = result
-            except Exception as exc:
-                failure = AgentFailure(
-                    agent_name=agent_id,
-                    error_message=str(exc),
-                    timestamp="",
+        for agent_id, value in settled.items():
+            if isinstance(value, BaseException):
+                mapped: AgentResult | AgentFailure = AgentFailure(
+                    agent_name=agent_id, error_message=str(value), timestamp="",
                 )
-                results[agent_id] = failure
-                new_entries[agent_id] = failure
+            else:
+                mapped = value
+            results[agent_id] = mapped
+            new_entries[agent_id] = mapped
         return new_entries
