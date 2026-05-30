@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
 
 import boto3
 import pytest
@@ -12,7 +11,6 @@ from agents.master.orchestrator import InvestigationOrchestrator
 from agents.master.report_formatter import ReportFormatter
 from shared.agents import AgentRegistry
 from shared.config import AgentConfig, Defaults, ProjectConfig
-from shared.experiment import ExperimentResult
 from shared.experiment_results_store import (
     DEFAULT_TABLE_NAME as RESULTS_TABLE,
     ExperimentResultsStore,

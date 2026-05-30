@@ -5,7 +5,6 @@ from __future__ import annotations
 import uuid
 
 import boto3
-import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from moto import mock_aws

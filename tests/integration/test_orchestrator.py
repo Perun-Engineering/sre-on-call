@@ -7,7 +7,6 @@ import asyncio
 import pytest
 
 from agents.master.orchestrator import (
-    AgentCoreClient,
     AsyncHTTPClient,
     InvestigationOrchestrator,
     _serialize_alert_context,
@@ -24,7 +23,7 @@ from shared.report_renderer import (
     SlackReportRenderer,
 )
 from agents.master.report_formatter import ReportFormatter
-from shared.models import AgentFailure, AgentMetadata, AgentResult, AlertContext, Finding
+from shared.models import AgentMetadata, AgentResult, AlertContext, Finding
 
 
 # ---------------------------------------------------------------------------
@@ -446,7 +445,6 @@ class TestOrchestratorLateResults:
     async def test_enrichment_update_for_late_result(self, alert_context):
         """Late-arriving results trigger enrichment updates."""
         # Make some agents fast and some slow (but within hard cutoff)
-        fast_response = _default_a2a_response({"id": "fast"})
         slow_delay = 0.15  # After initial deadline but before hard cutoff
 
         class MixedHTTPClient:
@@ -772,7 +770,6 @@ class TestAgentMetadataPropagation:
         self, alert_context,
     ):
         from shared.agent_telemetry import AGENT_METADATA
-        from shared.models import AgentMetadata
 
         meta = AgentMetadata(
             model_id="us.anthropic.claude-haiku-4-5-20251001-v1:0",
@@ -888,7 +885,6 @@ class TestDisabledInConfigPropagation:
 # ---------------------------------------------------------------------------
 
 
-import json as _json
 
 import boto3
 from moto import mock_aws

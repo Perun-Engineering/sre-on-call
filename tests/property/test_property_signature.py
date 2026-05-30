@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import time
 from unittest.mock import patch
 
 from hypothesis import given, settings

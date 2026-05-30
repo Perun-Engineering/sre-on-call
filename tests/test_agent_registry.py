@@ -2,19 +2,17 @@
 
 from __future__ import annotations
 
-import os
 
 import pytest
 
 from shared.agents import (
-    Agent,
     AgentRegistry,
     CATALOGUE,
     catalogue_ids,
     get_registry,
     reset_cache,
 )
-from shared.config import AgentConfig, Defaults, MCPConfig, ProjectConfig
+from shared.config import AgentConfig, Defaults, ProjectConfig
 
 
 @pytest.fixture(autouse=True)
