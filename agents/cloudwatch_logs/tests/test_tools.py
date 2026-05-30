@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
 from botocore.exceptions import ClientError
 
 from agents.cloudwatch_logs.tools import (
@@ -20,7 +19,7 @@ from agents.cloudwatch_logs.tools import (
     _poll_query_results,
     _results_to_findings,
 )
-from shared.models import AgentResult, Finding
+from shared.models import Finding
 from shared.tool_result import ToolResult, build_agent_result, severity_from_text
 
 

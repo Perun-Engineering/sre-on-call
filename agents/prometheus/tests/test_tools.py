@@ -13,7 +13,6 @@ import json
 import pathlib
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from agents.prometheus import (
     _create_mcp_client,
@@ -59,7 +58,7 @@ class TestCreateMcpClient:
     @patch("agents.prometheus.MCPClient")
     def test_creates_mcp_client_with_sse_transport(self, mock_mcp_cls, mock_endpoint):
         """MCPClient is instantiated with a callable that produces an SSE client."""
-        client = _create_mcp_client()
+        _create_mcp_client()
 
         mock_mcp_cls.assert_called_once()
         # The first argument should be a callable (lambda)

@@ -6,8 +6,6 @@ from pathlib import Path
 import pytest
 
 from shared.skill_loader import (
-    Skill,
-    SkillFrontmatter,
     import_tool,
     parse_skill_md,
     resolve,

@@ -9,9 +9,7 @@ import time
 from unittest.mock import MagicMock, patch
 from urllib.parse import urlencode
 
-import boto3
 import pytest
-from moto import mock_aws
 
 from shared.platforms import (
     AlertWebhook, ChallengeWebhook, CommandWebhook, InvalidWebhook,
@@ -19,8 +17,6 @@ from shared.platforms import (
 from shared.platforms.slack import SlackChatPlatform
 from shared.platforms.discord import DiscordChatPlatform
 from lambda_adapter.handler import lambda_handler
-from lambda_adapter.intake import _process_command
-from shared.models import CommandRequest
 
 
 # ---------------------------------------------------------------------------

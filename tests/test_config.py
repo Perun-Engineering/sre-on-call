@@ -1,7 +1,7 @@
 """Tests for shared.config — ProjectConfig schema validation."""
 from __future__ import annotations
 import pytest
-from shared.config import ProjectConfig, AgentConfig, Defaults, MCPConfig
+from shared.config import ProjectConfig
 
 
 @pytest.fixture(autouse=True)

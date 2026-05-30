@@ -1,6 +1,5 @@
 """Unit tests for shared.channel_utils."""
 
-import pytest
 
 from shared.channel_utils import select_channels
 from shared.constants import MAX_CHANNELS

@@ -29,7 +29,7 @@ from agents.master.orchestrator import (
 )
 from agents.master.report_formatter import ReportFormatter
 from lambda_adapter.handler import lambda_handler
-from shared.models import AgentFailure, AgentResult, AlertContext, Finding
+from shared.models import AgentResult, AlertContext
 
 
 # ---------------------------------------------------------------------------

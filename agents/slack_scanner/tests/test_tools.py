@@ -14,10 +14,9 @@ Requirements: 4.1, 4.2, 4.3, 4.4, 4.5
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from unittest.mock import MagicMock
 
-import pytest
 from slack_sdk.errors import SlackApiError
 
 from agents.slack_scanner.tools import (

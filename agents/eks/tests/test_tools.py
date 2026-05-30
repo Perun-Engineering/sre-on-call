@@ -30,7 +30,7 @@ from agents.eks.tools import (
     _pod_phase,
     _severity_from_phase,
 )
-from shared.models import AgentResult, Finding
+from shared.models import Finding
 from shared.tool_result import ToolResult, build_agent_result
 
 
