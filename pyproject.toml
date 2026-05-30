@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta:__legacy__"
 
 [project]
 name = "sre-on-call"
@@ -24,6 +24,9 @@ dev = [
     "pytest-asyncio>=0.23.0",
     "moto[dynamodb,logs,s3]>=5.0.0",
 ]
+
+[tool.setuptools.packages.find]
+include = ["agents*", "shared*", "lambda_adapter*"]
 
 [tool.pytest.ini_options]
 testpaths = ["agents", "tests"]
