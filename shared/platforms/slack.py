@@ -28,6 +28,7 @@ from shared.platforms import (
     ChallengeWebhook,
     CommandWebhook,
     DeliverPayload,
+    DeliveryTarget,
     InvalidWebhook,
     WebhookEvent,
 )
@@ -203,10 +204,10 @@ class SlackChatPlatform:
     # --- deliver ----------------------------------------------------------
 
     async def deliver(
-        self, alert_context: AlertContext, payload: DeliverPayload
+        self, target: DeliveryTarget, payload: DeliverPayload
     ) -> str:
         text = self._render(payload)
-        await self._post_reply(alert_context, text)
+        await self._post_reply(target, text)
         return text
 
     def _render(self, payload: DeliverPayload) -> str:
@@ -224,20 +225,17 @@ class SlackChatPlatform:
             f"Unsupported deliver payload: {type(payload).__name__}"
         )
 
-    async def _post_reply(self, alert_context: AlertContext, text: str) -> None:
+    async def _post_reply(self, target: DeliveryTarget, text: str) -> None:
         from slack_sdk.web.async_client import AsyncWebClient
 
-        thread_ts = alert_context.platform_metadata.get(
-            "thread_ts", alert_context.message_id
-        )
         client = AsyncWebClient(token=self._bot_token)
         kwargs: dict = {
-            "channel": alert_context.channel_id,
+            "channel": target.channel_id,
             "text": text,
         }
-        # Empty thread_ts means "post at top-level" — used by /status snapshots,
-        # which are operational broadcasts, not thread replies. The Slack API
-        # rejects ``thread_ts=""`` so we omit the kwarg entirely in that case.
-        if thread_ts:
-            kwargs["thread_ts"] = thread_ts
+        # No thread anchor means "post at top-level" — used by /status
+        # snapshots, which are operational broadcasts, not thread replies.
+        # The Slack API rejects ``thread_ts=""`` so we omit it in that case.
+        if target.thread_anchor:
+            kwargs["thread_ts"] = target.thread_anchor
         await client.chat_postMessage(**kwargs)

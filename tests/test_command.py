@@ -6,17 +6,23 @@ import hashlib
 import hmac
 import json
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 from urllib.parse import urlencode
 
 import pytest
 
 from shared.platforms import (
-    AlertWebhook, ChallengeWebhook, CommandWebhook, InvalidWebhook,
+    AlertWebhook, ChallengeWebhook, CommandWebhook, InvalidWebhook, detect_platform,
 )
 from shared.platforms.slack import SlackChatPlatform
 from shared.platforms.discord import DiscordChatPlatform
 from lambda_adapter.handler import lambda_handler
+from lambda_adapter.intake import process_webhook
+from lambda_adapter.master_dispatch import RecordingMasterDispatch
+
+
+def _process(event: dict, dispatch: RecordingMasterDispatch) -> dict:
+    return process_webhook(event, detect_platform(event["headers"]), dispatch)
 
 
 # ---------------------------------------------------------------------------
@@ -240,70 +246,53 @@ class TestDiscordIngestForCommand:
 class TestCommandRouting:
     def test_command_detected_and_routed(self):
         """Slash command should bypass JSON parsing and dedup."""
-        body = _build_slack_command_body()
-        event = _build_command_event(body)
+        event = _build_command_event(_build_slack_command_body())
+        dispatch = RecordingMasterDispatch()
 
-        with patch.object(
-            SlackChatPlatform, "ack",
-        ) as mock_ack, patch("lambda_adapter.intake.boto3.client") as mock_client:
-            mock_runtime = MagicMock()
-            mock_client.return_value = mock_runtime
+        with patch.object(SlackChatPlatform, "ack") as mock_ack:
+            result = _process(event, dispatch)
 
-            result = lambda_handler(event, None)
-
-            assert result["statusCode"] == 200
-            mock_ack.assert_called_once()
-            assert "Post-Incident Report" in mock_ack.call_args[0][1]
-            mock_runtime.invoke_agent_runtime.assert_called_once()
+        assert result["statusCode"] == 200
+        mock_ack.assert_called_once()
+        assert "Post-Incident Report" in mock_ack.call_args[0][1]
+        assert len(dispatch.tasks) == 1
+        assert dispatch.tasks[0].kind == "postmortem"
 
     def test_command_invokes_agent_with_pir_task(self):
-        body = _build_slack_command_body(thread_ts="1700000000.000100")
-        event = _build_command_event(body)
+        event = _build_command_event(
+            _build_slack_command_body(thread_ts="1700000000.000100")
+        )
+        dispatch = RecordingMasterDispatch()
 
-        with patch.object(
-            SlackChatPlatform, "ack",
-        ), patch("lambda_adapter.intake.boto3.client") as mock_client:
-            mock_runtime = MagicMock()
-            mock_client.return_value = mock_runtime
+        with patch.object(SlackChatPlatform, "ack"):
+            _process(event, dispatch)
 
-            lambda_handler(event, None)
-
-            call_kwargs = mock_runtime.invoke_agent_runtime.call_args[1]
-            envelope = json.loads(call_kwargs["payload"].decode("utf-8"))
-            payload = json.loads(envelope["params"]["message"]["parts"][0]["text"])
-            assert payload["task"] == "pir"
-            assert payload["channel_id"] == "C12345"
-            assert payload["thread_ts"] == "1700000000.000100"
+        task = dispatch.tasks[0]
+        assert task.kind == "postmortem"
+        assert task.command.channel_id == "C12345"
+        assert task.command.thread_ts == "1700000000.000100"
 
     def test_command_without_thread_returns_error(self):
-        body = _build_slack_command_body(thread_ts=None)
-        event = _build_command_event(body)
+        event = _build_command_event(_build_slack_command_body(thread_ts=None))
+        dispatch = RecordingMasterDispatch()
 
-        with patch.object(
-            SlackChatPlatform, "ack",
-        ) as mock_ack, patch("lambda_adapter.intake.boto3.client") as mock_client:
-            mock_runtime = MagicMock()
-            mock_client.return_value = mock_runtime
+        with patch.object(SlackChatPlatform, "ack") as mock_ack:
+            result = _process(event, dispatch)
 
-            result = lambda_handler(event, None)
-
-            assert result["statusCode"] == 200
-            mock_ack.assert_called_once()
-            assert "inside an incident thread" in mock_ack.call_args[0][1]
-            mock_runtime.invoke_agent_runtime.assert_not_called()
+        assert result["statusCode"] == 200
+        mock_ack.assert_called_once()
+        assert "inside an incident thread" in mock_ack.call_args[0][1]
+        assert dispatch.tasks == []
 
     def test_unknown_command_returns_error(self):
-        body = _build_slack_command_body(command="/unknown")
-        event = _build_command_event(body)
+        event = _build_command_event(_build_slack_command_body(command="/unknown"))
+        dispatch = RecordingMasterDispatch()
 
-        with patch.object(
-            SlackChatPlatform, "ack",
-        ), patch("lambda_adapter.intake.boto3.client"):
-            result = lambda_handler(event, None)
+        result = _process(event, dispatch)
 
-            assert result["statusCode"] == 200
-            body_json = json.loads(result["body"])
-            assert "Unknown command" in body_json.get("text", "")
+        assert result["statusCode"] == 200
+        assert "Unknown command" in json.loads(result["body"]).get("text", "")
+        assert dispatch.tasks == []
 
     def test_invalid_signature_rejected_for_command(self):
         body = _build_slack_command_body()
@@ -322,136 +311,80 @@ class TestCommandRouting:
 class TestStatusCommandRouting:
     """Lambda intake handling for the operator-driven /status command."""
 
-    def test_status_command_acks_and_invokes_agent(self):
-        body = _build_slack_command_body(command="/status", thread_ts=None)
-        event = _build_command_event(body)
+    def test_status_command_acks_and_dispatches_status(self):
+        event = _build_command_event(
+            _build_slack_command_body(command="/status", thread_ts=None)
+        )
+        dispatch = RecordingMasterDispatch()
 
-        with patch.object(
-            SlackChatPlatform, "ack",
-        ) as mock_ack, patch("lambda_adapter.intake.boto3.client") as mock_client:
-            mock_runtime = MagicMock()
-            mock_client.return_value = mock_runtime
+        with patch.object(SlackChatPlatform, "ack") as mock_ack:
+            result = _process(event, dispatch)
 
-            result = lambda_handler(event, None)
-
-            assert result["statusCode"] == 200
-            mock_ack.assert_called_once()
-            ack_text = mock_ack.call_args[0][1]
-            assert "snapshot" in ack_text.lower()
-            mock_runtime.invoke_agent_runtime.assert_called_once()
+        assert result["statusCode"] == 200
+        mock_ack.assert_called_once()
+        assert "snapshot" in mock_ack.call_args[0][1].lower()
+        assert len(dispatch.tasks) == 1
+        assert dispatch.tasks[0].kind == "status"
 
     def test_status_command_does_not_require_thread(self):
         """Unlike /postmortem, /status is fine without thread context — it's
         an operational broadcast, not an incident-thread reply."""
-        body = _build_slack_command_body(command="/status", thread_ts=None)
-        event = _build_command_event(body)
-
-        with patch.object(
-            SlackChatPlatform, "ack",
-        ) as mock_ack, patch("lambda_adapter.intake.boto3.client") as mock_client:
-            mock_runtime = MagicMock()
-            mock_client.return_value = mock_runtime
-
-            lambda_handler(event, None)
-
-            ack_text = mock_ack.call_args[0][1]
-            # No "use inside an incident thread" warning
-            assert "thread" not in ack_text.lower()
-            mock_runtime.invoke_agent_runtime.assert_called_once()
-
-    def test_status_payload_carries_task_snapshot_and_required_fields(self):
-        body = _build_slack_command_body(
-            command="/status",
-            channel_id="C99999",
-            user_id="U22222",
-            thread_ts=None,
+        event = _build_command_event(
+            _build_slack_command_body(command="/status", thread_ts=None)
         )
-        event = _build_command_event(body)
+        dispatch = RecordingMasterDispatch()
 
-        with patch.object(
-            SlackChatPlatform, "ack",
-        ), patch("lambda_adapter.intake.boto3.client") as mock_client:
-            mock_runtime = MagicMock()
-            mock_client.return_value = mock_runtime
+        with patch.object(SlackChatPlatform, "ack") as mock_ack:
+            _process(event, dispatch)
 
-            lambda_handler(event, None)
+        assert "thread" not in mock_ack.call_args[0][1].lower()
+        assert dispatch.tasks[0].kind == "status"
 
-            call_kwargs = mock_runtime.invoke_agent_runtime.call_args[1]
-            envelope = json.loads(call_kwargs["payload"].decode("utf-8"))
-            payload = json.loads(envelope["params"]["message"]["parts"][0]["text"])
-            assert payload["task"] == "snapshot"
-            assert payload["platform"] == "slack"
-            assert payload["channel_id"] == "C99999"
-            assert payload["user_id"] == "U22222"
-            assert "requested_at" in payload
-            # ISO 8601 with timezone
-            assert "T" in payload["requested_at"]
-            # No thread_ts in the payload — /status doesn't carry that
-            assert "thread_ts" not in payload
-
-    def test_status_runtime_session_id_includes_channel_and_requested_at(self):
-        body = _build_slack_command_body(
-            command="/status",
-            channel_id="C77777",
-            thread_ts=None,
+    def test_status_task_carries_command_and_requested_at(self):
+        event = _build_command_event(
+            _build_slack_command_body(
+                command="/status", channel_id="C99999", user_id="U22222", thread_ts=None,
+            )
         )
-        event = _build_command_event(body)
+        dispatch = RecordingMasterDispatch()
 
-        with patch.object(
-            SlackChatPlatform, "ack",
-        ), patch("lambda_adapter.intake.boto3.client") as mock_client:
-            mock_runtime = MagicMock()
-            mock_client.return_value = mock_runtime
+        with patch.object(SlackChatPlatform, "ack"):
+            _process(event, dispatch)
 
-            lambda_handler(event, None)
+        task = dispatch.tasks[0]
+        assert task.kind == "status"
+        assert task.command.platform == "slack"
+        assert task.command.channel_id == "C99999"
+        assert task.command.user_id == "U22222"
+        # requested_at is an ISO 8601 instant; the snapshot-{channel}-{at}
+        # session-id convention is verified in test_master_dispatch.
+        assert "T" in task.requested_at
 
-            call_kwargs = mock_runtime.invoke_agent_runtime.call_args[1]
-            session_id = call_kwargs["runtimeSessionId"]
-            assert session_id.startswith("snapshot-C77777-")
-            # Distinct sessions on every invocation — reuse the requested_at
-            # in session id so retried/re-run /status calls don't collide.
-            assert len(session_id) > len("snapshot-C77777-")
-
-    def test_status_command_does_not_invoke_pir_path(self):
-        """/status path must NOT generate a PIR payload, even if a thread_ts
-        happens to be present (Slack sometimes includes it). The dispatcher
-        is keyed on command name, not thread context."""
-        body = _build_slack_command_body(
-            command="/status", thread_ts="1700000000.000100",
+    def test_status_dispatches_status_not_postmortem(self):
+        """/status must dispatch a status task, even if a thread_ts is present
+        (Slack sometimes includes it). Routing is keyed on command name."""
+        event = _build_command_event(
+            _build_slack_command_body(command="/status", thread_ts="1700000000.000100")
         )
-        event = _build_command_event(body)
+        dispatch = RecordingMasterDispatch()
 
-        with patch.object(
-            SlackChatPlatform, "ack",
-        ), patch("lambda_adapter.intake.boto3.client") as mock_client:
-            mock_runtime = MagicMock()
-            mock_client.return_value = mock_runtime
+        with patch.object(SlackChatPlatform, "ack"):
+            _process(event, dispatch)
 
-            lambda_handler(event, None)
-
-            call_kwargs = mock_runtime.invoke_agent_runtime.call_args[1]
-            envelope = json.loads(call_kwargs["payload"].decode("utf-8"))
-            payload = json.loads(envelope["params"]["message"]["parts"][0]["text"])
-            assert payload["task"] == "snapshot"
-            # Critical: not a PIR payload
-            assert payload["task"] != "pir"
+        assert dispatch.tasks[0].kind == "status"
 
     def test_postmortem_path_isolated_from_status_changes(self):
-        """Sanity: /postmortem still requires thread + still sends task=pir."""
-        body = _build_slack_command_body(command="/postmortem", thread_ts=None)
-        event = _build_command_event(body)
+        """Sanity: /postmortem still requires thread + still dispatches postmortem."""
+        event = _build_command_event(
+            _build_slack_command_body(command="/postmortem", thread_ts=None)
+        )
+        dispatch = RecordingMasterDispatch()
 
-        with patch.object(
-            SlackChatPlatform, "ack",
-        ) as mock_ack, patch("lambda_adapter.intake.boto3.client") as mock_client:
-            mock_runtime = MagicMock()
-            mock_client.return_value = mock_runtime
+        with patch.object(SlackChatPlatform, "ack") as mock_ack:
+            _process(event, dispatch)
 
-            lambda_handler(event, None)
-
-            ack_text = mock_ack.call_args[0][1]
-            assert "inside an incident thread" in ack_text
-            mock_runtime.invoke_agent_runtime.assert_not_called()
+        assert "inside an incident thread" in mock_ack.call_args[0][1]
+        assert dispatch.tasks == []
 
 
 # ---------------------------------------------------------------------------

@@ -28,8 +28,8 @@ from typing import Any
 from shared.a2a_client import AsyncHTTPClient
 from shared.agents import Agent, AgentRegistry, get_registry
 from shared.fanout import Fanout
-from shared.models import AlertContext, SnapshotReport, SnapshotSection
-from shared.platforms import ChatPlatform, deliver_with_retry, for_platform
+from shared.models import SnapshotReport, SnapshotSection
+from shared.platforms import ChatPlatform, DeliveryTarget, deliver_with_retry, for_platform
 from shared.report_renderer import SnapshotBlock, SnapshotSections
 from shared.time_utils import now_iso
 from shared.tool_result import SNAPSHOT_RESULT
@@ -110,8 +110,8 @@ class StatusSnapshotOrchestrator:
     """Orchestrates a ``/status`` snapshot across active specialized agents.
 
     Lifecycle:
-        1. Synthesise a chat-platform routing context from the snapshot
-           request (top-level post, no thread).
+        1. Build a top-level :class:`DeliveryTarget` from the snapshot
+           request (``thread_anchor=None`` — a broadcast, not a reply).
         2. Build the master's own block (synchronous).
         3. Fan out an A2A snapshot request to every active specialized
            agent.
@@ -159,8 +159,12 @@ class StatusSnapshotOrchestrator:
     async def capture(self, snapshot_request: dict[str, Any]) -> None:
         """Run the full ``/status`` snapshot lifecycle."""
         requested_at = snapshot_request.get("requested_at") or now_iso()
-        platform = self._get_platform(snapshot_request)
-        delivery_ctx = self._synthetic_context(snapshot_request, requested_at)
+        platform = self._get_platform(snapshot_request["platform"])
+        target = DeliveryTarget(
+            platform=snapshot_request["platform"],
+            channel_id=snapshot_request["channel_id"],
+            thread_anchor=None,  # /status is a top-level broadcast, not a reply
+        )
 
         # Phase 1: master's own block (synchronous)
         master_block = self._master_builder.build()
@@ -211,7 +215,7 @@ class StatusSnapshotOrchestrator:
         )
 
         try:
-            await deliver_with_retry(platform, delivery_ctx, sections)
+            await deliver_with_retry(platform, target, sections)
         except Exception:
             logger.exception(
                 "Failed to post status snapshot for requested_at=%s", requested_at
@@ -312,28 +316,7 @@ class StatusSnapshotOrchestrator:
     # Platform routing
     # ------------------------------------------------------------------
 
-    def _get_platform(self, snapshot_request: dict[str, Any]) -> ChatPlatform:
+    def _get_platform(self, platform_name: str) -> ChatPlatform:
         if self._chat_platform is not None:
             return self._chat_platform
-        return for_platform(snapshot_request["platform"])
-
-    @staticmethod
-    def _synthetic_context(
-        snapshot_request: dict[str, Any], requested_at: str
-    ) -> AlertContext:
-        """Build a routing-only :class:`AlertContext` for snapshot delivery.
-
-        ``message_id=""`` and ``platform_metadata={}`` together signal "post
-        at top-level, not as a thread reply." :class:`SlackChatPlatform`
-        drops the empty ``thread_ts`` kwarg in that case.
-        """
-        return AlertContext(
-            investigation_id=f"snapshot-{requested_at}",
-            platform=snapshot_request["platform"],
-            channel_id=snapshot_request["channel_id"],
-            message_id="",
-            alert_text="",
-            alert_timestamp=requested_at,
-            investigation_window=(requested_at, requested_at),
-            platform_metadata={},
-        )
+        return for_platform(platform_name)

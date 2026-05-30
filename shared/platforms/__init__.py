@@ -80,6 +80,35 @@ WebhookEvent = Union[InvalidWebhook, ChallengeWebhook, AlertWebhook, CommandWebh
 
 
 # ---------------------------------------------------------------------------
+# DeliveryTarget — the routing-only value ChatPlatform.deliver posts to
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DeliveryTarget:
+    """Where a :meth:`ChatPlatform.deliver` call posts.
+
+    ``thread_anchor`` is the originating message id to reply under; ``None``
+    posts at top-level. Each platform interprets it natively (Slack
+    ``thread_ts``, Discord ``message_reference.message_id``). Replaces
+    threading routing through a (sometimes synthetic) :class:`AlertContext`.
+    """
+
+    platform: str  # "slack" | "discord"
+    channel_id: str
+    thread_anchor: str | None = None
+
+    @classmethod
+    def for_alert(cls, alert_context: AlertContext) -> "DeliveryTarget":
+        """Project an alert's routing fields — reply threaded under the alert."""
+        return cls(
+            platform=alert_context.platform,
+            channel_id=alert_context.channel_id,
+            thread_anchor=alert_context.message_id or None,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Section payload union for ChatPlatform.deliver()
 # ---------------------------------------------------------------------------
 
@@ -112,9 +141,9 @@ class ChatPlatform(Protocol):
         ...  # pragma: no cover
 
     async def deliver(
-        self, alert_context: AlertContext, payload: DeliverPayload
+        self, target: "DeliveryTarget", payload: DeliverPayload
     ) -> str:
-        """Render *payload* in platform-native markup, post it as a thread reply,
+        """Render *payload* in platform-native markup, post it to *target*,
         and return the rendered text.
 
         The return value lets callers (e.g. the experiment results store) keep
@@ -130,7 +159,7 @@ class ChatPlatform(Protocol):
 
 async def deliver_with_retry(
     platform: ChatPlatform,
-    alert_context: AlertContext,
+    target: "DeliveryTarget",
     payload: DeliverPayload,
     *,
     max_retries: int = 3,
@@ -149,7 +178,7 @@ async def deliver_with_retry(
     last_exc: BaseException | None = None
     for attempt in range(max_retries + 1):
         try:
-            return await platform.deliver(alert_context, payload)
+            return await platform.deliver(target, payload)
         except Exception as exc:
             last_exc = exc
             if attempt < max_retries:

@@ -14,7 +14,9 @@ from moto import mock_aws
 from shared.platforms.discord import verify_discord_signature
 from shared.platforms.discord import parse_alert_context as discord_parse
 from lambda_adapter.handler import lambda_handler as discord_handler
-from shared.platforms import for_platform
+from lambda_adapter.intake import process_webhook
+from lambda_adapter.master_dispatch import RecordingMasterDispatch
+from shared.platforms import for_platform, detect_platform
 from shared.platforms.discord import DiscordChatPlatform
 from shared.report_renderer import DiscordReportRenderer, ReportSections, EvidenceBlock, EnrichmentSections
 from shared.models import AlertContext
@@ -194,14 +196,13 @@ class TestDiscordHandler:
         }
         event = self._build_event(payload)
 
-        with patch("lambda_adapter.intake.boto3.client") as mock_boto:
-            mock_runtime = MagicMock()
-            mock_boto.return_value = mock_runtime
-            result = discord_handler(event, None)
+        dispatch = RecordingMasterDispatch()
+        result = process_webhook(event, detect_platform(event["headers"]), dispatch)
 
         assert result["statusCode"] == 200
         assert json.loads(result["body"])["ok"] is True
-        mock_runtime.invoke_agent_runtime.assert_called_once()
+        assert len(dispatch.tasks) == 1
+        assert dispatch.tasks[0].kind == "investigate"
 
 
 # ===========================================================================

@@ -35,7 +35,7 @@ from shared.constants import HARD_CUTOFF_SECONDS, INITIAL_DEADLINE_SECONDS
 from shared.fanout import Fanout
 from shared.models import AgentFailure, AgentMetadata, AgentResult, AlertContext
 from shared.time_utils import now_iso
-from shared.platforms import ChatPlatform, deliver_with_retry, for_platform
+from shared.platforms import ChatPlatform, DeliveryTarget, deliver_with_retry, for_platform
 from shared.experiment import ExperimentResult
 from shared.experiment_results_store import ExperimentResultsStore
 from shared.tool_result import AGENT_RESULT
@@ -187,11 +187,11 @@ class InvestigationOrchestrator:
     def registry(self) -> AgentRegistry:
         return self._registry
 
-    def _get_platform(self, alert_context: AlertContext) -> ChatPlatform:
-        """Return the ChatPlatform, selecting from alert_context.platform when not injected."""
+    def _get_platform(self, platform_name: str) -> ChatPlatform:
+        """Return the ChatPlatform, selecting by name when not injected."""
         if self._chat_platform is not None:
             return self._chat_platform
-        return for_platform(alert_context.platform)
+        return for_platform(platform_name)
 
     # ------------------------------------------------------------------
     # Public API
@@ -203,7 +203,8 @@ class InvestigationOrchestrator:
         started_at_iso = now_iso()
         results: dict[str, AgentResult | AgentFailure] = {}
         initial_report_summary = ""
-        platform = self._get_platform(alert_context)
+        platform = self._get_platform(alert_context.platform)
+        target = DeliveryTarget.for_alert(alert_context)
 
         # --- Phase 0: announce which agents will be queried ------------------
         # Fire-and-forget so fan-out starts immediately; a slow chat post
@@ -217,7 +218,7 @@ class InvestigationOrchestrator:
                 alert_context, dispatched_agents,
             )
             asyncio.create_task(
-                self._post_started_notice(platform, alert_context, started_sections),
+                self._post_started_notice(platform, target, started_sections),
                 name=f"started-notice-{alert_context.investigation_id}",
             )
 
@@ -246,7 +247,7 @@ class InvestigationOrchestrator:
 
         try:
             initial_report_summary = await deliver_with_retry(
-                platform, alert_context, report_sections,
+                platform, target, report_sections,
             )
         except Exception:
             logger.exception(
@@ -277,7 +278,7 @@ class InvestigationOrchestrator:
                         variant_label=alert_context.variant_label,
                     )
                     await deliver_with_retry(
-                        platform, alert_context, enrichment_sections,
+                        platform, target, enrichment_sections,
                     )
                 except Exception:
                     logger.exception(
@@ -346,15 +347,15 @@ class InvestigationOrchestrator:
     async def _post_started_notice(
         self,
         platform: ChatPlatform,
-        alert_context: AlertContext,
+        target: DeliveryTarget,
         sections,
     ) -> None:
         try:
-            await deliver_with_retry(platform, alert_context, sections)
+            await deliver_with_retry(platform, target, sections)
         except Exception:
             logger.exception(
                 "Failed to post investigation-started notice for %s",
-                alert_context.investigation_id,
+                target.channel_id,
             )
 
     async def _invoke_agent_safe(

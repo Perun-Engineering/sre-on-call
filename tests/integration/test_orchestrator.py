@@ -150,9 +150,9 @@ class FakeChatPlatform:
     def ack(self, command, text):  # not exercised in orchestrator tests
         raise NotImplementedError
 
-    async def deliver(self, alert_context, payload) -> str:
+    async def deliver(self, target, payload) -> str:
         text = self._render(payload)
-        self.deliveries.append((alert_context, payload, text))
+        self.deliveries.append((target, payload, text))
         return text
 
     def _render(self, payload) -> str:
@@ -168,14 +168,10 @@ class FakeChatPlatform:
 
     @property
     def messages(self) -> list[tuple[str, str, str]]:
-        """Legacy compat: list of (channel_id, thread_ts, rendered_text) tuples."""
+        """Legacy compat: list of (channel_id, thread_anchor, rendered_text) tuples."""
         return [
-            (
-                ctx.channel_id,
-                ctx.platform_metadata.get("thread_ts", ctx.message_id),
-                text,
-            )
-            for ctx, _, text in self.deliveries
+            (target.channel_id, target.thread_anchor, text)
+            for target, _, text in self.deliveries
         ]
 
 
