@@ -6,18 +6,25 @@ import hashlib
 import hmac
 import json
 import time
-from unittest.mock import MagicMock, patch
 
 import boto3
 import pytest
 from moto import mock_aws
 
-from lambda_adapter.handler import lambda_handler
+from lambda_adapter.intake import process_webhook
+from lambda_adapter.master_dispatch import RecordingMasterDispatch
+from shared.platforms import detect_platform
 from shared.experiment import (
     ExperimentConfig,
     PipelineVariant,
 )
 from shared.experiment_store import DEFAULT_TABLE_NAME as EXP_TABLE
+
+
+def _process(event: dict) -> tuple[dict, RecordingMasterDispatch]:
+    dispatch = RecordingMasterDispatch()
+    result = process_webhook(event, detect_platform(event["headers"]), dispatch)
+    return result, dispatch
 
 
 # ---------------------------------------------------------------------------
@@ -97,11 +104,6 @@ def _env(monkeypatch):
     monkeypatch.setenv("AWS_SESSION_TOKEN", "testing")
 
 
-def _patch_runtime():
-    """Patch the intake's boto3.client so we don't hit AgentCore."""
-    return patch("lambda_adapter.intake.boto3.client")
-
-
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -111,20 +113,14 @@ class TestNoExperiment:
     @mock_aws
     def test_single_invoke_when_no_experiment_table(self) -> None:
         _create_tables()
-        event = _build_event(_slack_event_payload())
+        result, dispatch = _process(_build_event(_slack_event_payload()))
 
-        with _patch_runtime() as mock_boto:
-            mock_runtime = MagicMock()
-            mock_boto.return_value = mock_runtime
-
-            result = lambda_handler(event, None)
-
-            assert result["statusCode"] == 200
-            mock_runtime.invoke_agent_runtime.assert_called_once()
-            assert (
-                mock_runtime.invoke_agent_runtime.call_args[1]["agentRuntimeArn"]
-                == "DEFAULT_AGENT"
-            )
+        assert result["statusCode"] == 200
+        assert len(dispatch.tasks) == 1
+        task = dispatch.tasks[0]
+        assert task.kind == "investigate"
+        # Non-experiment path uses the default ARN, resolved by the adapter.
+        assert task.master_arn is None
 
 
 class TestWithExperiment:
@@ -136,69 +132,42 @@ class TestWithExperiment:
         from shared.experiment_store import ExperimentStore
         ExperimentStore(table_name=EXP_TABLE, dynamodb_resource=ddb).put_experiment(_make_experiment())
 
-        event = _build_event(_slack_event_payload())
+        result, dispatch = _process(_build_event(_slack_event_payload()))
 
-        with _patch_runtime() as mock_boto:
-            mock_runtime = MagicMock()
-            mock_boto.return_value = mock_runtime
-
-            result = lambda_handler(event, None)
-
-            assert result["statusCode"] == 200
-            assert mock_runtime.invoke_agent_runtime.call_count == 2
-            agent_arns = [
-                c[1]["agentRuntimeArn"]
-                for c in mock_runtime.invoke_agent_runtime.call_args_list
-            ]
-            assert "AGENT_A" in agent_arns
-            assert "AGENT_B" in agent_arns
+        assert result["statusCode"] == 200
+        assert len(dispatch.tasks) == 2
+        arns = {t.master_arn for t in dispatch.tasks}
+        assert arns == {"AGENT_A", "AGENT_B"}
 
     @mock_aws
-    def test_variant_ids_in_input_text(self, monkeypatch) -> None:
+    def test_variant_ids_in_alert_context(self, monkeypatch) -> None:
         monkeypatch.setenv("EXPERIMENTS_TABLE_NAME", EXP_TABLE)
         ddb = _create_tables(create_experiments=True)
 
         from shared.experiment_store import ExperimentStore
         ExperimentStore(table_name=EXP_TABLE, dynamodb_resource=ddb).put_experiment(_make_experiment())
 
-        event = _build_event(_slack_event_payload())
+        _, dispatch = _process(_build_event(_slack_event_payload()))
 
-        with _patch_runtime() as mock_boto:
-            mock_runtime = MagicMock()
-            mock_boto.return_value = mock_runtime
-
-            lambda_handler(event, None)
-
-            for call in mock_runtime.invoke_agent_runtime.call_args_list:
-                envelope = json.loads(call[1]["payload"].decode("utf-8"))
-                payload = json.loads(envelope["params"]["message"]["parts"][0]["text"])
-                assert payload["experiment_id"] == "exp-001"
-                assert payload["variant_id"] in ("a", "b")
-                assert payload["variant_label"] in ("Claude Sonnet", "Nova Pro")
+        for task in dispatch.tasks:
+            ctx = task.alert_context
+            assert ctx.experiment_id == "exp-001"
+            assert ctx.variant_id in ("a", "b")
+            assert ctx.variant_label in ("Claude Sonnet", "Nova Pro")
 
     @mock_aws
-    def test_session_ids_differ_per_variant(self, monkeypatch) -> None:
+    def test_variants_differ_per_task(self, monkeypatch) -> None:
         monkeypatch.setenv("EXPERIMENTS_TABLE_NAME", EXP_TABLE)
         ddb = _create_tables(create_experiments=True)
 
         from shared.experiment_store import ExperimentStore
         ExperimentStore(table_name=EXP_TABLE, dynamodb_resource=ddb).put_experiment(_make_experiment())
 
-        event = _build_event(_slack_event_payload())
+        _, dispatch = _process(_build_event(_slack_event_payload()))
 
-        with _patch_runtime() as mock_boto:
-            mock_runtime = MagicMock()
-            mock_boto.return_value = mock_runtime
-
-            lambda_handler(event, None)
-
-            session_ids = [
-                c[1]["runtimeSessionId"]
-                for c in mock_runtime.invoke_agent_runtime.call_args_list
-            ]
-            assert len(set(session_ids)) == 2
-            assert any(s.endswith("-a") for s in session_ids)
-            assert any(s.endswith("-b") for s in session_ids)
+        # Two distinct variants — the per-variant session-id suffix is
+        # verified in test_master_dispatch.
+        assert {t.alert_context.variant_id for t in dispatch.tasks} == {"a", "b"}
 
     @mock_aws
     def test_no_fork_when_experiment_paused(self, monkeypatch) -> None:
@@ -210,16 +179,7 @@ class TestWithExperiment:
         exp.status = "paused"
         ExperimentStore(table_name=EXP_TABLE, dynamodb_resource=ddb).put_experiment(exp)
 
-        event = _build_event(_slack_event_payload())
+        _, dispatch = _process(_build_event(_slack_event_payload()))
 
-        with _patch_runtime() as mock_boto:
-            mock_runtime = MagicMock()
-            mock_boto.return_value = mock_runtime
-
-            lambda_handler(event, None)
-
-            mock_runtime.invoke_agent_runtime.assert_called_once()
-            assert (
-                mock_runtime.invoke_agent_runtime.call_args[1]["agentRuntimeArn"]
-                == "DEFAULT_AGENT"
-            )
+        assert len(dispatch.tasks) == 1
+        assert dispatch.tasks[0].master_arn is None

@@ -17,7 +17,6 @@ import hashlib
 import hmac
 import json
 import time
-from unittest.mock import MagicMock, patch
 
 import boto3
 import pytest
@@ -29,7 +28,10 @@ from agents.master.orchestrator import (
 )
 from agents.master.report_formatter import ReportFormatter
 from lambda_adapter.handler import lambda_handler
+from lambda_adapter.intake import process_webhook
+from lambda_adapter.master_dispatch import RecordingMasterDispatch
 from shared.models import AgentResult, AlertContext
+from shared.platforms import detect_platform
 
 
 # ---------------------------------------------------------------------------
@@ -166,7 +168,7 @@ class FakeChatPlatform:
     def ack(self, command, text):
         raise NotImplementedError
 
-    async def deliver(self, alert_context, payload) -> str:
+    async def deliver(self, target, payload) -> str:
         from shared.report_renderer import (
             EnrichmentSections,
             InvestigationStartedSections,
@@ -183,18 +185,14 @@ class FakeChatPlatform:
             text = self._renderer.render_pir(payload)
         else:
             raise TypeError(f"Unsupported deliver payload: {type(payload).__name__}")
-        self.deliveries.append((alert_context, payload, text))
+        self.deliveries.append((target, payload, text))
         return text
 
     @property
     def messages(self) -> list[tuple[str, str, str]]:
         return [
-            (
-                ctx.channel_id,
-                ctx.platform_metadata.get("thread_ts", ctx.message_id),
-                text,
-            )
-            for ctx, _, text in self.deliveries
+            (target.channel_id, target.thread_anchor, text)
+            for target, _, text in self.deliveries
         ]
 
 
@@ -302,16 +300,12 @@ class TestLambdaEndToEnd:
 
     @mock_aws
     def test_valid_event_writes_dedup_and_invokes_agent(self):
-        """A valid Slack event writes a dedup record and invokes the Master Agent."""
+        """A valid Slack event writes a dedup record and fires the Master Agent."""
         _create_dedup_table()
-        payload = _slack_event_payload()
-        event = _build_lambda_event(payload)
+        event = _build_lambda_event(_slack_event_payload())
 
-        with patch("lambda_adapter.intake.boto3.client") as mock_boto_client:
-            mock_runtime = MagicMock()
-            mock_boto_client.return_value = mock_runtime
-
-            result = lambda_handler(event, None)
+        dispatch = RecordingMasterDispatch()
+        result = process_webhook(event, detect_platform(event["headers"]), dispatch)
 
         # HTTP 200 returned
         assert result["statusCode"] == 200
@@ -326,24 +320,19 @@ class TestLambdaEndToEnd:
         assert item["status"] == "IN_PROGRESS"
         assert "investigation_id" in item
 
-        # Master Agent invoked
-        mock_runtime.invoke_agent_runtime.assert_called_once()
-        agent_kw = mock_runtime.invoke_agent_runtime.call_args[1]
-        assert agent_kw["agentRuntimeArn"] == AGENT_ENDPOINT
+        # Master Agent fired
+        assert len(dispatch.tasks) == 1
+        assert dispatch.tasks[0].kind == "investigate"
 
     @mock_aws
     def test_invalid_signature_returns_401_no_side_effects(self):
         """An invalid signature returns 401 with no DynamoDB write or agent call."""
         _create_dedup_table()
-        payload = _slack_event_payload()
-        event = _build_lambda_event(payload)
+        event = _build_lambda_event(_slack_event_payload())
         event["headers"]["x-slack-signature"] = "v0=tampered"
 
-        with patch("lambda_adapter.intake.boto3.client") as mock_boto_client:
-            mock_runtime = MagicMock()
-            mock_boto_client.return_value = mock_runtime
-
-            result = lambda_handler(event, None)
+        dispatch = RecordingMasterDispatch()
+        result = process_webhook(event, detect_platform(event["headers"]), dispatch)
 
         assert result["statusCode"] == 401
 
@@ -353,60 +342,50 @@ class TestLambdaEndToEnd:
         resp = table.scan()
         assert resp["Count"] == 0
 
-        # No agent invocation
-        mock_runtime.invoke_agent_runtime.assert_not_called()
+        # No agent dispatch
+        assert dispatch.tasks == []
 
     @mock_aws
     def test_duplicate_event_skips_invocation(self):
-        """A duplicate event returns 200 but does not invoke the master agent again."""
+        """A duplicate event returns 200 but does not fire the master agent again."""
         _create_dedup_table()
         payload = _slack_event_payload()
+        dispatch = RecordingMasterDispatch()
 
-        with patch("lambda_adapter.intake.boto3.client") as mock_boto_client:
-            mock_runtime = MagicMock()
-            mock_boto_client.return_value = mock_runtime
+        # First call — new alert
+        event1 = _build_lambda_event(payload)
+        r1 = process_webhook(event1, detect_platform(event1["headers"]), dispatch)
+        assert r1["statusCode"] == 200
 
-            # First call — new alert
-            event1 = _build_lambda_event(payload)
-            r1 = lambda_handler(event1, None)
-            assert r1["statusCode"] == 200
+        # Second call — duplicate
+        event2 = _build_lambda_event(payload)
+        r2 = process_webhook(event2, detect_platform(event2["headers"]), dispatch)
+        assert r2["statusCode"] == 200
+        assert json.loads(r2["body"]) == {}
 
-            # Second call — duplicate
-            event2 = _build_lambda_event(payload)
-            r2 = lambda_handler(event2, None)
-            assert r2["statusCode"] == 200
-            assert json.loads(r2["body"]) == {}
-
-        # Invoke happened exactly once
-        assert mock_runtime.invoke_agent_runtime.call_count == 1
+        # Dispatch happened exactly once
+        assert len(dispatch.tasks) == 1
 
     @mock_aws
     def test_alert_context_passed_to_agent(self):
-        """The alert context JSON sent to the Master Agent contains the right fields."""
+        """The alert context dispatched to the Master Agent carries the right fields."""
         _create_dedup_table()
-        payload = _slack_event_payload(
-            channel="C_CTX_TEST",
-            ts="1700000001.000300",
-            text="ALERT: disk full on db-primary",
+        event = _build_lambda_event(
+            _slack_event_payload(
+                channel="C_CTX_TEST",
+                ts="1700000001.000300",
+                text="ALERT: disk full on db-primary",
+            )
         )
-        event = _build_lambda_event(payload)
 
-        with patch("lambda_adapter.intake.boto3.client") as mock_boto_client:
-            mock_runtime = MagicMock()
-            mock_boto_client.return_value = mock_runtime
+        dispatch = RecordingMasterDispatch()
+        process_webhook(event, detect_platform(event["headers"]), dispatch)
 
-            lambda_handler(event, None)
-
-        agent_kw = mock_runtime.invoke_agent_runtime.call_args[1]
-        envelope = json.loads(agent_kw["payload"].decode("utf-8"))
-        assert envelope["jsonrpc"] == "2.0"
-        assert envelope["method"] == "message/send"
-        text = envelope["params"]["message"]["parts"][0]["text"]
-        ctx = json.loads(text)
-        assert ctx["channel_id"] == "C_CTX_TEST"
-        assert ctx["message_id"] == "1700000001.000300"
-        assert ctx["alert_text"] == "ALERT: disk full on db-primary"
-        assert "investigation_window" in ctx
+        ctx = dispatch.tasks[0].alert_context
+        assert ctx.channel_id == "C_CTX_TEST"
+        assert ctx.message_id == "1700000001.000300"
+        assert ctx.alert_text == "ALERT: disk full on db-primary"
+        assert ctx.investigation_window is not None
 
 
 # ===========================================================================
@@ -596,7 +575,7 @@ class TestSlackThreadReply:
     @pytest.mark.asyncio
     async def test_slack_retry_on_transient_failure(self):
         """Chat delivery retries on transient failure and eventually succeeds."""
-        from shared.platforms import deliver_with_retry
+        from shared.platforms import DeliveryTarget, deliver_with_retry
         from shared.report_renderer import ReportSections
 
         call_count = 0
@@ -613,18 +592,17 @@ class TestSlackThreadReply:
             def ack(self, command, text):
                 raise NotImplementedError
 
-            async def deliver(self, alert_context, payload):
+            async def deliver(self, target, payload):
                 nonlocal call_count
                 call_count += 1
                 if call_count == 1:
                     raise RuntimeError("Chat API transient error")
-                self.deliveries.append((alert_context, payload))
+                self.deliveries.append((target, payload))
                 return "rendered"
 
         platform = RetryPlatform()
-        ctx = _make_alert_context(
-            channel_id="C_RETRY",
-            message_id="1700000000.000700",
+        target = DeliveryTarget(
+            platform="slack", channel_id="C_RETRY", thread_anchor="1700000000.000700",
         )
         sections = ReportSections(
             severity="🔴", affected_services="api", time_of_detection="t",
@@ -632,7 +610,7 @@ class TestSlackThreadReply:
             impact_assessment="i", recommended_actions="a", links=[],
         )
         result = await deliver_with_retry(
-            platform, ctx, sections, base_delay=0.0,
+            platform, target, sections, base_delay=0.0,
         )
 
         assert call_count == 2

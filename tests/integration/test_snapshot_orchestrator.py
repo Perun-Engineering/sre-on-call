@@ -190,9 +190,9 @@ class FakeChatPlatform:
     def ack(self, command, text):  # not exercised
         raise NotImplementedError
 
-    async def deliver(self, alert_context, payload) -> str:
+    async def deliver(self, target, payload) -> str:
         text = self._render(payload)
-        self.deliveries.append((alert_context, payload, text))
+        self.deliveries.append((target, payload, text))
         return text
 
     def _render(self, payload) -> str:
@@ -518,7 +518,7 @@ class TestSnapshotOrchestratorDisabled:
 
 class TestSnapshotOrchestratorRouting:
     @pytest.mark.asyncio
-    async def test_synthetic_alert_context_uses_empty_message_id_for_top_level(self):
+    async def test_delivery_target_is_top_level_for_status(self):
         registry = _build_registry(active_specialized=["slack_scanner"])
         http = FakeHTTPClient(
             responses={"http://localhost:9001": _a2a_response_for(_make_report())},
@@ -527,14 +527,13 @@ class TestSnapshotOrchestratorRouting:
 
         await orch.capture(_make_request())
 
-        ctx, payload, _ = next(
+        target, payload, _ = next(
             d for d in platform.deliveries if isinstance(d[1], SnapshotSections)
         )
-        # Synthetic AlertContext routes to top-level Slack post
-        assert ctx.message_id == ""
-        assert ctx.platform_metadata == {}
-        assert ctx.channel_id == "C12345"
-        assert ctx.platform == "slack"
+        # /status delivers at top-level — no thread anchor.
+        assert target.thread_anchor is None
+        assert target.channel_id == "C12345"
+        assert target.platform == "slack"
 
     @pytest.mark.asyncio
     async def test_master_block_is_first(self):

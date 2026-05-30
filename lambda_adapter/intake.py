@@ -15,12 +15,10 @@ import base64
 import json
 import logging
 import os
-from dataclasses import asdict
-
-import boto3
+from dataclasses import asdict, replace
 
 from lambda_adapter.dedup import DeduplicationStore
-from shared.a2a_protocol import build_a2a_request
+from lambda_adapter.master_dispatch import AgentCoreMasterDispatch, MasterDispatch
 from shared.experiment_store import ExperimentStore
 from shared.models import AlertContext, CommandRequest
 from shared.platforms import (
@@ -39,15 +37,6 @@ from shared.trace_store import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _wrap_a2a_message(text: str, request_id: str) -> bytes:
-    """Encode an A2A JSON-RPC ``message/send`` envelope as bytes.
-
-    AgentCore proxies the byte payload directly to the agent's A2A server,
-    which expects JSON-RPC 2.0 — raw JSON is rejected with a 502.
-    """
-    return json.dumps(build_a2a_request(text, request_id)).encode("utf-8")
 
 
 def _get_env(name: str) -> str:
@@ -72,7 +61,9 @@ def _http_response(status_code: int, body: dict | None = None) -> dict:
     }
 
 
-def process_webhook(event: dict, platform: ChatPlatform) -> dict:
+def process_webhook(
+    event: dict, platform: ChatPlatform, dispatch: MasterDispatch | None = None
+) -> dict:
     """Run the full intake pipeline using the given :class:`ChatPlatform`.
 
     Flow:
@@ -80,10 +71,15 @@ def process_webhook(event: dict, platform: ChatPlatform) -> dict:
            the request as :class:`InvalidWebhook`, :class:`ChallengeWebhook`,
            :class:`AlertWebhook`, or :class:`CommandWebhook`.
         2. Dispatch on the tagged event variant.
-        3. For alerts: deduplicate via DynamoDB, invoke the Master Agent.
-        4. For commands: ack synchronously, invoke the Master Agent for PIR.
+        3. For alerts: deduplicate via DynamoDB, fire the Master Agent.
+        4. For commands: ack synchronously, fire the Master Agent.
         5. Return HTTP 200.
+
+    *dispatch* is the :class:`MasterDispatch` seam; production defaults to
+    :class:`AgentCoreMasterDispatch` (lazy boto3), tests inject a recording
+    adapter and assert on the dispatched tasks.
     """
+    dispatch = dispatch or AgentCoreMasterDispatch()
     raw_body = _decode_body(event)
     headers = event.get("headers", {})
 
@@ -103,17 +99,17 @@ def process_webhook(event: dict, platform: ChatPlatform) -> dict:
         return _http_response(200, webhook_event.response)
 
     if isinstance(webhook_event, CommandWebhook):
-        return _process_command(webhook_event.command, platform)
+        return _process_command(webhook_event.command, platform, dispatch)
 
     if isinstance(webhook_event, AlertWebhook):
-        return _process_alert(webhook_event.context)
+        return _process_alert(webhook_event.context, dispatch)
 
     # Defensive: unknown variant — return 500 rather than silently passing.
     raise RuntimeError(f"Unhandled WebhookEvent variant: {type(webhook_event).__name__}")
 
 
-def _process_alert(alert_context: AlertContext) -> dict:
-    """Dedup the alert and invoke the Master Agent (or A/B variants)."""
+def _process_alert(alert_context: AlertContext, dispatch: MasterDispatch) -> dict:
+    """Dedup the alert and fire the Master Agent (or A/B variants)."""
     dedup_table = _get_env("DEDUP_TABLE_NAME")
     store = DeduplicationStore(table_name=dedup_table)
     is_new = store.record_if_new(
@@ -158,34 +154,17 @@ def _process_alert(alert_context: AlertContext) -> dict:
     if experiments_table:
         experiment = ExperimentStore(table_name=experiments_table).get_active_experiment()
 
-    runtime_client = boto3.client("bedrock-agentcore")
-
     if experiment:
         for variant in (experiment.variant_a, experiment.variant_b):
-            ctx = asdict(alert_context)
-            ctx["experiment_id"] = experiment.experiment_id
-            ctx["variant_id"] = variant.variant_id
-            ctx["variant_label"] = variant.label
-            runtime_client.invoke_agent_runtime(
-                agentRuntimeArn=variant.master_endpoint,
-                runtimeSessionId=f"{alert_context.investigation_id}-{variant.variant_id}",
-                payload=_wrap_a2a_message(
-                    json.dumps(ctx),
-                    f"req-master-{alert_context.investigation_id}-{variant.variant_id}",
-                ),
-                contentType="application/json",
+            variant_ctx = replace(
+                alert_context,
+                experiment_id=experiment.experiment_id,
+                variant_id=variant.variant_id,
+                variant_label=variant.label,
             )
+            dispatch.investigate(variant_ctx, master_arn=variant.master_endpoint)
     else:
-        agent_runtime_arn = _get_env("MASTER_AGENT_RUNTIME_ARN")
-        runtime_client.invoke_agent_runtime(
-            agentRuntimeArn=agent_runtime_arn,
-            runtimeSessionId=alert_context.investigation_id,
-            payload=_wrap_a2a_message(
-                json.dumps(asdict(alert_context)),
-                f"req-master-{alert_context.investigation_id}",
-            ),
-            contentType="application/json",
-        )
+        dispatch.investigate(alert_context)
 
     logger.info(
         "Investigation started: id=%s channel=%s message_id=%s",
@@ -196,52 +175,35 @@ def _process_alert(alert_context: AlertContext) -> dict:
     return _http_response(200, {"ok": True})
 
 
-def _process_command(command: CommandRequest, platform: ChatPlatform) -> dict:
+def _process_command(
+    command: CommandRequest, platform: ChatPlatform, dispatch: MasterDispatch
+) -> dict:
     """Handle a slash command (e.g. ``/postmortem``, ``/status``).
 
     Each command is allow-listed by name and routed to its own handler.
     Unknown commands fall through with an ephemeral "Unknown command" reply.
     """
     if command.command == "/postmortem":
-        return _process_postmortem_command(command, platform)
+        return _process_postmortem_command(command, platform, dispatch)
     if command.command == "/status":
-        return _process_status_command(command, platform)
+        return _process_status_command(command, platform, dispatch)
     return _http_response(200, {"text": f"Unknown command: {command.command}"})
 
 
 def _process_postmortem_command(
-    command: CommandRequest, platform: ChatPlatform
+    command: CommandRequest, platform: ChatPlatform, dispatch: MasterDispatch
 ) -> dict:
     """Handle ``/postmortem`` — must be invoked inside an incident thread.
 
-    Acks synchronously, then invokes the Master Agent with a PIR task
-    payload referencing the originating thread.
+    Acks synchronously, then fires the Master Agent with a PIR task
+    referencing the originating thread.
     """
     if not command.thread_ts:
         platform.ack(command, "⚠️ Please use /postmortem inside an incident thread.")
         return _http_response(200)
 
     platform.ack(command, "📝 Generating Post-Incident Report...")
-
-    agent_runtime_arn = _get_env("MASTER_AGENT_RUNTIME_ARN")
-    runtime_client = boto3.client("bedrock-agentcore")
-    pir_payload = json.dumps({
-        "task": "pir",
-        "platform": command.platform,
-        "channel_id": command.channel_id,
-        "thread_ts": command.thread_ts,
-        "user_id": command.user_id,
-        "command_text": command.text,
-    })
-    runtime_client.invoke_agent_runtime(
-        agentRuntimeArn=agent_runtime_arn,
-        runtimeSessionId=f"pir-{command.channel_id}-{command.thread_ts}",
-        payload=_wrap_a2a_message(
-            pir_payload,
-            f"req-master-pir-{command.channel_id}-{command.thread_ts}",
-        ),
-        contentType="application/json",
-    )
+    dispatch.postmortem(command)
 
     logger.info(
         "PIR generation started: channel=%s thread=%s user=%s",
@@ -253,37 +215,19 @@ def _process_postmortem_command(
 
 
 def _process_status_command(
-    command: CommandRequest, platform: ChatPlatform
+    command: CommandRequest, platform: ChatPlatform, dispatch: MasterDispatch
 ) -> dict:
     """Handle ``/status`` — operator-driven snapshot. No thread required.
 
-    Acks synchronously, then invokes the Master Agent with a snapshot
-    task payload. The master fans out to active specialized agents and
-    posts a :class:`shared.report_renderer.SnapshotSections` payload at
-    top-level (not as a thread reply) when collection completes.
+    Acks synchronously, then fires the Master Agent with a snapshot task.
+    The master fans out to active specialized agents and posts a
+    :class:`shared.report_renderer.SnapshotSections` payload at top-level
+    (not as a thread reply) when collection completes.
     """
     platform.ack(command, "🩺 Capturing status snapshot...")
 
     requested_at = now_iso()
-
-    agent_runtime_arn = _get_env("MASTER_AGENT_RUNTIME_ARN")
-    runtime_client = boto3.client("bedrock-agentcore")
-    snapshot_payload = json.dumps({
-        "task": "snapshot",
-        "platform": command.platform,
-        "channel_id": command.channel_id,
-        "user_id": command.user_id,
-        "requested_at": requested_at,
-    })
-    runtime_client.invoke_agent_runtime(
-        agentRuntimeArn=agent_runtime_arn,
-        runtimeSessionId=f"snapshot-{command.channel_id}-{requested_at}",
-        payload=_wrap_a2a_message(
-            snapshot_payload,
-            f"req-master-snapshot-{command.channel_id}-{requested_at}",
-        ),
-        contentType="application/json",
-    )
+    dispatch.status(command, requested_at)
 
     logger.info(
         "Status snapshot started: channel=%s user=%s requested_at=%s",

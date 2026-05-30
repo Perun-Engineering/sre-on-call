@@ -22,6 +22,7 @@ from shared.platforms import (
     ChallengeWebhook,
     CommandWebhook,
     DeliverPayload,
+    DeliveryTarget,
     InvalidWebhook,
     WebhookEvent,
 )
@@ -203,10 +204,10 @@ class DiscordChatPlatform:
     # --- deliver ----------------------------------------------------------
 
     async def deliver(
-        self, alert_context: AlertContext, payload: DeliverPayload
+        self, target: DeliveryTarget, payload: DeliverPayload
     ) -> str:
         text = self._render(payload)
-        await self._post_reply(alert_context, text)
+        await self._post_reply(target, text)
         return text
 
     def _render(self, payload: DeliverPayload) -> str:
@@ -224,20 +225,19 @@ class DiscordChatPlatform:
             f"Unsupported deliver payload: {type(payload).__name__}"
         )
 
-    async def _post_reply(self, alert_context: AlertContext, text: str) -> None:
+    async def _post_reply(self, target: DeliveryTarget, text: str) -> None:
         import aiohttp
 
-        channel_id = alert_context.channel_id
-        url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
+        url = f"https://discord.com/api/v10/channels/{target.channel_id}/messages"
         headers = {
             "Authorization": f"Bot {self._bot_token}",
             "Content-Type": "application/json",
         }
         body: dict = {"content": text}
 
-        message_ref = alert_context.platform_metadata.get("message_id")
-        if message_ref:
-            body["message_reference"] = {"message_id": message_ref}
+        # No thread anchor means "post at top-level" (e.g. /status snapshots).
+        if target.thread_anchor:
+            body["message_reference"] = {"message_id": target.thread_anchor}
 
         async with aiohttp.ClientSession() as session:
             async with session.post(url, json=body, headers=headers) as resp:

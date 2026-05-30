@@ -17,12 +17,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from shared.models import AlertContext, CommandRequest
+from shared.models import CommandRequest
 from shared.platforms import (
     AlertWebhook,
     ChallengeWebhook,
     ChatPlatform,
     CommandWebhook,
+    DeliveryTarget,
     InvalidWebhook,
     detect_platform,
     for_platform,
@@ -174,17 +175,8 @@ class TestSlackIngest:
 class TestDeliverDispatch:
     """Confirm deliver routes each section type to the right renderer call."""
 
-    def _ctx(self) -> AlertContext:
-        return AlertContext(
-            investigation_id="inv-1",
-            platform="slack",
-            channel_id="C1",
-            message_id="ts-1",
-            alert_text="alert",
-            alert_timestamp="2025-01-01T00:00:00+00:00",
-            investigation_window=("2025-01-01T00:00:00+00:00", "2025-01-01T00:10:00+00:00"),
-            platform_metadata={"thread_ts": "ts-1"},
-        )
+    def _target(self) -> DeliveryTarget:
+        return DeliveryTarget(platform="slack", channel_id="C1", thread_anchor="ts-1")
 
     def _platform_with_mocks(self) -> tuple[SlackChatPlatform, MagicMock, AsyncMock]:
         platform = SlackChatPlatform(signing_secret="x", bot_token="y")
@@ -204,9 +196,9 @@ class TestDeliverDispatch:
             summary="s", root_cause="r", evidence_blocks=[],
             impact_assessment="i", recommended_actions="a", links=[],
         )
-        rendered = asyncio.run(platform.deliver(self._ctx(), sections))
+        rendered = asyncio.run(platform.deliver(self._target(), sections))
         renderer.render_report.assert_called_once_with(sections)
-        poster.assert_awaited_once_with(self._ctx(), "RENDERED_REPORT")
+        poster.assert_awaited_once_with(self._target(), "RENDERED_REPORT")
         assert rendered == "RENDERED_REPORT"
 
     def test_enrichment_sections_dispatches_to_render_enrichment(self) -> None:
@@ -215,9 +207,9 @@ class TestDeliverDispatch:
             emoji="📡", display_name="Slack Scanner",
             findings_lines=["found"], updated_assessment="a",
         )
-        rendered = asyncio.run(platform.deliver(self._ctx(), sections))
+        rendered = asyncio.run(platform.deliver(self._target(), sections))
         renderer.render_enrichment.assert_called_once_with(sections)
-        poster.assert_awaited_once_with(self._ctx(), "RENDERED_ENRICHMENT")
+        poster.assert_awaited_once_with(self._target(), "RENDERED_ENRICHMENT")
         assert rendered == "RENDERED_ENRICHMENT"
 
     def test_started_sections_dispatches_to_render_started(self) -> None:
@@ -225,9 +217,9 @@ class TestDeliverDispatch:
         sections = InvestigationStartedSections(
             alert_text="a", investigation_id="i", dispatched=[("📡", "Slack Scanner")],
         )
-        rendered = asyncio.run(platform.deliver(self._ctx(), sections))
+        rendered = asyncio.run(platform.deliver(self._target(), sections))
         renderer.render_investigation_started.assert_called_once_with(sections)
-        poster.assert_awaited_once_with(self._ctx(), "RENDERED_STARTED")
+        poster.assert_awaited_once_with(self._target(), "RENDERED_STARTED")
         assert rendered == "RENDERED_STARTED"
 
     def test_pir_sections_dispatches_to_render_pir(self) -> None:
@@ -236,74 +228,47 @@ class TestDeliverDispatch:
             incident_summary="s", timeline="t", root_cause="r",
             impact="i", action_items="a", lessons_learned="l",
         )
-        rendered = asyncio.run(platform.deliver(self._ctx(), sections))
+        rendered = asyncio.run(platform.deliver(self._target(), sections))
         renderer.render_pir.assert_called_once_with(sections)
-        poster.assert_awaited_once_with(self._ctx(), "RENDERED_PIR")
+        poster.assert_awaited_once_with(self._target(), "RENDERED_PIR")
         assert rendered == "RENDERED_PIR"
 
     def test_unknown_payload_raises_typeerror(self) -> None:
         platform, _, _ = self._platform_with_mocks()
         with pytest.raises(TypeError, match="Unsupported deliver payload"):
-            asyncio.run(platform.deliver(self._ctx(), object()))  # type: ignore[arg-type]
+            asyncio.run(platform.deliver(self._target(), object()))  # type: ignore[arg-type]
 
 
 class TestSlackPostReply:
     """Exercises SlackChatPlatform._post_reply directly to verify the
-    thread-vs-top-level routing — added for the /status path which uses a
-    synthetic AlertContext with empty message_id to broadcast at top-level.
+    thread-vs-top-level routing driven by ``DeliveryTarget.thread_anchor``.
     """
 
-    def _ctx(self, *, message_id: str = "ts-1", platform_metadata: dict | None = None) -> AlertContext:
-        return AlertContext(
-            investigation_id="inv-1",
-            platform="slack",
-            channel_id="C1",
-            message_id=message_id,
-            alert_text="",
-            alert_timestamp="2026-05-28T19:00:00+00:00",
-            investigation_window=("2026-05-28T19:00:00+00:00", "2026-05-28T19:10:00+00:00"),
-            platform_metadata=platform_metadata or {},
-        )
+    def _target(self, *, thread_anchor: str | None) -> DeliveryTarget:
+        return DeliveryTarget(platform="slack", channel_id="C1", thread_anchor=thread_anchor)
 
-    def test_thread_ts_in_metadata_routes_as_thread_reply(self) -> None:
+    def test_thread_anchor_routes_as_thread_reply(self) -> None:
         from unittest.mock import patch as _patch, AsyncMock
         platform = SlackChatPlatform(signing_secret="x", bot_token="y")
-        ctx = self._ctx(platform_metadata={"thread_ts": "ts-parent"})
         async_client = AsyncMock()
         async_client.chat_postMessage = AsyncMock()
         with _patch("slack_sdk.web.async_client.AsyncWebClient", return_value=async_client):
-            asyncio.run(platform._post_reply(ctx, "hello"))
+            asyncio.run(platform._post_reply(self._target(thread_anchor="ts-parent"), "hello"))
         async_client.chat_postMessage.assert_awaited_once_with(
             channel="C1", thread_ts="ts-parent", text="hello",
         )
 
-    def test_message_id_falls_through_when_no_metadata(self) -> None:
+    def test_none_anchor_omits_kwarg_for_top_level_post(self) -> None:
+        """A top-level /status target has thread_anchor=None — Slack rejects
+        thread_ts="" so the kwarg must be dropped entirely."""
         from unittest.mock import patch as _patch, AsyncMock
         platform = SlackChatPlatform(signing_secret="x", bot_token="y")
-        ctx = self._ctx(message_id="ts-msg", platform_metadata={})
         async_client = AsyncMock()
         async_client.chat_postMessage = AsyncMock()
         with _patch("slack_sdk.web.async_client.AsyncWebClient", return_value=async_client):
-            asyncio.run(platform._post_reply(ctx, "hello"))
-        async_client.chat_postMessage.assert_awaited_once_with(
-            channel="C1", thread_ts="ts-msg", text="hello",
-        )
-
-    def test_empty_thread_ts_omits_kwarg_for_top_level_post(self) -> None:
-        """A synthetic /status AlertContext has message_id="" — Slack rejects
-        thread_ts="" so the kwarg must be dropped entirely so the message
-        posts at top-level."""
-        from unittest.mock import patch as _patch, AsyncMock
-        platform = SlackChatPlatform(signing_secret="x", bot_token="y")
-        ctx = self._ctx(message_id="", platform_metadata={})
-        async_client = AsyncMock()
-        async_client.chat_postMessage = AsyncMock()
-        with _patch("slack_sdk.web.async_client.AsyncWebClient", return_value=async_client):
-            asyncio.run(platform._post_reply(ctx, "hello"))
+            asyncio.run(platform._post_reply(self._target(thread_anchor=None), "hello"))
         async_client.chat_postMessage.assert_awaited_once_with(channel="C1", text="hello")
-        # Critical assertion: thread_ts must NOT be in the kwargs
-        call_kwargs = async_client.chat_postMessage.await_args.kwargs
-        assert "thread_ts" not in call_kwargs
+        assert "thread_ts" not in async_client.chat_postMessage.await_args.kwargs
 
 
 class TestAck:
@@ -355,14 +320,9 @@ class TestDiscordSmoke:
         platform = DiscordChatPlatform(public_key="00" * 32, bot_token="x")
         platform._renderer = MagicMock()
         platform._post_reply = AsyncMock()  # type: ignore[method-assign]
-        ctx = AlertContext(
-            investigation_id="inv-1", platform="discord", channel_id="C1",
-            message_id="m1", alert_text="a",
-            alert_timestamp="2025-01-01T00:00:00+00:00",
-            investigation_window=("2025-01-01T00:00:00+00:00", "2025-01-01T00:10:00+00:00"),
-        )
+        target = DeliveryTarget(platform="discord", channel_id="C1", thread_anchor="m1")
         with pytest.raises(TypeError):
-            asyncio.run(platform.deliver(ctx, object()))  # type: ignore[arg-type]
+            asyncio.run(platform.deliver(target, object()))  # type: ignore[arg-type]
 
 
 def test_chat_platform_protocol_runtime_check() -> None:
@@ -397,13 +357,8 @@ class TestDiscordRenderingRegression:
             summary="s", root_cause="r", evidence_blocks=[],
             impact_assessment="i", recommended_actions="a", links=[],
         )
-        ctx = AlertContext(
-            investigation_id="inv-1", platform="discord", channel_id="C1",
-            message_id="m1", alert_text="a",
-            alert_timestamp="2025-01-01T00:00:00+00:00",
-            investigation_window=("2025-01-01T00:00:00+00:00", "2025-01-01T00:10:00+00:00"),
-        )
-        rendered = asyncio.run(platform.deliver(ctx, sections))
+        target = DeliveryTarget(platform="discord", channel_id="C1", thread_anchor="m1")
+        rendered = asyncio.run(platform.deliver(target, sections))
         # Discord markdown uses **bold**; Slack mrkdwn uses *bold*.
         assert "**Severity:**" in rendered
         assert "*Severity:*" not in rendered.replace("**Severity:**", "")
@@ -417,20 +372,15 @@ class TestDiscordRenderingRegression:
             summary="s", root_cause="r", evidence_blocks=[],
             impact_assessment="i", recommended_actions="a", links=[],
         )
-        ctx = AlertContext(
-            investigation_id="inv-1", platform="slack", channel_id="C1",
-            message_id="m1", alert_text="a",
-            alert_timestamp="2025-01-01T00:00:00+00:00",
-            investigation_window=("2025-01-01T00:00:00+00:00", "2025-01-01T00:10:00+00:00"),
-        )
-        rendered = asyncio.run(platform.deliver(ctx, sections))
+        target = DeliveryTarget(platform="slack", channel_id="C1", thread_anchor="m1")
+        rendered = asyncio.run(platform.deliver(target, sections))
         assert "*Severity:*" in rendered
         assert "**Severity:**" not in rendered
 
-    def test_orchestrator_default_platform_selection_uses_alert_context(self) -> None:
-        """When no chat_platform is injected, the orchestrator picks one
-        from ``alert_context.platform`` — fixing the bug where Discord
-        alerts rendered with Slack mrkdwn."""
+    def test_orchestrator_default_platform_selection_uses_platform_name(self) -> None:
+        """When no chat_platform is injected, the orchestrator picks one by
+        platform name — fixing the bug where Discord alerts rendered with
+        Slack mrkdwn."""
         from agents.master.orchestrator import InvestigationOrchestrator
         from shared.agents import AgentRegistry
         from shared.config import AgentConfig, Defaults, ProjectConfig
@@ -451,33 +401,15 @@ class TestDiscordRenderingRegression:
             registry=registry,
         )
 
-        slack_ctx = AlertContext(
-            investigation_id="i", platform="slack", channel_id="C1",
-            message_id="m1", alert_text="a",
-            alert_timestamp="2025-01-01T00:00:00+00:00",
-            investigation_window=("2025-01-01T00:00:00+00:00", "2025-01-01T00:10:00+00:00"),
-        )
-        discord_ctx = AlertContext(
-            investigation_id="i", platform="discord", channel_id="C2",
-            message_id="m2", alert_text="a",
-            alert_timestamp="2025-01-01T00:00:00+00:00",
-            investigation_window=("2025-01-01T00:00:00+00:00", "2025-01-01T00:10:00+00:00"),
-        )
-
-        assert orch._get_platform(slack_ctx).name == "slack"
-        assert orch._get_platform(discord_ctx).name == "discord"
+        assert orch._get_platform("slack").name == "slack"
+        assert orch._get_platform("discord").name == "discord"
 
 
 class TestDeliverWithRetry:
     """deliver_with_retry: exponential backoff + return-value passthrough."""
 
-    def _ctx(self) -> AlertContext:
-        return AlertContext(
-            investigation_id="inv-1", platform="slack", channel_id="C1",
-            message_id="ts-1", alert_text="a",
-            alert_timestamp="2025-01-01T00:00:00+00:00",
-            investigation_window=("2025-01-01T00:00:00+00:00", "2025-01-01T00:10:00+00:00"),
-        )
+    def _target(self) -> DeliveryTarget:
+        return DeliveryTarget(platform="slack", channel_id="C1", thread_anchor="ts-1")
 
     def _sections(self) -> ReportSections:
         return ReportSections(
@@ -492,7 +424,7 @@ class TestDeliverWithRetry:
         platform = MagicMock()
         platform.deliver = AsyncMock(return_value="OK")
         result = asyncio.run(
-            deliver_with_retry(platform, self._ctx(), self._sections(), base_delay=0.0)
+            deliver_with_retry(platform, self._target(), self._sections(), base_delay=0.0)
         )
         assert result == "OK"
         assert platform.deliver.await_count == 1
@@ -507,7 +439,7 @@ class TestDeliverWithRetry:
         )
         result = asyncio.run(
             deliver_with_retry(
-                platform, self._ctx(), self._sections(),
+                platform, self._target(), self._sections(),
                 max_retries=3, base_delay=0.0,
             )
         )
@@ -522,7 +454,7 @@ class TestDeliverWithRetry:
         with pytest.raises(RuntimeError, match="permanent"):
             asyncio.run(
                 deliver_with_retry(
-                    platform, self._ctx(), self._sections(),
+                    platform, self._target(), self._sections(),
                     max_retries=2, base_delay=0.0,
                 )
             )
