@@ -20,14 +20,14 @@ Differs materially from :class:`agents.master.orchestrator.InvestigationOrchestr
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
 from typing import Any
 
-from shared.a2a_client import A2AClient, AgentCoreClient, AiohttpClient, AsyncHTTPClient
+from shared.a2a_client import AsyncHTTPClient
 from shared.agents import Agent, AgentRegistry, get_registry
+from shared.fanout import Fanout
 from shared.models import AlertContext, SnapshotReport, SnapshotSection
 from shared.platforms import ChatPlatform, deliver_with_retry, for_platform
 from shared.report_renderer import SnapshotBlock, SnapshotSections
@@ -136,21 +136,17 @@ class StatusSnapshotOrchestrator:
         self._registry = registry or get_registry()
         self._master_builder = master_builder or MasterSnapshotBuilder(self._registry)
 
-        active_specialized = self._registry.active(kind="specialized")
-        self.agent_endpoints: dict[str, str] = {
-            a.id: a.resolve_endpoint() for a in active_specialized
-        }
         self.disabled_agents: list[Agent] = list(
             self._registry.disabled_in_config(kind="specialized")
         )
 
-        if http_client is None:
-            any_arn = any(
-                ep.startswith("arn:") for ep in self.agent_endpoints.values()
-            )
-            http_client = AgentCoreClient() if any_arn else AiohttpClient()
-        self.http_client: AsyncHTTPClient = http_client
-        self._client = A2AClient(self.http_client)
+        # The Fanout owns endpoint resolution + per-endpoint transport routing
+        # + the one A2AClient. agent_endpoints / http_client / _client are
+        # pass-throughs so existing call sites and tests keep working.
+        self._fanout = Fanout(http_client=http_client, registry=self._registry)
+        self.agent_endpoints: dict[str, str] = self._fanout.agent_endpoints
+        self.http_client = self._fanout.http_client
+        self._client = self._fanout.client
 
     @property
     def registry(self) -> AgentRegistry:
@@ -170,56 +166,37 @@ class StatusSnapshotOrchestrator:
         master_block = self._master_builder.build()
 
         # Phase 2: fan out
-        task_map: dict[str, asyncio.Task[SnapshotReport | None]] = {}
-        for agent_id in self.agent_endpoints:
-            task = asyncio.create_task(
-                self._invoke_snapshot_safe(agent_id, requested_at),
-                name=f"snapshot-{agent_id}",
-            )
-            task_map[agent_id] = task
-
-        # Phase 3: 30s hard cutoff, single shot
-        if task_map:
-            done, pending = await asyncio.wait(
-                set(task_map.values()),
-                timeout=self.HARD_CUTOFF_SECONDS,
-            )
-        else:
-            done, pending = set(), set()
-
-        # Phase 4: build per-agent blocks
-        agent_blocks: list[SnapshotBlock] = []
-        ordered_active = sorted(
-            self._registry.active(kind="specialized"), key=lambda a: a.order
+        pending = self._fanout.dispatch(
+            lambda agent_id: self._invoke_snapshot_safe(agent_id, requested_at)
         )
-        for agent in ordered_active:
-            agent_id = agent.id
-            task = task_map.get(agent_id)
-            if task is None:
-                continue
-            if task in pending:
-                task.cancel()
+
+        # Phase 3: single harvest at the hard cutoff (no late-enrichment phase)
+        settled, pending = await self._fanout.harvest(pending, self.HARD_CUTOFF_SECONDS)
+
+        # Phase 4: build per-agent blocks in registry render order
+        agent_blocks: list[SnapshotBlock] = []
+        for agent in self._fanout.targets:
+            if agent.id in pending:
                 agent_blocks.append(
                     self._error_block(agent, f"no response within {int(self.HARD_CUTOFF_SECONDS)}s")
                 )
                 continue
-            try:
-                report = task.result()
-            except Exception as exc:
-                logger.exception("snapshot fan-out failed for %s", agent_id)
-                agent_blocks.append(self._error_block(agent, str(exc)))
+            if agent.id not in settled:
                 continue
-            if report is None:
+            value = settled[agent.id]
+            if isinstance(value, BaseException):
+                logger.exception(
+                    "snapshot fan-out failed for %s", agent.id, exc_info=value
+                )
+                agent_blocks.append(self._error_block(agent, str(value)))
+                continue
+            if value is None:
                 agent_blocks.append(self._error_block(agent, "agent returned no snapshot footer"))
                 continue
-            agent_blocks.append(self._block_from_report(agent, report))
+            agent_blocks.append(self._block_from_report(agent, value))
 
-        # Drain cancelled tasks
-        for task in pending:
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
+        # Cancel + drain anything still pending
+        await self._fanout.cancel(pending)
 
         # Phase 5: disabled-in-config blocks
         for agent in sorted(self.disabled_agents, key=lambda a: a.order):
