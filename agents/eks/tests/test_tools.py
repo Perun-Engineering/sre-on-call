@@ -11,6 +11,7 @@ Requirements: 7.1, 7.2, 7.3, 7.5, 7.6
 from __future__ import annotations
 
 import pathlib
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -19,6 +20,7 @@ import pytest
 from agents.eks.tools import (
     _collect_pods,
     _container_statuses_summary,
+    _execute_capture_snapshot,
     _execute_gather,
     _gather_node_conditions,
     _gather_pod_events,
@@ -30,7 +32,7 @@ from agents.eks.tools import (
     _pod_phase,
     _severity_from_phase,
 )
-from shared.models import Finding
+from shared.models import Finding, SnapshotReport
 from shared.tool_result import ToolResult, build_agent_result
 
 
@@ -701,11 +703,6 @@ class TestEksIamAuth:
 # ---------------------------------------------------------------------------
 # capture_snapshot — /status path
 # ---------------------------------------------------------------------------
-
-from datetime import datetime, timedelta, timezone
-
-from agents.eks.tools import _execute_capture_snapshot
-from shared.models import SnapshotReport
 
 
 REQUESTED_AT = "2026-05-28T19:00:00+00:00"

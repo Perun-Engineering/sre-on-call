@@ -207,7 +207,7 @@ def _execute_capture_snapshot(
             sections.append(
                 SnapshotSection(
                     label="Authentication",
-                    lines=[f"❌ /users/@me returned a non-object body"],
+                    lines=["❌ /users/@me returned a non-object body"],
                 )
             )
         else:
@@ -245,7 +245,7 @@ def _execute_capture_snapshot(
             sections.append(
                 SnapshotSection(
                     label="Guild access",
-                    lines=[f"❌ /users/@me/guilds returned a non-array body"],
+                    lines=["❌ /users/@me/guilds returned a non-array body"],
                 )
             )
         else:

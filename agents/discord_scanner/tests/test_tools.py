@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import datetime
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import boto3
 import pytest
@@ -18,6 +18,10 @@ from lambda_adapter.intake import process_webhook
 from lambda_adapter.master_dispatch import RecordingMasterDispatch
 from shared.platforms import for_platform, detect_platform
 from shared.platforms.discord import DiscordChatPlatform
+from agents.discord_scanner.tools import (
+    DiscordRESTClient,
+    _execute_capture_snapshot,
+)
 from shared.report_renderer import DiscordReportRenderer, ReportSections, EvidenceBlock, EnrichmentSections
 from shared.models import AlertContext
 
@@ -267,11 +271,6 @@ class TestDiscordReportRenderer:
 # ---------------------------------------------------------------------------
 # capture_snapshot — /status path
 # ---------------------------------------------------------------------------
-
-from agents.discord_scanner.tools import (
-    DiscordRESTClient,
-    _execute_capture_snapshot,
-)
 
 
 REQUESTED_AT = "2026-05-28T19:00:00+00:00"
