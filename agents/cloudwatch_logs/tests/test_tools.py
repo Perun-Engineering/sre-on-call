@@ -9,17 +9,23 @@ Requirements: 6.1, 6.2, 6.3, 6.4, 6.5
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 from botocore.exceptions import ClientError
 
 from agents.cloudwatch_logs.tools import (
+    _bytes_per_group,
+    _execute_capture_snapshot,
     _execute_query,
     _get_existing_log_groups,
+    _humanize_bytes,
+    _list_log_groups,
     _poll_query_results,
+    _query_error_counts,
     _results_to_findings,
 )
-from shared.models import Finding
+from shared.models import Finding, SnapshotReport
 from shared.tool_result import ToolResult, build_agent_result, severity_from_text
 
 
@@ -478,17 +484,6 @@ class TestExecuteQuery:
 # ---------------------------------------------------------------------------
 # capture_snapshot — /status path (i-a: IncomingBytes ranking + bounded Insights)
 # ---------------------------------------------------------------------------
-
-from datetime import datetime, timezone
-
-from agents.cloudwatch_logs.tools import (
-    _bytes_per_group,
-    _execute_capture_snapshot,
-    _humanize_bytes,
-    _list_log_groups,
-    _query_error_counts,
-)
-from shared.models import SnapshotReport
 
 
 REQUESTED_AT = "2026-05-28T19:00:00+00:00"

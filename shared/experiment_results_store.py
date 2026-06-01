@@ -44,7 +44,6 @@ class ExperimentResultsStore:
 
     def get_results(self, experiment_id: str, investigation_id: str) -> list[ExperimentResult]:
         """Fetch both variant results for a given investigation."""
-        from boto3.dynamodb.conditions import Key
 
         results = []
         for vid in ("a", "b"):

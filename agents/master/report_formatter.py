@@ -15,8 +15,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from shared.agents import Agent, AgentRegistry, get_registry
-from shared.models import AgentMetadata, AgentResult, AgentFailure, AlertContext, Finding
+from shared.agents import AgentRegistry, get_registry
+from shared.models import AgentMetadata, AgentResult, AgentFailure, AlertContext
 from shared.report_renderer import (
     EnrichmentSections,
     EvidenceBlock,

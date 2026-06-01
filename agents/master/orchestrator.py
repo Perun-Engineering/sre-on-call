@@ -23,10 +23,7 @@ import time
 from dataclasses import asdict, replace
 
 from shared.a2a_client import (
-    A2AClient,
     A2AReply,
-    AgentCoreClient,
-    AiohttpClient,
     AsyncHTTPClient,
 )
 from shared.agent_telemetry import AGENT_METADATA
@@ -165,7 +162,6 @@ class InvestigationOrchestrator:
         self._registry: AgentRegistry = registry or get_registry()
         self.report_formatter = report_formatter or ReportFormatter(self._registry)
 
-        active_specialized = self._registry.active(kind="specialized")
         self.disabled_agents: set[str] = {
             a.id for a in self._registry.disabled_in_config(kind="specialized")
         }

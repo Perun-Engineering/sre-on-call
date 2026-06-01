@@ -293,6 +293,6 @@ def _skills_from_bundles(skills: list) -> list[AgentSkill]:
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     if len(sys.argv) != 2:
-        print(f"Usage: python -m shared.a2a_factory <agent_dir>", file=sys.stderr)
+        print("Usage: python -m shared.a2a_factory <agent_dir>", file=sys.stderr)
         sys.exit(1)
     agent_main(sys.argv[1])

@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Literal, Protocol
+from typing import Literal, Protocol, Union, assert_never
 
 from shared.models import SnapshotSection
 
@@ -122,12 +122,32 @@ class SnapshotSections:
 
 
 # ---------------------------------------------------------------------------
+# Section payload union — every variant ChatPlatform.deliver() can render.
+# Lives here, next to the section dataclasses; re-exported from
+# shared.platforms for callers that consume it through the deliver seam.
+# ---------------------------------------------------------------------------
+
+
+DeliverPayload = Union[
+    ReportSections,
+    EnrichmentSections,
+    InvestigationStartedSections,
+    PIRSections,
+    SnapshotSections,
+]
+
+
+# ---------------------------------------------------------------------------
 # Protocol
 # ---------------------------------------------------------------------------
 
 
 class ReportRenderer(Protocol):
     """Renders structured report data into platform-specific markup."""
+
+    def render(self, payload: DeliverPayload) -> str:
+        """Dispatch *payload* to the matching ``render_*`` method."""
+        ...
 
     def render_report(self, sections: ReportSections) -> str: ...
     def render_enrichment(self, sections: EnrichmentSections) -> str: ...
@@ -244,6 +264,26 @@ class MarkupReportRenderer:
 
     def normalize(self, text: str) -> str:
         return self._d.normalize(text)
+
+    def render(self, payload: DeliverPayload) -> str:
+        """Dispatch *payload* to the matching ``render_*`` method.
+
+        The single home for the section→method mapping; ``ChatPlatform``
+        adapters (and test fakes) call this instead of re-deriving the
+        ladder. ``assert_never`` makes a new :data:`DeliverPayload` variant
+        a type error here rather than a runtime surprise across call sites.
+        """
+        if isinstance(payload, ReportSections):
+            return self.render_report(payload)
+        if isinstance(payload, EnrichmentSections):
+            return self.render_enrichment(payload)
+        if isinstance(payload, InvestigationStartedSections):
+            return self.render_investigation_started(payload)
+        if isinstance(payload, PIRSections):
+            return self.render_pir(payload)
+        if isinstance(payload, SnapshotSections):
+            return self.render_snapshot(payload)
+        assert_never(payload)
 
     def render_report(self, sections: ReportSections) -> str:
         d = self._d

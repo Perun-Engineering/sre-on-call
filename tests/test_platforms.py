@@ -35,6 +35,8 @@ from shared.report_renderer import (
     InvestigationStartedSections,
     PIRSections,
     ReportSections,
+    SlackReportRenderer,
+    SnapshotSections,
 )
 
 
@@ -173,70 +175,71 @@ class TestSlackIngest:
 
 
 class TestDeliverDispatch:
-    """Confirm deliver routes each section type to the right renderer call."""
+    """deliver delegates rendering to the renderer's single render() entry point."""
 
     def _target(self) -> DeliveryTarget:
         return DeliveryTarget(platform="slack", channel_id="C1", thread_anchor="ts-1")
 
-    def _platform_with_mocks(self) -> tuple[SlackChatPlatform, MagicMock, AsyncMock]:
+    def test_deliver_delegates_to_renderer_render(self) -> None:
         platform = SlackChatPlatform(signing_secret="x", bot_token="y")
         platform._renderer = MagicMock()
-        platform._renderer.render_report.return_value = "RENDERED_REPORT"
-        platform._renderer.render_enrichment.return_value = "RENDERED_ENRICHMENT"
-        platform._renderer.render_investigation_started.return_value = "RENDERED_STARTED"
-        platform._renderer.render_pir.return_value = "RENDERED_PIR"
+        platform._renderer.render.return_value = "RENDERED"
         post_mock = AsyncMock()
         platform._post_reply = post_mock  # type: ignore[method-assign]
-        return platform, platform._renderer, post_mock
-
-    def test_report_sections_dispatches_to_render_report(self) -> None:
-        platform, renderer, poster = self._platform_with_mocks()
         sections = ReportSections(
             severity="🔴", affected_services="svc", time_of_detection="t",
             summary="s", root_cause="r", evidence_blocks=[],
             impact_assessment="i", recommended_actions="a", links=[],
         )
         rendered = asyncio.run(platform.deliver(self._target(), sections))
-        renderer.render_report.assert_called_once_with(sections)
-        poster.assert_awaited_once_with(self._target(), "RENDERED_REPORT")
-        assert rendered == "RENDERED_REPORT"
+        platform._renderer.render.assert_called_once_with(sections)
+        post_mock.assert_awaited_once_with(self._target(), "RENDERED")
+        assert rendered == "RENDERED"
 
-    def test_enrichment_sections_dispatches_to_render_enrichment(self) -> None:
-        platform, renderer, poster = self._platform_with_mocks()
-        sections = EnrichmentSections(
-            emoji="📡", display_name="Slack Scanner",
-            findings_lines=["found"], updated_assessment="a",
+
+class TestRenderDispatch:
+    """MarkupReportRenderer.render owns the section→method dispatch — the
+    single home the ChatPlatform adapters and test fakes all route through."""
+
+    def _renderer_with_mocked_methods(self) -> SlackReportRenderer:
+        r = SlackReportRenderer()
+        r.render_report = MagicMock(return_value="REPORT")  # type: ignore[method-assign]
+        r.render_enrichment = MagicMock(return_value="ENRICH")  # type: ignore[method-assign]
+        r.render_investigation_started = MagicMock(return_value="STARTED")  # type: ignore[method-assign]
+        r.render_pir = MagicMock(return_value="PIR")  # type: ignore[method-assign]
+        r.render_snapshot = MagicMock(return_value="SNAPSHOT")  # type: ignore[method-assign]
+        return r
+
+    def test_each_variant_routes_to_matching_method(self) -> None:
+        r = self._renderer_with_mocked_methods()
+        report = ReportSections(
+            severity="🔴", affected_services="svc", time_of_detection="t",
+            summary="s", root_cause="r", evidence_blocks=[],
+            impact_assessment="i", recommended_actions="a", links=[],
         )
-        rendered = asyncio.run(platform.deliver(self._target(), sections))
-        renderer.render_enrichment.assert_called_once_with(sections)
-        poster.assert_awaited_once_with(self._target(), "RENDERED_ENRICHMENT")
-        assert rendered == "RENDERED_ENRICHMENT"
-
-    def test_started_sections_dispatches_to_render_started(self) -> None:
-        platform, renderer, poster = self._platform_with_mocks()
-        sections = InvestigationStartedSections(
-            alert_text="a", investigation_id="i", dispatched=[("📡", "Slack Scanner")],
+        enrich = EnrichmentSections(
+            emoji="📡", display_name="n", findings_lines=["f"], updated_assessment="a",
         )
-        rendered = asyncio.run(platform.deliver(self._target(), sections))
-        renderer.render_investigation_started.assert_called_once_with(sections)
-        poster.assert_awaited_once_with(self._target(), "RENDERED_STARTED")
-        assert rendered == "RENDERED_STARTED"
-
-    def test_pir_sections_dispatches_to_render_pir(self) -> None:
-        platform, renderer, poster = self._platform_with_mocks()
-        sections = PIRSections(
+        started = InvestigationStartedSections(
+            alert_text="a", investigation_id="i", dispatched=[],
+        )
+        pir = PIRSections(
             incident_summary="s", timeline="t", root_cause="r",
             impact="i", action_items="a", lessons_learned="l",
         )
-        rendered = asyncio.run(platform.deliver(self._target(), sections))
-        renderer.render_pir.assert_called_once_with(sections)
-        poster.assert_awaited_once_with(self._target(), "RENDERED_PIR")
-        assert rendered == "RENDERED_PIR"
+        snapshot = SnapshotSections(requested_at="t", summary_line="s", blocks=[])
 
-    def test_unknown_payload_raises_typeerror(self) -> None:
-        platform, _, _ = self._platform_with_mocks()
-        with pytest.raises(TypeError, match="Unsupported deliver payload"):
-            asyncio.run(platform.deliver(self._target(), object()))  # type: ignore[arg-type]
+        assert r.render(report) == "REPORT"
+        assert r.render(enrich) == "ENRICH"
+        assert r.render(started) == "STARTED"
+        assert r.render(pir) == "PIR"
+        assert r.render(snapshot) == "SNAPSHOT"
+        r.render_report.assert_called_once_with(report)
+        r.render_snapshot.assert_called_once_with(snapshot)
+
+    def test_unknown_payload_is_unreachable(self) -> None:
+        with pytest.raises(AssertionError):
+            SlackReportRenderer().render(object())  # type: ignore[arg-type]
 
 
 class TestSlackPostReply:
@@ -316,13 +319,19 @@ class TestDiscordSmoke:
         assert isinstance(event, InvalidWebhook)
         assert event.status_code == 401
 
-    def test_unknown_payload_raises(self) -> None:
+    def test_deliver_delegates_to_renderer_render(self) -> None:
         platform = DiscordChatPlatform(public_key="00" * 32, bot_token="x")
         platform._renderer = MagicMock()
+        platform._renderer.render.return_value = "RENDERED"
         platform._post_reply = AsyncMock()  # type: ignore[method-assign]
         target = DeliveryTarget(platform="discord", channel_id="C1", thread_anchor="m1")
-        with pytest.raises(TypeError):
-            asyncio.run(platform.deliver(target, object()))  # type: ignore[arg-type]
+        sections = PIRSections(
+            incident_summary="s", timeline="t", root_cause="r",
+            impact="i", action_items="a", lessons_learned="l",
+        )
+        rendered = asyncio.run(platform.deliver(target, sections))
+        platform._renderer.render.assert_called_once_with(sections)
+        assert rendered == "RENDERED"
 
 
 def test_chat_platform_protocol_runtime_check() -> None:
