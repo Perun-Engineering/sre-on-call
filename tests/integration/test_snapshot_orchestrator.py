@@ -22,10 +22,6 @@ from shared.agents import AgentRegistry
 from shared.config import AgentConfig, Defaults, ProjectConfig
 from shared.models import AgentMetadata, SnapshotReport, SnapshotSection
 from shared.report_renderer import (
-    EnrichmentSections,
-    InvestigationStartedSections,
-    PIRSections,
-    ReportSections,
     SlackReportRenderer,
     SnapshotBlock,
     SnapshotSections,
@@ -191,22 +187,9 @@ class FakeChatPlatform:
         raise NotImplementedError
 
     async def deliver(self, target, payload) -> str:
-        text = self._render(payload)
+        text = self._renderer.render(payload)
         self.deliveries.append((target, payload, text))
         return text
-
-    def _render(self, payload) -> str:
-        if isinstance(payload, ReportSections):
-            return self._renderer.render_report(payload)
-        if isinstance(payload, EnrichmentSections):
-            return self._renderer.render_enrichment(payload)
-        if isinstance(payload, InvestigationStartedSections):
-            return self._renderer.render_investigation_started(payload)
-        if isinstance(payload, PIRSections):
-            return self._renderer.render_pir(payload)
-        if isinstance(payload, SnapshotSections):
-            return self._renderer.render_snapshot(payload)
-        raise TypeError(f"Unsupported deliver payload: {type(payload).__name__}")
 
 
 def _last_snapshot_sections(platform: FakeChatPlatform) -> SnapshotSections:

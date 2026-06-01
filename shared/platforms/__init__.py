@@ -25,13 +25,7 @@ from dataclasses import dataclass
 from typing import Protocol, Union
 
 from shared.models import AlertContext, CommandRequest
-from shared.report_renderer import (
-    EnrichmentSections,
-    InvestigationStartedSections,
-    PIRSections,
-    ReportSections,
-    SnapshotSections,
-)
+from shared.report_renderer import DeliverPayload
 
 
 # ---------------------------------------------------------------------------
@@ -111,15 +105,9 @@ class DeliveryTarget:
 # ---------------------------------------------------------------------------
 # Section payload union for ChatPlatform.deliver()
 # ---------------------------------------------------------------------------
-
-
-DeliverPayload = Union[
-    ReportSections,
-    EnrichmentSections,
-    InvestigationStartedSections,
-    PIRSections,
-    SnapshotSections,
-]
+#
+# DeliverPayload is defined in shared.report_renderer (next to the section
+# dataclasses it unions) and re-exported here for the deliver seam.
 
 
 # ---------------------------------------------------------------------------

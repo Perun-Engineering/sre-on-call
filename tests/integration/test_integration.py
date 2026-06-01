@@ -27,7 +27,6 @@ from agents.master.orchestrator import (
     InvestigationOrchestrator,
 )
 from agents.master.report_formatter import ReportFormatter
-from lambda_adapter.handler import lambda_handler
 from lambda_adapter.intake import process_webhook
 from lambda_adapter.master_dispatch import RecordingMasterDispatch
 from shared.models import AgentResult, AlertContext
@@ -169,22 +168,7 @@ class FakeChatPlatform:
         raise NotImplementedError
 
     async def deliver(self, target, payload) -> str:
-        from shared.report_renderer import (
-            EnrichmentSections,
-            InvestigationStartedSections,
-            PIRSections,
-            ReportSections,
-        )
-        if isinstance(payload, ReportSections):
-            text = self._renderer.render_report(payload)
-        elif isinstance(payload, EnrichmentSections):
-            text = self._renderer.render_enrichment(payload)
-        elif isinstance(payload, InvestigationStartedSections):
-            text = self._renderer.render_investigation_started(payload)
-        elif isinstance(payload, PIRSections):
-            text = self._renderer.render_pir(payload)
-        else:
-            raise TypeError(f"Unsupported deliver payload: {type(payload).__name__}")
+        text = self._renderer.render(payload)
         self.deliveries.append((target, payload, text))
         return text
 

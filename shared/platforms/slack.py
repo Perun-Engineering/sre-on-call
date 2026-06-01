@@ -9,7 +9,6 @@ dialect itself lives in :mod:`shared.report_renderer` (used internally by
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import hmac
 import json
@@ -18,7 +17,6 @@ import time
 import urllib.request
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any
 from urllib.parse import parse_qs
 
 from shared.constants import INVESTIGATION_WINDOW_MINUTES
@@ -32,14 +30,7 @@ from shared.platforms import (
     InvalidWebhook,
     WebhookEvent,
 )
-from shared.report_renderer import (
-    EnrichmentSections,
-    InvestigationStartedSections,
-    PIRSections,
-    ReportSections,
-    SlackReportRenderer,
-    SnapshotSections,
-)
+from shared.report_renderer import SlackReportRenderer
 from shared.secrets import resolve_secret
 
 logger = logging.getLogger(__name__)
@@ -206,24 +197,9 @@ class SlackChatPlatform:
     async def deliver(
         self, target: DeliveryTarget, payload: DeliverPayload
     ) -> str:
-        text = self._render(payload)
+        text = self._renderer.render(payload)
         await self._post_reply(target, text)
         return text
-
-    def _render(self, payload: DeliverPayload) -> str:
-        if isinstance(payload, ReportSections):
-            return self._renderer.render_report(payload)
-        if isinstance(payload, EnrichmentSections):
-            return self._renderer.render_enrichment(payload)
-        if isinstance(payload, InvestigationStartedSections):
-            return self._renderer.render_investigation_started(payload)
-        if isinstance(payload, PIRSections):
-            return self._renderer.render_pir(payload)
-        if isinstance(payload, SnapshotSections):
-            return self._renderer.render_snapshot(payload)
-        raise TypeError(
-            f"Unsupported deliver payload: {type(payload).__name__}"
-        )
 
     async def _post_reply(self, target: DeliveryTarget, text: str) -> None:
         from slack_sdk.web.async_client import AsyncWebClient

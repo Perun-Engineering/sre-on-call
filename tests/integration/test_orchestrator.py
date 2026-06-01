@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 
+import boto3
 import pytest
+from moto import mock_aws
 
 from agents.master.orchestrator import (
     AsyncHTTPClient,
@@ -15,15 +17,15 @@ from shared.a2a_protocol import build_a2a_request
 from shared.agents import AgentRegistry
 from shared.config import AgentConfig, Defaults, ProjectConfig
 from shared.platforms import ChatPlatform
-from shared.report_renderer import (
-    EnrichmentSections,
-    InvestigationStartedSections,
-    PIRSections,
-    ReportSections,
-    SlackReportRenderer,
-)
+from shared.report_renderer import SlackReportRenderer
 from agents.master.report_formatter import ReportFormatter
 from shared.models import AgentMetadata, AgentResult, AlertContext, Finding
+from shared.trace_store import (
+    EVENT_A2A_REQUEST,
+    EVENT_A2A_RESPONSE,
+    EVENT_INVESTIGATION_TERMINATED,
+    TraceStore,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -151,20 +153,9 @@ class FakeChatPlatform:
         raise NotImplementedError
 
     async def deliver(self, target, payload) -> str:
-        text = self._render(payload)
+        text = self._renderer.render(payload)
         self.deliveries.append((target, payload, text))
         return text
-
-    def _render(self, payload) -> str:
-        if isinstance(payload, ReportSections):
-            return self._renderer.render_report(payload)
-        if isinstance(payload, EnrichmentSections):
-            return self._renderer.render_enrichment(payload)
-        if isinstance(payload, InvestigationStartedSections):
-            return self._renderer.render_investigation_started(payload)
-        if isinstance(payload, PIRSections):
-            return self._renderer.render_pir(payload)
-        raise TypeError(f"Unsupported deliver payload: {type(payload).__name__}")
 
     @property
     def messages(self) -> list[tuple[str, str, str]]:
@@ -879,18 +870,6 @@ class TestDisabledInConfigPropagation:
 # Trace archive — verify the orchestrator writes A2A round-trip events and
 # the end-of-investigation manifest when a TraceStore is configured.
 # ---------------------------------------------------------------------------
-
-
-
-import boto3
-from moto import mock_aws
-
-from shared.trace_store import (
-    EVENT_A2A_REQUEST,
-    EVENT_A2A_RESPONSE,
-    EVENT_INVESTIGATION_TERMINATED,
-    TraceStore,
-)
 
 
 _TRACE_BUCKET = "test-orchestrator-traces"
