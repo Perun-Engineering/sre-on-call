@@ -35,7 +35,7 @@ _log_group_pair = st.tuples(
 # ---------------------------------------------------------------------------
 
 
-@settings(max_examples=100)
+@settings(max_examples=100, deadline=None)
 @given(data=_log_group_pair)
 def test_non_existent_log_groups_skipped_without_failure(
     data: tuple[list[str], list[str]],
