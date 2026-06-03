@@ -20,7 +20,7 @@ None.
 
 ## IAM
 
-The `slack_scanner_agent` IAM role (see [`terraform/iam.tf`](../../terraform/iam.tf), plus the shared runtime-execution attachments in [`terraform/iam_agentcore.tf`](../../terraform/iam_agentcore.tf)) carries:
+The `slack_scanner_agent` IAM role (see [`modules/sre-on-call/iam.tf`](../../modules/sre-on-call/iam.tf), plus the shared runtime-execution attachments in [`modules/sre-on-call/iam_agentcore.tf`](../../modules/sre-on-call/iam_agentcore.tf)) carries:
 
 - `secretsmanager:GetSecretValue` on the Slack bot-token secret — required to call `conversations.history` and related Slack Web API methods.
 

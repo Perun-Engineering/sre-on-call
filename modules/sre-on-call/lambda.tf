@@ -16,8 +16,8 @@ resource "null_resource" "lambda_function_stage" {
   triggers = {
     # Re-stage when any source file changes
     sources = sha1(join("", [
-      for f in fileset("${path.module}/..", "{lambda_adapter,shared}/**/*.py") :
-      filesha1("${path.module}/../${f}")
+      for f in fileset(var.source_root, "{lambda_adapter,shared}/**/*.py") :
+      filesha1("${var.source_root}/${f}")
     ]))
   }
 
@@ -27,8 +27,8 @@ resource "null_resource" "lambda_function_stage" {
       STAGE='${path.module}/.build/lambda_function'
       rm -rf "$STAGE"
       mkdir -p "$STAGE"
-      cp -R '${path.module}/../lambda_adapter' "$STAGE/lambda_adapter"
-      cp -R '${path.module}/../shared' "$STAGE/shared"
+      cp -R '${var.source_root}/lambda_adapter' "$STAGE/lambda_adapter"
+      cp -R '${var.source_root}/shared' "$STAGE/shared"
       find "$STAGE" -type d -name __pycache__ -prune -exec rm -rf {} +
     EOT
   }
@@ -49,7 +49,7 @@ data "archive_file" "lambda_adapter" {
 
 resource "null_resource" "lambda_layer_build" {
   triggers = {
-    pyproject = filesha1("${path.module}/../pyproject.toml")
+    pyproject = filesha1("${var.source_root}/pyproject.toml")
   }
 
   provisioner "local-exec" {
@@ -58,7 +58,7 @@ resource "null_resource" "lambda_layer_build" {
       LAYER='${path.module}/.build/layer'
       rm -rf "$LAYER"
       mkdir -p "$LAYER/python"
-      '${path.module}/../.venv/bin/python' -m pip install --quiet --no-cache-dir \
+      '${var.source_root}/.venv/bin/python' -m pip install --quiet --no-cache-dir \
           --platform manylinux2014_x86_64 \
           --implementation cp \
           --python-version 3.12 \

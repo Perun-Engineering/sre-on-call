@@ -82,9 +82,9 @@ All agents run on AWS Bedrock AgentCore Runtime, communicate via the A2A protoco
 ├── tests/                          # Cross-cutting / shared unit tests
 │   ├── integration/                # Handler, orchestrator, A2A factory, synthetic webhook
 │   └── property/                   # Hypothesis property-based tests
-├── terraform/
-│   ├── main.tf
-│   ├── variables.tf
+├── modules/sre-on-call/            # Reusable module (no provider/backend)
+│   ├── versions.tf                 # Provider requirements only
+│   ├── variables.tf                # Inputs (incl. config_path, source_root)
 │   ├── networking.tf               # EKS-VPC reference + agent SG
 │   ├── ecr.tf                      # ECR repos for the 5 agent images
 │   ├── dynamodb.tf                 # Dedup table
@@ -96,6 +96,10 @@ All agents run on AWS Bedrock AgentCore Runtime, communicate via the A2A protoco
 │   ├── agentcore.tf                # 5 aws_bedrockagentcore_agent_runtime resources
 │   ├── traces.tf                   # S3 trace bucket + DDB index + KMS CMK + IAM grants
 │   └── observability.tf            # CloudWatch alarms + SNS topic for AgentCore
+├── examples/complete/             # Reference root: provider + backend + module call
+│   ├── main.tf                     # provider + module "sre_on_call"
+│   ├── outputs.tf                  # Re-exports module outputs
+│   └── moved.tf                    # State re-keying for the old flat root
 ├── scripts/
 │   ├── build_and_push_agents.sh    # Build 5 linux/arm64 images and push to ECR
 │   ├── hydrate_secrets.sh          # Push Slack/Discord secret values
@@ -155,7 +159,7 @@ Current count: **582 collected**, 582 passing. (Prometheus tests run and pass ev
 See **[docs/deployment.md](docs/deployment.md)** for the full procedure (build images → ECR repos → terraform apply → secret hydration). High level:
 
 1. Configure the AWS profile and required Terraform variables.
-2. `terraform apply -target=aws_ecr_repository.agents` to create the repos.
+2. `terraform apply -target=module.sre_on_call.aws_ecr_repository.agents` to create the repos.
 3. `./scripts/build_and_push_agents.sh <tag>` to build + push the 5 agent images.
 4. `terraform apply -var "agent_image_tag=<tag>"` for the rest.
 5. `./scripts/hydrate_secrets.sh` to populate Slack/Discord secret values.
@@ -163,7 +167,7 @@ See **[docs/deployment.md](docs/deployment.md)** for the full procedure (build i
 ### Required Terraform variables
 
 ```hcl
-# terraform/terraform.tfvars
+# examples/complete/terraform.tfvars
 eks_cluster_name         = "eks-uat"                           # existing cluster the EKS agent inspects
 agent_container_registry = "<account-id>.dkr.ecr.<region>.amazonaws.com"
 ```

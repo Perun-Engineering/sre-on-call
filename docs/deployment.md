@@ -16,7 +16,7 @@ This document covers the full procedure for deploying the sre-on-call stack to a
 
 ### 1. Required Terraform variables
 
-Create `terraform/terraform.tfvars`:
+Create `examples/complete/terraform.tfvars`:
 
 ```hcl
 eks_cluster_name         = "eks-uat"
@@ -28,7 +28,7 @@ Or pass them on the command line via `-var`. The container registry value is use
 ### 2. Initialize Terraform
 
 ```bash
-cd terraform
+cd examples/complete
 AWS_PROFILE=<profile> terraform init
 ```
 
@@ -37,7 +37,7 @@ AWS_PROFILE=<profile> terraform init
 The agent containers can't be built until the ECR repos exist, and the rest of the stack can't apply until images exist. Two-step apply:
 
 ```bash
-AWS_PROFILE=<profile> terraform apply -target=aws_ecr_repository.agents
+AWS_PROFILE=<profile> terraform apply -target=module.sre_on_call.aws_ecr_repository.agents
 ```
 
 This creates the 5 repos (`sre-on-call-master`, `-slack-scanner`, `-discord-scanner`, `-cloudwatch-logs`, `-eks`) and nothing else.
@@ -111,7 +111,7 @@ It can take up to 10 minutes after running before spans appear in the **GenAI Ob
 
 Skip this step if Transaction Search is already enabled in the target account+region for another project — it's a global toggle.
 
-The Terraform stack provisions three CloudWatch alarms over the `bedrock-agentcore` namespace and an SNS topic to fan them out (`terraform/observability.tf`). Set `alarm_email_subscriptions` in `terraform.tfvars` if you want email notifications:
+The Terraform stack provisions three CloudWatch alarms over the `bedrock-agentcore` namespace and an SNS topic to fan them out (`modules/sre-on-call/observability.tf`). Set `alarm_email_subscriptions` in `terraform.tfvars` if you want email notifications:
 
 ```hcl
 alarm_email_subscriptions = ["sre-pager@example.com"]
@@ -157,7 +157,7 @@ For agent code changes:
 ```bash
 AWS_PROFILE=<profile> ./scripts/build_and_push_agents.sh <new-tag>
 
-cd terraform
+cd examples/complete
 AWS_PROFILE=<profile> terraform plan \
     -var 'agent_image_tag=<new-tag>' \
     -out=/tmp/plan
@@ -220,12 +220,12 @@ AWS_PROFILE=<profile> aws secretsmanager put-secret-value \
 
 Lambda + agent containers resolve secrets via `shared.secrets.resolve_secret` on every invocation, so rotation takes effect without redeploy. AgentCore container env vars hold the secret **ARN**, not the value, so there's nothing to update on the runtime.
 
-If a Lambda environment variable held the value directly (legacy path), bump `SECRET_REFRESH` in `terraform/lambda.tf` to force a new Lambda version.
+If a Lambda environment variable held the value directly (legacy path), bump `SECRET_REFRESH` in `modules/sre-on-call/lambda.tf` to force a new Lambda version.
 
 ## Tear-down
 
 ```bash
-cd terraform
+cd examples/complete
 AWS_PROFILE=<profile> terraform destroy
 ```
 

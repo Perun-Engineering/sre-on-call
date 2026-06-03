@@ -51,3 +51,16 @@ variable "lambda_provisioned_concurrency" {
   default     = 1
 }
 
+
+# ── Module source wiring ─────────────────────────────────────────────────────
+
+variable "config_path" {
+  description = "Path to config.yaml listing each agent's enabled skills/MCPs. Read at plan time to decide which specialized agents are deployed; must match the config.yaml baked into the agent images."
+  type        = string
+}
+
+variable "source_root" {
+  description = "Filesystem root containing lambda_adapter/, shared/, pyproject.toml and .venv/ — used to build the Lambda function zip and dependency layer. Defaults to the calling root module's directory."
+  type        = string
+  default     = ""
+}

@@ -5,7 +5,7 @@
 #   AWS_PROFILE=<profile> ./scripts/build_and_push_agents.sh [TAG]
 #
 # Defaults to TAG=$(git rev-parse --short HEAD) when not provided.
-# Requires the ECR repos to exist (terraform apply -target=aws_ecr_repository.agents).
+# Requires the ECR repos to exist (terraform apply -target=module.sre_on_call.aws_ecr_repository.agents).
 
 set -euo pipefail
 

@@ -1,0 +1,17 @@
+# Copy to terraform.tfvars and fill in. No secrets here — Slack/Discord
+# credentials are hydrated into Secrets Manager separately by
+# scripts/hydrate_secrets.sh, not through Terraform variables.
+
+aws_region   = "us-east-1"
+environment  = "dev"
+project_name = "sre-on-call"
+
+# Required. The ECR registry holding the agent images (one repo per agent).
+agent_container_registry = "<account-id>.dkr.ecr.us-east-1.amazonaws.com"
+agent_image_tag          = "latest"
+
+# Set when the eks agent is enabled in config.yaml; leave "" otherwise.
+eks_cluster_name = ""
+
+# model_id                  = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+# alarm_email_subscriptions = ["sre@example.com"]

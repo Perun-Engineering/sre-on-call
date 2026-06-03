@@ -28,15 +28,15 @@ None.
 
 ## IAM
 
-The `eks_agent` IAM role (see [`terraform/iam.tf`](../../terraform/iam.tf), plus the shared runtime-execution attachments in [`terraform/iam_agentcore.tf`](../../terraform/iam_agentcore.tf)) carries:
+The `eks_agent` IAM role (see [`modules/sre-on-call/iam.tf`](../../modules/sre-on-call/iam.tf), plus the shared runtime-execution attachments in [`modules/sre-on-call/iam_agentcore.tf`](../../modules/sre-on-call/iam_agentcore.tf)) carries:
 
 - `eks:DescribeCluster` on `arn:aws:eks:<region>:<account>:cluster/*` — required to retrieve the cluster endpoint and CA certificate.
 
-The role is also registered as an EKS Access Entry on cluster `eks-uat` with the `AmazonEKSViewPolicy` (cluster-scoped). See `terraform/networking.tf` for the access-entry configuration.
+The role is also registered as an EKS Access Entry on cluster `eks-uat` with the `AmazonEKSViewPolicy` (cluster-scoped). See `modules/sre-on-call/networking.tf` for the access-entry configuration.
 
 ## Network requirements
 
-The EKS agent runs in `network_mode: VPC` because the target cluster's API endpoint is private (`endpointPublicAccess=false`). The agent's runtime is attached to the cluster's VPC (resolved from `eks_cluster_name` at apply time) on private subnets in supported AgentCore AZs (`use1-az1`, `use1-az2`, `use1-az4`). Reachability is one-way: the agent's SG has unrestricted egress, and an ingress rule on the *cluster's* security group (`cluster_ingress_from_agent` in `terraform/networking.tf`) allows 443 from the agent's SG.
+The EKS agent runs in `network_mode: VPC` because the target cluster's API endpoint is private (`endpointPublicAccess=false`). The agent's runtime is attached to the cluster's VPC (resolved from `eks_cluster_name` at apply time) on private subnets in supported AgentCore AZs (`use1-az1`, `use1-az2`, `use1-az4`). Reachability is one-way: the agent's SG has unrestricted egress, and an ingress rule on the *cluster's* security group (`cluster_ingress_from_agent` in `modules/sre-on-call/networking.tf`) allows 443 from the agent's SG.
 
 ## Local dev
 
