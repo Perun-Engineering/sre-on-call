@@ -22,13 +22,13 @@ None.
 
 ## IAM
 
-The `master_agent` IAM role (see `terraform/iam.tf`) carries:
+The `master_agent` IAM role (see `modules/sre-on-call/iam.tf`) carries:
 
 - `bedrock-agentcore:InvokeAgentRuntime` on each specialized runtime ARN — required to fan out via the A2A client.
 - `secretsmanager:GetSecretValue` on the Slack and Discord bot-token secrets — required to post chat replies.
 - `dynamodb:PutItem` on the experiment-results table — required to record A/B experiment outcomes.
 
-Runtime-execution permissions shared across every agent role (ECR image pull, CloudWatch Logs, X-Ray, Bedrock model invocation, workload tokens) are attached in [`terraform/iam_agentcore.tf`](../../terraform/iam_agentcore.tf).
+Runtime-execution permissions shared across every agent role (ECR image pull, CloudWatch Logs, X-Ray, Bedrock model invocation, workload tokens) are attached in [`modules/sre-on-call/iam_agentcore.tf`](../../modules/sre-on-call/iam_agentcore.tf).
 
 ## Local dev
 

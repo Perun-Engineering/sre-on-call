@@ -43,7 +43,7 @@ locals {
   # `enabled` defaults to true if omitted (matches shared/config.py / shared/agents.py).
   # An agent absent from config.yaml is treated as not deployed (resources are
   # not created for it) — see shared/agents.py docstring for the lifecycle.
-  config_yaml = yamldecode(file("${path.module}/../config.yaml"))
+  config_yaml = yamldecode(file(var.config_path))
   agent_enabled = {
     for name in ["slack_scanner", "discord_scanner", "cloudwatch_logs", "eks"] :
     name => contains(keys(local.config_yaml.agents), name) && lookup(local.config_yaml.agents[name], "enabled", true)

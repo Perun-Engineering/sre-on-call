@@ -26,7 +26,7 @@ Configured in [`config.yaml`](../../config.yaml) under `agents.cloudwatch_logs.m
 
 ## IAM
 
-The `cloudwatch_logs_agent` IAM role (see [`terraform/iam.tf`](../../terraform/iam.tf), plus the shared runtime-execution attachments in [`terraform/iam_agentcore.tf`](../../terraform/iam_agentcore.tf)) carries:
+The `cloudwatch_logs_agent` IAM role (see [`modules/sre-on-call/iam.tf`](../../modules/sre-on-call/iam.tf), plus the shared runtime-execution attachments in [`modules/sre-on-call/iam_agentcore.tf`](../../modules/sre-on-call/iam_agentcore.tf)) carries:
 
 - `logs:DescribeLogGroups` — required to validate that derived log group names exist.
 - `logs:StartQuery`, `logs:GetQueryResults` — required to run Insights queries against log groups in the deployment account/region.

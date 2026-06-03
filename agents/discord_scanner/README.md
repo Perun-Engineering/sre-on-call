@@ -20,7 +20,7 @@ None.
 
 ## IAM
 
-The `discord_scanner_agent` IAM role (see [`terraform/iam.tf`](../../terraform/iam.tf), plus the shared runtime-execution attachments in [`terraform/iam_agentcore.tf`](../../terraform/iam_agentcore.tf)) carries:
+The `discord_scanner_agent` IAM role (see [`modules/sre-on-call/iam.tf`](../../modules/sre-on-call/iam.tf), plus the shared runtime-execution attachments in [`modules/sre-on-call/iam_agentcore.tf`](../../modules/sre-on-call/iam_agentcore.tf)) carries:
 
 - `secretsmanager:GetSecretValue` on the Discord bot-token secret — required to call the Discord REST API.
 
@@ -34,4 +34,4 @@ Defaults to port 9000. To run alongside the master agent, override: `A2A_PORT=90
 
 `DISCORD_BOT_TOKEN` must be set to either a Secrets Manager ARN (resolved at runtime) or a literal token (for local dev).
 
-> `config.yaml` carries an `enabled` flag per agent (`shared/config.py:AgentConfig.enabled`) but the build/deploy plumbing (Dockerfile per-agent matrix and `terraform/agentcore.tf`) does not yet read it — disabling the agent here today still leaves the runtime deployed. Use `ENABLED_AGENTS` on the master to scope fan-out instead.
+> `config.yaml` carries an `enabled` flag per agent (`shared/config.py:AgentConfig.enabled`) but the build/deploy plumbing (Dockerfile per-agent matrix and `modules/sre-on-call/agentcore.tf`) does not yet read it — disabling the agent here today still leaves the runtime deployed. Use `ENABLED_AGENTS` on the master to scope fan-out instead.

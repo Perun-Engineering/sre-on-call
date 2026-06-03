@@ -34,7 +34,7 @@ the repo.
 - The deployed Lambda **function URL** — this is the Request URL for both the
   event subscription and the slash command:
   ```bash
-  cd terraform && AWS_PROFILE=<profile> terraform output -raw lambda_function_url
+  cd examples/complete && AWS_PROFILE=<profile> terraform output -raw lambda_function_url
   # e.g. https://abc123.lambda-url.us-east-1.on.aws/
   ```
   You can create the app before the endpoint is live (see the ordering note in
@@ -178,7 +178,7 @@ synthetic webhook from [`docs/testing.md`](testing.md):
 
 ```bash
 SLACK_SIGNING_SECRET=… ./scripts/synthetic_slack_webhook.py \
-    --url "$(cd terraform && terraform output -raw lambda_function_url)" \
+    --url "$(cd examples/complete && terraform output -raw lambda_function_url)" \
     --channel <channel-id> --team <team-id>
 ```
 
