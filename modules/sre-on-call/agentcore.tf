@@ -26,10 +26,24 @@ variable "model_id" {
   default     = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 }
 
+variable "enable_bedrock_guardrail" {
+  description = "Attach a Bedrock Guardrail (prompt-attack filtering) to every agent's model invocations. Defence-in-depth against prompt injection in ingested incident content; adds per-call latency and cost. Opt-in."
+  type        = bool
+  default     = false
+}
+
 # ── Locals ───────────────────────────────────────────────────────────────────
 
 locals {
   agent_prefix = "${var.project_name}-${var.environment}"
+
+  # Guardrail env injected into every runtime when enabled; empty map (no-op)
+  # otherwise. shared.a2a_factory._resolve_model reads these to bind the model
+  # to the guardrail — unset means no guardrail, preserving prior behaviour.
+  guardrail_env = var.enable_bedrock_guardrail ? {
+    BEDROCK_GUARDRAIL_ID      = aws_bedrock_guardrail.agents[0].guardrail_id
+    BEDROCK_GUARDRAIL_VERSION = aws_bedrock_guardrail.agents[0].version
+  } : {}
 
   agent_images = {
     master          = "${var.agent_container_registry}/${var.project_name}-master:${var.agent_image_tag}"
@@ -47,6 +61,33 @@ locals {
   agent_enabled = {
     for name in ["slack_scanner", "discord_scanner", "cloudwatch_logs", "eks"] :
     name => contains(keys(local.config_yaml.agents), name) && lookup(local.config_yaml.agents[name], "enabled", true)
+  }
+}
+
+# ── Guardrail (opt-in) ────────────────────────────────────────────────────
+
+# Prompt-attack filtering for every agent. Ingested incident content
+# (Slack/Discord messages, CloudWatch logs, EKS events) is untrusted; the
+# PROMPT_ATTACK filter screens it on input before the model reasons over it.
+# PROMPT_ATTACK is an input-only filter, so output_strength must be NONE.
+resource "aws_bedrock_guardrail" "agents" {
+  count = var.enable_bedrock_guardrail ? 1 : 0
+
+  name                      = "${local.agent_prefix}-agents"
+  description               = "Prompt-attack filtering for sre-on-call agents (ingested incident content is untrusted)."
+  blocked_input_messaging   = "This input was blocked by the content guardrail."
+  blocked_outputs_messaging = "This response was blocked by the content guardrail."
+
+  content_policy_config {
+    filters_config {
+      type            = "PROMPT_ATTACK"
+      input_strength  = "HIGH"
+      output_strength = "NONE"
+    }
+  }
+
+  tags = {
+    Project = var.project_name
   }
 }
 
@@ -73,11 +114,11 @@ resource "aws_bedrockagentcore_agent_runtime" "slack_scanner" {
     server_protocol = "A2A"
   }
 
-  environment_variables = {
+  environment_variables = merge(local.guardrail_env, {
     AWS_REGION      = var.aws_region
     MODEL_ID        = var.model_id
     SLACK_BOT_TOKEN = aws_secretsmanager_secret.slack_bot_token.arn
-  }
+  })
 
   tags = {
     Agent = "slack_scanner"
@@ -105,11 +146,11 @@ resource "aws_bedrockagentcore_agent_runtime" "discord_scanner" {
     server_protocol = "A2A"
   }
 
-  environment_variables = {
+  environment_variables = merge(local.guardrail_env, {
     AWS_REGION        = var.aws_region
     MODEL_ID          = var.model_id
     DISCORD_BOT_TOKEN = aws_secretsmanager_secret.discord_bot_token.arn
-  }
+  })
 
   tags = {
     Agent = "discord_scanner"
@@ -137,10 +178,10 @@ resource "aws_bedrockagentcore_agent_runtime" "cloudwatch_logs" {
     server_protocol = "A2A"
   }
 
-  environment_variables = {
+  environment_variables = merge(local.guardrail_env, {
     AWS_REGION = var.aws_region
     MODEL_ID   = var.model_id
-  }
+  })
 
   tags = {
     Agent = "cloudwatch_logs"
@@ -175,11 +216,11 @@ resource "aws_bedrockagentcore_agent_runtime" "eks" {
     server_protocol = "A2A"
   }
 
-  environment_variables = {
+  environment_variables = merge(local.guardrail_env, {
     AWS_REGION       = var.aws_region
     MODEL_ID         = var.model_id
     EKS_CLUSTER_NAME = var.eks_cluster_name
-  }
+  })
 
   tags = {
     Agent = "eks"
@@ -208,6 +249,7 @@ resource "aws_bedrockagentcore_agent_runtime" "master" {
   }
 
   environment_variables = merge(
+    local.guardrail_env,
     {
       AWS_REGION         = var.aws_region
       MODEL_ID           = var.model_id

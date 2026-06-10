@@ -161,9 +161,23 @@ def _resolve_model(default_model_id: str | None = None) -> BedrockModel:
     1. ``MODEL_ID`` env var (deploy-time override).
     2. ``default_model_id`` arg (typically ``ProjectConfig.defaults.model_id``).
     3. ``DEFAULT_MODEL_ID`` module constant (last-resort fallback).
+
+    Defence-in-depth: when ``BEDROCK_GUARDRAIL_ID`` is set, the model is
+    bound to that Bedrock Guardrail (prompt-attack / content filtering on
+    every invocation). ``BEDROCK_GUARDRAIL_VERSION`` selects the version,
+    defaulting to ``DRAFT``. Unset → no guardrail (unchanged behaviour).
     """
     model_id = os.environ.get("MODEL_ID") or default_model_id or DEFAULT_MODEL_ID
-    return BedrockModel(model_id=model_id)
+
+    guardrail_id = os.environ.get("BEDROCK_GUARDRAIL_ID") or None
+    if guardrail_id is None:
+        return BedrockModel(model_id=model_id)
+
+    return BedrockModel(
+        model_id=model_id,
+        guardrail_id=guardrail_id,
+        guardrail_version=os.environ.get("BEDROCK_GUARDRAIL_VERSION") or "DRAFT",
+    )
 
 
 def _load_card(agent_dir: pathlib.Path) -> dict:

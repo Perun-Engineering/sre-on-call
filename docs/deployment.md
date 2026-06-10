@@ -209,6 +209,28 @@ variable — `config.yaml` is the only switch. Validate before applying:
 python -m shared.config validate
 ```
 
+## Prompt-injection guardrail (opt-in)
+
+Agents ingest untrusted content (Slack/Discord messages, CloudWatch logs,
+EKS events). The primary defence is structural — agents dispatch one tool
+and echo its output verbatim rather than reasoning over the content, and
+the transport footer is sanitised against marker spoofing. As
+defence-in-depth you can bind every agent's model invocations to a Bedrock
+Guardrail with prompt-attack filtering:
+
+```bash
+AWS_PROFILE=<profile> terraform apply \
+    -var 'agent_image_tag=<tag>' \
+    -var 'enable_bedrock_guardrail=true'
+```
+
+This creates an `aws_bedrock_guardrail` (PROMPT_ATTACK filter, `HIGH` on
+input) and injects `BEDROCK_GUARDRAIL_ID` / `BEDROCK_GUARDRAIL_VERSION`
+into each runtime; `shared.a2a_factory._resolve_model` reads them to attach
+the guardrail. Off by default — it adds per-call latency and cost. Tune the
+filter strengths or add denied-topic / PII policies on the guardrail
+resource in `modules/sre-on-call/agentcore.tf`.
+
 ## Secret rotation
 
 ```bash
