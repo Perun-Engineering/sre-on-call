@@ -27,6 +27,27 @@ from typing import Callable, Generic, TypeVar
 
 T = TypeVar("T")
 
+# Marker delimiters are exactly three angle brackets (``<<<KIND `` / `` KIND>>>``).
+# Collapsing any run of 3+ angle brackets to 2 makes it impossible for untrusted
+# text to *contain* a marker delimiter — so embedded content can neither forge a
+# footer nor break the legitimate one. Runs are collapsed (not stripped) so the
+# regex can't reconstruct a triple from adjacent pairs (e.g. ``<<<<`` → ``<<``).
+_OPEN_DELIM_RE = re.compile(r"<{3,}")
+_CLOSE_DELIM_RE = re.compile(r">{3,}")
+
+
+def neutralize_markers(text: str) -> str:
+    """Render *text* unable to contain a footer marker delimiter.
+
+    Used on every untrusted span before it is placed into an agent's text
+    response — both the human-readable body and the JSON footer payload — so
+    that ingested content (Slack/Discord messages, log lines, k8s events)
+    cannot spoof or suppress the structured ``AGENT_RESULT`` footer the master
+    orchestrator parses.
+    """
+    text = _OPEN_DELIM_RE.sub("<<", text)
+    return _CLOSE_DELIM_RE.sub(">>", text)
+
 
 class AgentFooter(Generic[T]):
     """Marker-delimited footer for a single structured payload type.
@@ -75,6 +96,9 @@ class AgentFooter(Generic[T]):
         dataclass. Compact JSON separators keep the footer one-liner-friendly.
         """
         body = json.dumps(asdict(payload), separators=(",", ":"))  # type: ignore[arg-type]
+        # Neutralise any marker delimiter carried in string values (untrusted
+        # finding content) so it cannot prematurely close this footer's body.
+        body = neutralize_markers(body)
         return f"{self._prefix}{body}{self._suffix}"
 
     def extract(self, text: str) -> tuple[str, T | None]:
@@ -89,9 +113,13 @@ class AgentFooter(Generic[T]):
         ``cleaned_text`` is the input with the matched footer block
         removed and surrounding whitespace trimmed.
         """
-        match = self._re.search(text)
-        if match is None:
+        # Take the LAST matching footer: the legitimate footer is always
+        # appended at the very end of the response, so any earlier marker pair
+        # is untrusted preamble (a spoof) and must not win.
+        matches = list(self._re.finditer(text))
+        if not matches:
             return text, None
+        match = matches[-1]
         cleaned = self._re.sub("", text).strip()
         try:
             payload_dict = json.loads(match.group(1))
