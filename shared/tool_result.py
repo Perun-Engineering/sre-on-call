@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from shared.agent_footer import AgentFooter
+from shared.agent_footer import AgentFooter, neutralize_markers
 from shared.models import (
     AgentMetadata,
     AgentResult,
@@ -113,7 +113,10 @@ def format_result(agent_result: AgentResult) -> str:
                 f"{f.content[:_MAX_CONTENT_LENGTH]}"
             )
 
-    return "\n".join(lines) + "\n\n" + AGENT_RESULT.encode(agent_result)
+    # Neutralise marker delimiters in the readable body (which interpolates
+    # untrusted finding content) so a planted footer marker can't suppress the
+    # legitimate footer appended below. The footer itself is encoded separately.
+    return neutralize_markers("\n".join(lines)) + "\n\n" + AGENT_RESULT.encode(agent_result)
 
 
 def format_snapshot_result(report: SnapshotReport) -> str:
@@ -137,7 +140,7 @@ def format_snapshot_result(report: SnapshotReport) -> str:
                 lines.append(f"  - {entry}")
         else:
             lines.append("  (no data)")
-    return "\n".join(lines) + "\n\n" + SNAPSHOT_RESULT.encode(report)
+    return neutralize_markers("\n".join(lines)) + "\n\n" + SNAPSHOT_RESULT.encode(report)
 
 
 # ---------------------------------------------------------------------------

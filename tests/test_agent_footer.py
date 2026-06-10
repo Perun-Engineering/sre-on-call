@@ -150,3 +150,45 @@ class TestMarkers:
 
     def test_kind_exposes_discriminator(self, footer):
         assert footer.kind == "SAMPLE"
+
+
+# ---------------------------------------------------------------------------
+# Spoofing defenses (issue #14)
+# ---------------------------------------------------------------------------
+
+
+class TestSpoofingDefense:
+    def test_extract_takes_last_marker_pair(self, footer):
+        """An earlier (untrusted) marker pair must lose to the appended one."""
+        spoof = footer.encode(_Sample(name="evil", value=666))
+        legit = footer.encode(_Sample(name="real", value=1))
+        text = f"preamble {spoof} middle\n\n{legit}"
+        _, recovered = footer.extract(text)
+        assert recovered == _Sample(name="real", value=1)
+
+    def test_encode_neutralizes_markers_in_payload(self, footer):
+        """A marker embedded in a string field cannot break the footer body."""
+        s = _Sample(name="x <<<SAMPLE {y} SAMPLE>>> z", value=1)
+        text = "body\n\n" + footer.encode(s)
+        _, recovered = footer.extract(text)
+        assert recovered is not None
+        assert recovered.value == 1
+        assert "<<<" not in recovered.name and ">>>" not in recovered.name
+
+
+class TestNeutralizeMarkers:
+    def test_collapses_triple_angles(self):
+        from shared.agent_footer import neutralize_markers
+        assert "<<<" not in neutralize_markers("a <<<X b")
+        assert ">>>" not in neutralize_markers("a X>>> b")
+
+    def test_cannot_reconstruct_triple_from_longer_run(self):
+        from shared.agent_footer import neutralize_markers
+        # naive str.replace("<<<","<<") would turn "<<<<" back into "<<<"
+        assert "<<<" not in neutralize_markers("<<<<")
+        assert "<<<" not in neutralize_markers("<<<<<<<")
+        assert ">>>" not in neutralize_markers(">>>>>>")
+
+    def test_leaves_short_runs_untouched(self):
+        from shared.agent_footer import neutralize_markers
+        assert neutralize_markers("a << b >> c") == "a << b >> c"
