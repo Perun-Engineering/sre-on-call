@@ -46,6 +46,12 @@ variable "model_id" {
   default     = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 }
 
+variable "enable_bedrock_guardrail" {
+  description = "Attach a Bedrock Guardrail (prompt-attack filtering) to every agent's model invocations. Defence-in-depth; adds per-call latency and cost. Opt-in."
+  type        = bool
+  default     = false
+}
+
 variable "alarm_email_subscriptions" {
   description = "Email addresses subscribed to the AgentCore CloudWatch alarm SNS topic"
   type        = list(string)

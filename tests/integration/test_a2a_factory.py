@@ -33,6 +33,28 @@ def test_resolve_model_treats_empty_env_as_unset(monkeypatch: pytest.MonkeyPatch
     assert _resolve_model().get_config()["model_id"] == DEFAULT_MODEL_ID  # type: ignore[typeddict-item]
 
 
+def test_resolve_model_no_guardrail_when_env_unset(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("BEDROCK_GUARDRAIL_ID", raising=False)
+    cfg = _resolve_model().get_config()
+    assert cfg.get("guardrail_id") is None  # type: ignore[typeddict-item]
+
+
+def test_resolve_model_attaches_guardrail_when_env_set(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("BEDROCK_GUARDRAIL_ID", "gr-abc123")
+    monkeypatch.setenv("BEDROCK_GUARDRAIL_VERSION", "3")
+    cfg = _resolve_model().get_config()
+    assert cfg["guardrail_id"] == "gr-abc123"  # type: ignore[typeddict-item]
+    assert cfg["guardrail_version"] == "3"  # type: ignore[typeddict-item]
+
+
+def test_resolve_model_guardrail_version_defaults_to_draft(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("BEDROCK_GUARDRAIL_ID", "gr-abc123")
+    monkeypatch.delenv("BEDROCK_GUARDRAIL_VERSION", raising=False)
+    cfg = _resolve_model().get_config()
+    assert cfg["guardrail_id"] == "gr-abc123"  # type: ignore[typeddict-item]
+    assert cfg["guardrail_version"] == "DRAFT"  # type: ignore[typeddict-item]
+
+
 @pytest.mark.asyncio
 async def test_executor_serialises_concurrent_invocations(monkeypatch: pytest.MonkeyPatch):
     """Regression: AgentCore's edge can retry an invoke while the first is in

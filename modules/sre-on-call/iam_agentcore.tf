@@ -91,6 +91,10 @@ data "aws_iam_policy_document" "agentcore_runtime_exec" {
     actions = [
       "bedrock:InvokeModel",
       "bedrock:InvokeModelWithResponseStream",
+      # Required when var.enable_bedrock_guardrail binds the model to a
+      # guardrail (the InvokeModel call then carries a guardrail identifier).
+      # Harmless no-op when no guardrail is attached.
+      "bedrock:ApplyGuardrail",
     ]
     resources = ["*"]
   }
