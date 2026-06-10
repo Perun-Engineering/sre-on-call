@@ -200,6 +200,16 @@ class MarkupDialect:
         """Format a hyperlink.  Subclasses override via class-level override."""
         raise NotImplementedError  # pragma: no cover
 
+    def escape_untrusted(self, text: str) -> str:
+        """Neutralise platform control sequences in attacker-influenced text.
+
+        Applied to every span that carries ingested content (Slack/Discord
+        messages, log lines, k8s events) so a planted mention, link, or
+        mass-ping renders as inert literal text. Default: identity —
+        subclasses override per markup flavour.
+        """
+        return text
+
     def normalize(self, text: str) -> str:
         """Translate agent-produced CommonMark into this platform's markup.
 
@@ -219,9 +229,19 @@ class SlackDialect(MarkupDialect):
     def format_link(self, url: str, label: str) -> str:
         return f"<{url}|{label}>"
 
+    def escape_untrusted(self, text: str) -> str:
+        # Slack mrkdwn treats only `&`, `<`, `>` as control characters;
+        # escaping them renders <!channel>, <@U…>, and <url|label> inert.
+        # `&` first so the entities we introduce aren't re-escaped.
+        return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
     def normalize(self, text: str) -> str:
         if not text:
             return text
+        # Escape ingested control sequences BEFORE introducing our own markup
+        # (bold/links), so attacker text can't form a live mention or link but
+        # the `<url|label>` we generate below survives.
+        text = self.escape_untrusted(text)
         # Force a line break before mid-line headings glued to prose.
         text = _RE_INLINE_HEADING_BREAK.sub(r"\n\n\1", text)
         # Headings render verbatim in Slack (no #-syntax). Promote them to bold.
@@ -245,9 +265,20 @@ class DiscordDialect(MarkupDialect):
     def format_link(self, url: str, label: str) -> str:
         return f"[{label}]({url})"
 
+    def escape_untrusted(self, text: str) -> str:
+        # Break the mass-ping tokens with a zero-width space so they render as
+        # text without notifying @everyone / @here. (The production-grade
+        # control is the API's allowed_mentions; the Discord chat-out path is
+        # currently stubbed, so this is defence-in-depth for rendered text.)
+        zwsp = "​"  # zero-width space
+        return text.replace("@everyone", f"@{zwsp}everyone").replace(
+            "@here", f"@{zwsp}here"
+        )
+
     def normalize(self, text: str) -> str:
         if not text:
             return text
+        text = self.escape_untrusted(text)
         return _RE_BLANK_LINES.sub("\n\n", text)
 
 
@@ -294,7 +325,7 @@ class MarkupReportRenderer:
             header,
             d.separator,
             f"{d.bold('Severity:')} {sections.severity}",
-            f"{d.bold('Affected Services:')} {sections.affected_services}",
+            f"{d.bold('Affected Services:')} {d.escape_untrusted(sections.affected_services)}",
             f"{d.bold('Time of Detection:')} {sections.time_of_detection}",
         ]
         if sections.totals_line:
@@ -378,7 +409,7 @@ class MarkupReportRenderer:
         parts: list[str] = [
             f"🔎 {d.bold('Investigation Started')}",
             d.separator,
-            f"{d.bold('Alert:')} {sections.alert_text}",
+            f"{d.bold('Alert:')} {d.escape_untrusted(sections.alert_text)}",
             f"{d.bold('Investigation ID:')} {sections.investigation_id}",
             "",
             d.bold("Querying agents:"),
@@ -401,7 +432,7 @@ class MarkupReportRenderer:
             d.normalize(sections.incident_summary),
             "",
             d.bold("Timeline"),
-            sections.timeline,
+            d.escape_untrusted(sections.timeline),
             "",
             d.bold("Root Cause"),
             d.normalize(sections.root_cause),
@@ -410,7 +441,7 @@ class MarkupReportRenderer:
             d.normalize(sections.impact),
             "",
             d.bold("Action Items"),
-            sections.action_items,
+            d.escape_untrusted(sections.action_items),
             "",
             d.bold("Lessons Learned"),
             d.normalize(sections.lessons_learned),
