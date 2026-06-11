@@ -174,12 +174,14 @@ def _agent_result_from_dict(payload: dict) -> AgentResult:
 
 def _finding_from_dict(payload: dict) -> Finding:
     metadata = payload.get("metadata")
+    link = payload.get("link")
     return Finding(
         source=str(payload["source"]),
         timestamp=str(payload["timestamp"]),
         content=str(payload["content"]),
         severity=str(payload["severity"]),
         metadata=metadata if isinstance(metadata, dict) else {},
+        link=str(link) if link is not None else None,
     )
 
 

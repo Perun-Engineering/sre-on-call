@@ -17,6 +17,24 @@ EvidenceStatus = Literal["ok", "pending", "error", "disabled"]
 EnrichmentStatus = Literal["ok", "error"]
 SnapshotStatus = Literal["ok", "anomaly", "error", "disabled"]
 
+# Label for the inline deep link appended to an evidence line that carries one.
+_EVIDENCE_LINK_LABEL = "🔗 view"
+
+
+@dataclass
+class EvidenceLine:
+    """One content line within an :class:`EvidenceBlock`.
+
+    ``text`` is normalized per-dialect like any agent prose. ``link``, when
+    present, is a machine-constructed deep link into the data source that
+    produced the line; the renderer appends it as a platform-native hyperlink
+    and deliberately does *not* normalize it (normalization would maul the
+    URL's escape sequences).
+    """
+
+    text: str
+    link: str | None = None
+
 
 @dataclass
 class EvidenceBlock:
@@ -24,7 +42,7 @@ class EvidenceBlock:
 
     emoji: str
     display_name: str
-    lines: list[str]  # Pre-built content lines (no markup)
+    lines: list[EvidenceLine]  # Pre-built content lines (text + optional deep link)
     metadata_line: str | None = None  # Optional one-liner with model/tokens/cost
     status: EvidenceStatus = "ok"  # drives header marker
 
@@ -545,7 +563,10 @@ class MarkupReportRenderer:
             if b.metadata_line:
                 parts.append(f"_{b.metadata_line}_")
             for line in b.lines:
-                parts.append(f"- {d.normalize(line)}")
+                rendered = f"- {d.normalize(line.text)}"
+                if line.link:
+                    rendered += f" {d.format_link(line.link, _EVIDENCE_LINK_LABEL)}"
+                parts.append(rendered)
         return "\n".join(parts)
 
     def _render_links(self, links: list[tuple[str, str]]) -> str:

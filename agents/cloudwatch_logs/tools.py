@@ -13,6 +13,7 @@ import boto3
 from botocore.exceptions import ClientError
 from strands import tool
 
+from shared.deep_links import cloudwatch_logs_insights_url
 from shared.models import Finding, SnapshotReport, SnapshotSection
 from shared.tool_result import (
     ToolResult,
@@ -105,8 +106,14 @@ def _execute_insights_query(
 def _results_to_findings(
     results: list[list[dict]],
     log_group_names: list[str],
+    link: str | None = None,
 ) -> list[Finding]:
-    """Convert Logs Insights result rows into Finding objects."""
+    """Convert Logs Insights result rows into Finding objects.
+
+    ``link``, when supplied, is the Logs Insights console deep link for the
+    query/window that produced these rows; it is attached to every finding so
+    the report can offer a one-click path back to the source data.
+    """
     findings: list[Finding] = []
     source_label = ", ".join(log_group_names)
 
@@ -131,10 +138,35 @@ def _results_to_findings(
                         if k not in ("@timestamp", "@message", "@ptr")
                     },
                 },
+                link=link,
             )
         )
 
     return findings
+
+
+def _logs_insights_link(
+    client,
+    log_group_names: list[str],
+    query_string: str,
+    start_time: int,
+    end_time: int,
+) -> str | None:
+    """Build the Logs Insights console deep link for a query, fail-open.
+
+    Returns ``None`` when the client's region is unknown or URL construction
+    raises — a missing link must never sink the investigation.
+    """
+    region = getattr(getattr(client, "meta", None), "region_name", None)
+    if not isinstance(region, str) or not region:
+        return None
+    try:
+        return cloudwatch_logs_insights_url(
+            region, log_group_names, query_string, start_time, end_time,
+        )
+    except Exception:  # noqa: BLE001 — link is best-effort; never block on it
+        logger.warning("Failed to build CloudWatch Logs Insights deep link", exc_info=True)
+        return None
 
 
 @tool
@@ -211,6 +243,9 @@ def _execute_query(
         return result
 
     result.scanned_items = existing
+    deep_link = _logs_insights_link(
+        client, existing, query_string, start_time, end_time,
+    )
 
     try:
         status, rows = _execute_insights_query(
@@ -239,10 +274,11 @@ def _execute_query(
                 content="Query timed out — partial results may be included.",
                 severity="warning",
                 metadata={"timeout": True},
+                link=deep_link,
             )
         )
 
-    result.findings.extend(_results_to_findings(rows, existing))
+    result.findings.extend(_results_to_findings(rows, existing, link=deep_link))
 
     return result
 

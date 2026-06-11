@@ -12,6 +12,7 @@ from __future__ import annotations
 from shared.report_renderer import (
     DiscordDialect,
     EvidenceBlock,
+    EvidenceLine,
     FailureNoticeSections,
     InvestigationStartedSections,
     ReportSections,
@@ -64,7 +65,7 @@ def _report_with_evidence_line(line: str) -> ReportSections:
             EvidenceBlock(
                 emoji="💬",
                 display_name="Slack Scanner",
-                lines=[line],
+                lines=[EvidenceLine(line)],
             )
         ],
         impact_assessment="Some impact.",

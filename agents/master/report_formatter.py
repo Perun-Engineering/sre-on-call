@@ -20,6 +20,7 @@ from shared.models import AgentMetadata, AgentResult, AgentFailure, AlertContext
 from shared.report_renderer import (
     EnrichmentSections,
     EvidenceBlock,
+    EvidenceLine,
     EvidenceStatus,
     InvestigationStartedSections,
     PIRSections,
@@ -447,12 +448,14 @@ class ReportFormatter:
         pending_agents: set[str],
         disabled_agents: set[str],
         display_name: str,
-    ) -> tuple[list[str], EvidenceStatus, str | None]:
+    ) -> tuple[list[EvidenceLine], EvidenceStatus, str | None]:
         if result is None and agent_key in disabled_agents:
             return (
                 [
-                    f"🚫 {display_name} is disabled in this deployment "
-                    f"— investigate manually if relevant"
+                    EvidenceLine(
+                        f"🚫 {display_name} is disabled in this deployment "
+                        f"— investigate manually if relevant"
+                    )
                 ],
                 "disabled",
                 None,
@@ -460,15 +463,17 @@ class ReportFormatter:
         if result is None and agent_key in pending_agents:
             return (
                 [
-                    f"⏳ {display_name} still investigating — results will arrive "
-                    f"in a follow-up update"
+                    EvidenceLine(
+                        f"⏳ {display_name} still investigating — results will arrive "
+                        f"in a follow-up update"
+                    )
                 ],
                 "pending",
                 None,
             )
         if isinstance(result, AgentFailure):
             return (
-                [f"⚠️ {display_name} data unavailable: {result.error_message}"],
+                [EvidenceLine(f"⚠️ {display_name} data unavailable: {result.error_message}")],
                 "error",
                 _format_metadata_line(result.metadata),
             )
@@ -476,8 +481,10 @@ class ReportFormatter:
             reason = result.error_message or "agent reported unhealthy"
             return (
                 [
-                    f"🚫 {display_name} reported unhealthy: {reason} "
-                    f"— investigate agent configuration"
+                    EvidenceLine(
+                        f"🚫 {display_name} reported unhealthy: {reason} "
+                        f"— investigate agent configuration"
+                    )
                 ],
                 "disabled",
                 _format_metadata_line(result.metadata),
@@ -485,18 +492,18 @@ class ReportFormatter:
         if isinstance(result, AgentResult) and result.status == "error":
             error_detail = result.error_message or "unknown error"
             return (
-                [f"⚠️ {display_name} data unavailable: {error_detail}"],
+                [EvidenceLine(f"⚠️ {display_name} data unavailable: {error_detail}")],
                 "error",
                 _format_metadata_line(result.metadata),
             )
         if isinstance(result, AgentResult) and result.status == "success":
             lines = (
-                [f.content for f in result.findings]
+                [EvidenceLine(f.content, f.link) for f in result.findings]
                 if result.findings
-                else [f"No notable findings from {display_name}"]
+                else [EvidenceLine(f"No notable findings from {display_name}")]
             )
             return lines, "ok", _format_metadata_line(result.metadata)
-        return [f"⚠️ {display_name} data unavailable"], "error", None
+        return [EvidenceLine(f"⚠️ {display_name} data unavailable")], "error", None
 
     def _build_impact_assessment(
         self,
