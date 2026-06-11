@@ -15,6 +15,8 @@ from shared.agent_footer import AgentFooter, neutralize_markers
 from shared.models import (
     AgentMetadata,
     AgentResult,
+    ChartDescriptor,
+    ChartSeries,
     Finding,
     SnapshotReport,
     SnapshotSection,
@@ -30,6 +32,7 @@ class ToolResult:
     findings: list[Finding] = field(default_factory=list)
     scanned_items: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    chart_series: dict[str, ChartSeries] = field(default_factory=dict)  # chart_id -> series
 
 
 def severity_from_text(text: str) -> str:
@@ -66,6 +69,7 @@ def build_agent_result(agent_name: str, result: ToolResult) -> AgentResult:
         findings=result.findings,
         summary=" ".join(parts),
         error_message="; ".join(result.errors) if result.errors else None,
+        chart_series=result.chart_series,
     )
 
 
@@ -161,6 +165,7 @@ def _agent_result_from_dict(payload: dict) -> AgentResult:
         if isinstance(metadata_payload, dict)
         else AgentMetadata()
     )
+    chart_series = _chart_series_map_from_dict(payload.get("chart_series"))
     return AgentResult(
         agent_name=str(payload["agent_name"]),
         status=str(payload["status"]),
@@ -169,12 +174,19 @@ def _agent_result_from_dict(payload: dict) -> AgentResult:
         error_message=payload.get("error_message"),
         duration_seconds=float(payload.get("duration_seconds") or 0.0),
         metadata=metadata,
+        chart_series=chart_series,
     )
 
 
 def _finding_from_dict(payload: dict) -> Finding:
     metadata = payload.get("metadata")
     link = payload.get("link")
+    chart_payload = payload.get("chart")
+    chart = (
+        _chart_descriptor_from_dict(chart_payload)
+        if isinstance(chart_payload, dict)
+        else None
+    )
     return Finding(
         source=str(payload["source"]),
         timestamp=str(payload["timestamp"]),
@@ -182,7 +194,45 @@ def _finding_from_dict(payload: dict) -> Finding:
         severity=str(payload["severity"]),
         metadata=metadata if isinstance(metadata, dict) else {},
         link=str(link) if link is not None else None,
+        chart=chart,
     )
+
+
+def _chart_descriptor_from_dict(payload: dict) -> ChartDescriptor:
+    return ChartDescriptor(
+        chart_id=str(payload["chart_id"]),
+        source=str(payload["source"]),
+        log_groups=[str(g) for g in payload.get("log_groups", [])],
+        query=str(payload["query"]),
+        start_epoch=int(payload["start_epoch"]),
+        end_epoch=int(payload["end_epoch"]),
+    )
+
+
+def _chart_series_from_dict(payload: dict) -> ChartSeries:
+    points = payload.get("points")
+    return ChartSeries(
+        points=[p for p in points if isinstance(p, dict)]
+        if isinstance(points, list)
+        else [],
+        series_kind=str(payload.get("series_kind", "log_rows")),
+        truncated=bool(payload.get("truncated", False)),
+    )
+
+
+def _chart_series_map_from_dict(payload: object) -> dict[str, ChartSeries]:
+    """Reconstruct the ``chart_id -> ChartSeries`` map, dropping bad entries."""
+    if not isinstance(payload, dict):
+        return {}
+    out: dict[str, ChartSeries] = {}
+    for key, value in payload.items():
+        if not isinstance(value, dict):
+            continue
+        try:
+            out[str(key)] = _chart_series_from_dict(value)
+        except Exception:  # noqa: BLE001 — silent-drop per footer contract
+            continue
+    return out
 
 
 def _metadata_from_dict(payload: dict) -> AgentMetadata:

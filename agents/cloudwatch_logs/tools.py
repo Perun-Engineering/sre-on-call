@@ -6,6 +6,7 @@ Requirements: 6.1, 6.2, 6.3, 6.4, 6.5, 9.5
 from __future__ import annotations
 
 import logging
+import os
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -14,7 +15,7 @@ from botocore.exceptions import ClientError
 from strands import tool
 
 from shared.deep_links import cloudwatch_logs_insights_url
-from shared.models import Finding, SnapshotReport, SnapshotSection
+from shared.models import ChartDescriptor, ChartSeries, Finding, SnapshotReport, SnapshotSection
 from shared.tool_result import (
     ToolResult,
     build_agent_result,
@@ -33,6 +34,7 @@ _TERMINAL_STATUSES: frozenset[str] = frozenset({
     "Cancelled",
     "Timeout",
 })
+_CHART_MAX_POINTS: int = 1000
 
 
 def _get_existing_log_groups(
@@ -103,10 +105,27 @@ def _execute_insights_query(
     return _poll_query_results(client, query_id)
 
 
+def _chart_snapshots_enabled() -> bool:
+    """Whether to attach chart descriptors + series. Default on; ``"false"`` disables."""
+    return os.environ.get("CHART_SNAPSHOTS_ENABLED", "true").strip().lower() != "false"
+
+
+def _series_kind(query: str) -> str:
+    """Best-effort: a query containing both ``stats`` and ``bin(`` yields a binned series."""
+    lowered = query.lower()
+    return "binned" if "stats" in lowered and "bin(" in lowered else "log_rows"
+
+
+def _rows_to_points(rows: list[list[dict]]) -> list[dict]:
+    """Flatten Logs Insights result rows into ``{field: value}`` dicts."""
+    return [{item["field"]: item["value"] for item in row} for row in rows]
+
+
 def _results_to_findings(
     results: list[list[dict]],
     log_group_names: list[str],
     link: str | None = None,
+    chart: ChartDescriptor | None = None,
 ) -> list[Finding]:
     """Convert Logs Insights result rows into Finding objects.
 
@@ -139,6 +158,7 @@ def _results_to_findings(
                     },
                 },
                 link=link,
+                chart=chart,
             )
         )
 
@@ -278,7 +298,32 @@ def _execute_query(
             )
         )
 
-    result.findings.extend(_results_to_findings(rows, existing, link=deep_link))
+    chart: ChartDescriptor | None = None
+    if _chart_snapshots_enabled() and status == "Complete" and rows:
+        chart = ChartDescriptor.create(
+            source="cloudwatch_logs_insights",
+            log_groups=existing,
+            query=query_string,
+            start_epoch=start_time,
+            end_epoch=end_time,
+        )
+        points = _rows_to_points(rows)
+        truncated = len(points) > _CHART_MAX_POINTS
+        if truncated:
+            logger.warning(
+                "Chart series %s truncated: %d rows exceed cap %d",
+                chart.chart_id, len(points), _CHART_MAX_POINTS,
+            )
+            points = points[:_CHART_MAX_POINTS]
+        result.chart_series[chart.chart_id] = ChartSeries(
+            points=points,
+            series_kind=_series_kind(query_string),
+            truncated=truncated,
+        )
+
+    result.findings.extend(
+        _results_to_findings(rows, existing, link=deep_link, chart=chart)
+    )
 
     return result
 
