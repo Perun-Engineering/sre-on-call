@@ -43,6 +43,44 @@ async def test_ping_status_reflects_busy_idle_transitions():
     assert _ping_status() == "Healthy"
 
 
+async def test_ping_route_returns_busy_status_over_http():
+    """End-to-end through the real FastAPI /ping route AgentCore polls.
+
+    Exercises the mounted handler over HTTP (not just _ping_status), proving
+    a background task registered in shared.busy_state flips the wire response
+    to HealthyBusy and back. This is the locally-observable equivalent of the
+    nmi-dev ping probe, which AgentCore consumes internally — the runtime's
+    live ping status is not exposed on any AgentCore API.
+    """
+    import httpx
+    from fastapi import FastAPI
+
+    from shared.a2a_factory import _mount_ping
+
+    app = FastAPI()
+    _mount_ping(app)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://probe") as client:
+        assert (await client.get("/ping")).json() == {"status": "Healthy"}
+
+        release = asyncio.Event()
+
+        async def work() -> None:
+            await release.wait()
+
+        task = asyncio.create_task(work())
+        busy_state.track(task)
+        try:
+            assert (await client.get("/ping")).json() == {"status": "HealthyBusy"}
+        finally:
+            release.set()
+            await task
+            await asyncio.sleep(0)
+
+        assert (await client.get("/ping")).json() == {"status": "Healthy"}
+
+
 def test_default_model_is_claude_haiku_4_5():
     assert DEFAULT_MODEL_ID == "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 

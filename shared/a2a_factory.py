@@ -200,6 +200,18 @@ def _ping_status() -> str:
     return "HealthyBusy" if busy_state.is_busy() else "Healthy"
 
 
+def _mount_ping(app) -> None:
+    """Mount the ``GET /ping`` health probe AgentCore polls for instance health.
+
+    Without this, AgentCore declares the runtime unhealthy and 502s every
+    invoke. The body reports :func:`_ping_status`.
+    """
+
+    @app.get("/ping")
+    async def _ping() -> dict[str, str]:
+        return {"status": _ping_status()}
+
+
 def agent_main(agent_dir: str | pathlib.Path) -> None:
     """Full agent lifecycle entry point.
 
@@ -281,10 +293,7 @@ def agent_main(agent_dir: str | pathlib.Path) -> None:
         )
 
         app = server.to_fastapi_app()
-
-        @app.get("/ping")
-        async def _ping() -> dict[str, str]:
-            return {"status": _ping_status()}
+        _mount_ping(app)
 
         logger.info("%s A2A server starting on %s:%d", card["name"], host, port)
         uvicorn.run(app, host=host, port=port)
