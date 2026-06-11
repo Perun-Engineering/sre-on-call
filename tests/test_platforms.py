@@ -307,7 +307,9 @@ class TestSlackPostReply:
         with _patch("slack_sdk.web.async_client.AsyncWebClient", return_value=async_client):
             asyncio.run(platform._post_reply(self._target(thread_anchor="ts-parent"), "hello"))
         async_client.chat_postMessage.assert_awaited_once_with(
-            channel="C1", thread_ts="ts-parent", text="hello",
+            channel="C1", text="hello",
+            unfurl_links=False, unfurl_media=False,
+            thread_ts="ts-parent",
         )
 
     def test_none_anchor_omits_kwarg_for_top_level_post(self) -> None:
@@ -319,7 +321,9 @@ class TestSlackPostReply:
         async_client.chat_postMessage = AsyncMock()
         with _patch("slack_sdk.web.async_client.AsyncWebClient", return_value=async_client):
             asyncio.run(platform._post_reply(self._target(thread_anchor=None), "hello"))
-        async_client.chat_postMessage.assert_awaited_once_with(channel="C1", text="hello")
+        async_client.chat_postMessage.assert_awaited_once_with(
+            channel="C1", text="hello", unfurl_links=False, unfurl_media=False,
+        )
         assert "thread_ts" not in async_client.chat_postMessage.await_args.kwargs
 
 

@@ -234,6 +234,10 @@ class SlackChatPlatform:
         kwargs: dict = {
             "channel": target.channel_id,
             "text": text,
+            # #33 — the incident report carries infra internals and a signed
+            # page link; never unfurl it into preview cards.
+            "unfurl_links": False,
+            "unfurl_media": False,
         }
         # No thread anchor means "post at top-level" — used by /sre-snapshot
         # snapshots, which are operational broadcasts, not thread replies.
