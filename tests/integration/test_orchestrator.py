@@ -199,6 +199,7 @@ def _make_orchestrator(
     initial_deadline: float = 0.1,
     hard_cutoff: float = 0.5,
     registry: AgentRegistry | None = None,
+    synthesizer=None,
 ) -> InvestigationOrchestrator:
     """Create an orchestrator with short timeouts for testing.
 
@@ -212,6 +213,7 @@ def _make_orchestrator(
         chat_platform=chat_platform or FakeChatPlatform(),
         report_formatter=ReportFormatter(registry),
         registry=registry,
+        synthesizer=synthesizer,
     )
     # Override deadlines for fast tests
     orch.INITIAL_DEADLINE_SECONDS = initial_deadline
@@ -1011,3 +1013,97 @@ class TestTraceArchive:
 
             objs = s3.list_objects_v2(Bucket=_TRACE_BUCKET, Prefix="dt=")
             assert objs.get("KeyCount", 0) == 0
+
+
+# ---------------------------------------------------------------------------
+# Tests: LLM synthesis Analysis section (#27)
+# ---------------------------------------------------------------------------
+
+
+class _FakeSynthesizer:
+    """Injectable synthesizer for orchestrator tests.
+
+    Records each (alert, results) call and returns a configurable
+    ``IncidentAnalysis`` (or ``None`` to simulate fail-open).
+    """
+
+    timeout_seconds = 0.0  # no budget reservation in fast tests
+
+    def __init__(self, *, returns="default"):
+        from agents.master.synthesis import IncidentAnalysis
+
+        if returns == "default":
+            returns = IncidentAnalysis(
+                root_cause_hypothesis="service-api CPU saturation",
+                correlation="CPU alert lines up with slow-query logs",
+                confidence="medium",
+                suggested_next_action="Scale out service-api",
+            )
+        self._returns = returns
+        self.calls: list[dict] = []
+
+    async def synthesize(self, alert_context, results):
+        self.calls.append(dict(results))
+        return self._returns
+
+
+class TestOrchestratorSynthesis:
+    @pytest.mark.asyncio
+    async def test_initial_report_contains_analysis(self, alert_context):
+        chat_platform = FakeChatPlatform()
+        synth = _FakeSynthesizer()
+        orch = _make_orchestrator(chat_platform=chat_platform, synthesizer=synth)
+
+        await orch.investigate(alert_context)
+
+        _, _, report_text = _find_report_msg(chat_platform.messages)
+        assert "Analysis" in report_text
+        assert "service-api CPU saturation" in report_text
+        assert synth.calls, "synthesizer should be invoked for the initial report"
+
+    @pytest.mark.asyncio
+    async def test_fail_open_when_synthesis_returns_none(self, alert_context):
+        chat_platform = FakeChatPlatform()
+        synth = _FakeSynthesizer(returns=None)
+        orch = _make_orchestrator(chat_platform=chat_platform, synthesizer=synth)
+
+        await orch.investigate(alert_context)
+
+        _, _, report_text = _find_report_msg(chat_platform.messages)
+        assert "Incident Report" in report_text
+        assert "🧠 Analysis" not in report_text
+
+    @pytest.mark.asyncio
+    async def test_no_synthesis_call_without_synthesizer(self, alert_context):
+        chat_platform = FakeChatPlatform()
+        orch = _make_orchestrator(chat_platform=chat_platform, synthesizer=None)
+
+        await orch.investigate(alert_context)
+
+        _, _, report_text = _find_report_msg(chat_platform.messages)
+        assert "🧠 Analysis" not in report_text
+
+    @pytest.mark.asyncio
+    async def test_enrichment_resynthesizes_per_late_result(self, alert_context):
+        # Agents respond after the initial deadline but before the hard cutoff,
+        # so every result arrives as a late enrichment.
+        http_client = FakeHTTPClient(delay=0.1)
+        chat_platform = FakeChatPlatform()
+        synth = _FakeSynthesizer()
+        orch = _make_orchestrator(
+            http_client=http_client,
+            chat_platform=chat_platform,
+            initial_deadline=0.02,
+            hard_cutoff=1.0,
+            synthesizer=synth,
+        )
+
+        await orch.investigate(alert_context)
+
+        enrichment_texts = [
+            text for _, _, text in chat_platform.messages if "Enrichment Update" in text
+        ]
+        assert enrichment_texts, "expected at least one enrichment update"
+        assert any("Analysis" in t for t in enrichment_texts)
+        # One synthesis for the initial report plus one per late result.
+        assert len(synth.calls) >= 2

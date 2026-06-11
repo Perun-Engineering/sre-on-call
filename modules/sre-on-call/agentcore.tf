@@ -32,6 +32,18 @@ variable "enable_bedrock_guardrail" {
   default     = false
 }
 
+variable "enable_analysis_synthesis" {
+  description = "Enable the master's post-harvest LLM synthesis of a root-cause Analysis section in the Incident Report. Fail-open: a synthesis error/timeout posts the report without the section. Adds one LLM call per report (and per late result)."
+  type        = bool
+  default     = true
+}
+
+variable "synthesis_model_id" {
+  description = "Bedrock model ID for the master's Analysis synthesis call. Empty string falls back to the master's MODEL_ID. Set to a Sonnet-class model for higher-quality root-cause reasoning while dispatch stays on the cheaper model."
+  type        = string
+  default     = ""
+}
+
 # ── Locals ───────────────────────────────────────────────────────────────────
 
 locals {
@@ -281,7 +293,11 @@ resource "aws_bedrockagentcore_agent_runtime" "master" {
       DISCORD_BOT_TOKEN  = aws_secretsmanager_secret.discord_bot_token.arn
       TRACES_BUCKET_NAME = aws_s3_bucket.traces.bucket
       TRACES_TABLE_NAME  = aws_dynamodb_table.traces.name
+      SYNTHESIS_ENABLED  = var.enable_analysis_synthesis ? "true" : "false"
     },
+    var.synthesis_model_id != "" ? {
+      SYNTHESIS_MODEL_ID = var.synthesis_model_id
+    } : {},
     local.agent_enabled["slack_scanner"] ? {
       SLACK_SCANNER_AGENT_RUNTIME_ARN = aws_bedrockagentcore_agent_runtime.slack_scanner[0].agent_runtime_arn
     } : {},

@@ -71,6 +71,23 @@ class FailureNoticeSections:
 
 
 @dataclass
+class AnalysisSection:
+    """LLM-synthesized root-cause analysis rendered above the Evidence blocks.
+
+    Built by the master from a successful synthesis call (see
+    :class:`agents.master.synthesis.IncidentAnalysis`). When ``None`` on the
+    enclosing sections, no Analysis block is rendered and the report is the
+    deterministic concatenation it has always been. The synthesis reasons
+    over the evidence but never rewrites it — Evidence stays verbatim.
+    """
+
+    root_cause_hypothesis: str
+    correlation: str
+    confidence: str  # "low" | "medium" | "high"
+    suggested_next_action: str
+
+
+@dataclass
 class ReportSections:
     """Platform-agnostic structured report data."""
 
@@ -85,6 +102,8 @@ class ReportSections:
     links: list[tuple[str, str]]  # [(url, label), ...] — renderer formats per-platform
     variant_label: str | None = None  # e.g. "[A: Claude Sonnet]"
     totals_line: str | None = None  # Optional aggregate "tokens=…in/…out · cost=$…"
+    # LLM-synthesized root-cause analysis. None → no Analysis block (fail-open).
+    analysis: AnalysisSection | None = None
     # Per-agent raw pieces. When non-empty, the renderer prefers these and
     # normalizes each piece before joining — preserves heading promotion
     # for content that ends up in mid-line position (e.g. inside bullets).
@@ -105,6 +124,8 @@ class EnrichmentSections:
     variant_label: str | None = None
     metadata_line: str | None = None  # Optional one-liner with model/tokens/cost
     status: EnrichmentStatus = "ok"
+    # Re-synthesized analysis over all results so far. None → no Analysis block.
+    analysis: AnalysisSection | None = None
 
 
 @dataclass
@@ -373,6 +394,10 @@ class MarkupReportRenderer:
             "",
             d.bold("Root Cause Hypothesis"),
             self._render_root_cause(sections),
+        ]
+        if sections.analysis is not None:
+            parts += ["", d.bold("🧠 Analysis"), self._render_analysis(sections.analysis)]
+        parts += [
             "",
             d.bold("Evidence"),
             self._render_evidence(sections.evidence_blocks),
@@ -396,6 +421,25 @@ class MarkupReportRenderer:
         if sections.summary_parts:
             return " ".join(self._d.normalize(p) for p in sections.summary_parts)
         return self._d.normalize(sections.summary)
+
+    def _render_analysis(self, analysis: AnalysisSection) -> str:
+        """Render the synthesized analysis as labelled lines.
+
+        The text is LLM-produced prose, so each field is normalized like any
+        agent summary. Structure is fixed (the four synthesis fields); the
+        model only supplies the values.
+        """
+        d = self._d
+        return "\n".join(
+            [
+                f"- {d.bold('Root Cause Hypothesis:')} "
+                f"{d.normalize(analysis.root_cause_hypothesis)}",
+                f"- {d.bold('Correlation:')} {d.normalize(analysis.correlation)}",
+                f"- {d.bold('Confidence:')} {d.normalize(analysis.confidence)}",
+                f"- {d.bold('Suggested Next Action:')} "
+                f"{d.normalize(analysis.suggested_next_action)}",
+            ]
+        )
 
     def _render_root_cause(self, sections: ReportSections) -> str:
         """Prefer per-agent root_cause_parts: each (display, raw_summary) is
@@ -436,6 +480,8 @@ class MarkupReportRenderer:
             d.bold("Updated Assessment:"),
             d.normalize(sections.updated_assessment),
         ]
+        if sections.analysis is not None:
+            parts += ["", d.bold("🧠 Analysis"), self._render_analysis(sections.analysis)]
         return "\n".join(parts)
 
     def render_investigation_started(
