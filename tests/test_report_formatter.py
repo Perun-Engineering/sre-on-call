@@ -638,3 +638,76 @@ class TestUnhealthyAgentEvidence:
 
         assert "⚠️ CloudWatch Logs data unavailable: Connection timeout" in report
         assert "🚫" not in report
+
+
+# ---------------------------------------------------------------------------
+# build_page_model tests (issue #33)
+# ---------------------------------------------------------------------------
+
+from shared.models import (  # noqa: E402
+    AgentMetadata,
+    AgentResult,
+    ChartDescriptor,
+    ChartSeries,
+    Finding,
+)
+from shared.page_model import PageModel
+from shared.report_renderer import AnalysisSection
+
+
+def _chart_finding() -> Finding:
+    desc = ChartDescriptor.create(
+        source="cloudwatch_logs_insights", log_groups=["/aws/x"],
+        query="fields @timestamp", start_epoch=1, end_epoch=2,
+    )
+    return Finding(
+        source="cloudwatch_logs", timestamp="2026-06-12T00:00:00Z",
+        content="error spike", severity="critical",
+        link="https://console", chart=desc,
+    )
+
+
+class TestBuildPageModel:
+    def test_threads_chart_id_when_series_present(self, formatter, alert_context):
+        finding = _chart_finding()
+        cid = finding.chart.chart_id
+        results = {
+            "cloudwatch_logs": AgentResult(
+                agent_name="cloudwatch_logs", status="success",
+                findings=[finding], summary="logs summarised",
+                chart_series={cid: ChartSeries(points=[{"t": 1}])},
+                metadata=AgentMetadata(),
+            )
+        }
+        model = formatter.build_page_model(alert_context, results, analysis=None)
+        assert isinstance(model, PageModel)
+        assert model.chart_ids == [cid]
+        block = next(b for b in model.evidence if b.display_name)
+        assert block.chart_id == cid
+        assert block.lines[0].text == "error spike"
+        assert block.lines[0].link == "https://console"
+        assert model.severity.lower().endswith("critical")
+
+    def test_omits_chart_id_without_series(self, formatter, alert_context):
+        finding = _chart_finding()
+        results = {
+            "cloudwatch_logs": AgentResult(
+                agent_name="cloudwatch_logs", status="success",
+                findings=[finding], summary="s", chart_series={},
+                metadata=AgentMetadata(),
+            )
+        }
+        model = formatter.build_page_model(alert_context, results, analysis=None)
+        assert model.chart_ids == []
+        assert all(b.chart_id is None for b in model.evidence)
+
+    def test_passes_analysis_dict(self, formatter, alert_context):
+        analysis = AnalysisSection(
+            root_cause_hypothesis="rc", correlation="co",
+            confidence="high", suggested_next_action="na",
+        )
+        model = formatter.build_page_model(alert_context, {}, analysis=analysis)
+        assert model.analysis == {
+            "root_cause_hypothesis": "rc", "correlation": "co",
+            "confidence": "high", "suggested_next_action": "na",
+        }
