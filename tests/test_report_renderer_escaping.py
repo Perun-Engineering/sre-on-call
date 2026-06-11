@@ -12,6 +12,7 @@ from __future__ import annotations
 from shared.report_renderer import (
     DiscordDialect,
     EvidenceBlock,
+    FailureNoticeSections,
     InvestigationStartedSections,
     ReportSections,
     SlackDialect,
@@ -89,6 +90,28 @@ def test_slack_investigation_started_escapes_alert_text():
     out = SlackReportRenderer().render_investigation_started(sections)
     assert "<!here>" not in out
     assert "<@U999>" not in out
+
+
+def test_failure_notice_surfaces_investigation_id_via_render_dispatch():
+    sections = FailureNoticeSections(
+        investigation_id="inv-22",
+        detail="The investigation stopped unexpectedly before posting its report.",
+    )
+    # Goes through the render() dispatcher, exercising the new union branch.
+    out = SlackReportRenderer().render(sections)
+    assert "Investigation Failed" in out
+    assert "inv-22" in out
+
+
+def test_failure_notice_detail_renders_inert_on_both_platforms():
+    sections = FailureNoticeSections(
+        investigation_id="inv-1",
+        detail="boom <!channel> @everyone",
+    )
+    slack_out = SlackReportRenderer().render_failure_notice(sections)
+    discord_out = DiscordReportRenderer().render_failure_notice(sections)
+    assert "<!channel>" not in slack_out
+    assert "@everyone" not in discord_out
 
 
 # ---------------------------------------------------------------------------

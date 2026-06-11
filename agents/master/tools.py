@@ -33,6 +33,8 @@ from agents.master.orchestrator import InvestigationOrchestrator
 from agents.master.snapshot_orchestrator import StatusSnapshotOrchestrator
 from shared import busy_state
 from shared.models import AlertContext
+from shared.platforms import DeliveryTarget, deliver_with_retry, for_platform
+from shared.report_renderer import FailureNoticeSections
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +51,68 @@ def _alert_context_from_payload(payload: dict) -> AlertContext:
     if isinstance(window, list) and len(window) == 2:
         payload = {**payload, "investigation_window": (window[0], window[1])}
     return AlertContext(**payload)
+
+
+def _notify_on_investigation_failure(
+    task: asyncio.Task, alert_context: AlertContext
+) -> None:
+    """Done-callback: post a failure notice when an investigation crashes.
+
+    The orchestrator owns posting on the happy path; this only fires when the
+    background task raises before its Incident Report lands, leaving the
+    channel with a lone "Investigation Started" message. Fail-open — the
+    callback runs in the event loop's exception-unfriendly context, so any
+    error here is logged and swallowed, never re-raised. A cancelled task
+    (instance teardown) is not treated as a failure.
+    """
+    if task.cancelled():
+        return
+    try:
+        exc = task.exception()
+    except Exception:  # pragma: no cover - defensive
+        return
+    if exc is None:
+        return
+
+    logger.error(
+        "Investigation %s task died before reporting: %s",
+        alert_context.investigation_id,
+        exc,
+        exc_info=exc,
+    )
+    try:
+        asyncio.create_task(
+            _post_failure_notice(alert_context),
+            name=f"failure-notice-{alert_context.investigation_id}",
+        )
+    except Exception:
+        logger.exception(
+            "Failed to schedule failure notice for investigation %s",
+            alert_context.investigation_id,
+        )
+
+
+async def _post_failure_notice(alert_context: AlertContext) -> None:
+    """Deliver a short "investigation died" notice to the originating thread.
+
+    Fail-open: a failed notice is logged and never raised.
+    """
+    sections = FailureNoticeSections(
+        investigation_id=alert_context.investigation_id,
+        detail=(
+            "The investigation stopped unexpectedly before posting its report. "
+            "Reference the investigation ID above to consult the trace archive."
+        ),
+    )
+    try:
+        platform = for_platform(alert_context.platform)
+        target = DeliveryTarget.for_alert(alert_context)
+        await deliver_with_retry(platform, target, sections)
+    except Exception:
+        logger.exception(
+            "Failed to deliver failure notice for investigation %s",
+            alert_context.investigation_id,
+        )
 
 
 @tool
@@ -97,6 +161,11 @@ async def investigate_alert(alert_context_json: str) -> str:
     # the task mid-flight, and flips /ping to HealthyBusy so AgentCore won't
     # reclaim the instance before the investigation finishes.
     busy_state.track(task)
+    # Surface a crash that kills the investigation before it posts a report,
+    # so the channel doesn't see "Investigation Started" then silence (#22).
+    task.add_done_callback(
+        lambda t: _notify_on_investigation_failure(t, alert_context)
+    )
 
     return (
         f"Investigation {alert_context.investigation_id} started "
