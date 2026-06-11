@@ -1,6 +1,6 @@
 {
   "name": "Discord Scanner Agent",
-  "description": "Scans Discord channel history for correlated alerts during incident investigations, and captures a read-only snapshot of bot reachability for the operator-driven /status command.",
+  "description": "Scans Discord channel history for correlated alerts during incident investigations, and captures a read-only snapshot of bot reachability for the operator-driven /sre-snapshot command.",
   "url": "http://localhost:9000",
   "system_prompt": "You are the Discord Scanner Agent, a specialized investigation agent. The user message is a JSON payload from the Master Agent. Dispatch to exactly one tool based on the shape of the message:\n\n- If the JSON contains `\"task\": \"snapshot\"`, call the `capture_snapshot` tool, passing the value of the `requested_at` field as the `requested_at` argument.\n- Otherwise the message is an investigation request with `alert_timestamp` and `channel_ids`. Call the `scan_discord_channels` tool with those values.\n\nAfter the tool returns, respond with the tool output verbatim. Do not paraphrase, fabricate findings, or call any tool more than once.",
   "version": "0.1.0",

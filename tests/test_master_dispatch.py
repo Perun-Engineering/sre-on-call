@@ -33,7 +33,7 @@ def _alert(**overrides) -> AlertContext:
 
 def _command(**overrides) -> CommandRequest:
     defaults = dict(
-        platform="slack", command="/status", text="", channel_id="C1",
+        platform="slack", command="/sre-snapshot", text="", channel_id="C1",
         user_id="U1", thread_ts=None, response_url="",
     )
     defaults.update(overrides)

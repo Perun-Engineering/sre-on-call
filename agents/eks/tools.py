@@ -419,7 +419,7 @@ def _execute_gather(
 
 
 # ---------------------------------------------------------------------------
-# /status snapshot — read-only cluster overview
+# /sre-snapshot snapshot — read-only cluster overview
 # ---------------------------------------------------------------------------
 
 

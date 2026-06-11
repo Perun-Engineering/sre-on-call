@@ -5,7 +5,7 @@ tool: agents.discord_scanner.tools:capture_snapshot
 ---
 # When to use
 
-Call this skill when the user message is a JSON object with `task: "snapshot"` — the master agent dispatches `/status` requests this way. Pass `requested_at` from the master verbatim.
+Call this skill when the user message is a JSON object with `task: "snapshot"` — the master agent dispatches `/sre-snapshot` requests this way. Pass `requested_at` from the master verbatim.
 
 # Inputs
 

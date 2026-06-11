@@ -2,9 +2,9 @@
 
 Two ways to exercise a deployed sre-on-call stack:
 
-- **[Synthetic webhook](#synthetic-webhook)** — fast smoke test against the Lambda function URL, no Slack involvement. Covers the alert path AND the `/status` slash-command path.
+- **[Synthetic webhook](#synthetic-webhook)** — fast smoke test against the Lambda function URL, no Slack involvement. Covers the alert path AND the `/sre-snapshot` slash-command path.
 - **[Real Slack alert](#real-slack-alert)** — end-to-end via a real Slack workspace and bot mention.
-- **[/status command](#status-command)** — same script, slash-command mode; or run from a real Slack workspace.
+- **[/sre-snapshot command](#sre-snapshot-command)** — same script, slash-command mode; or run from a real Slack workspace.
 
 Both paths post the Incident Report to whatever chat platform the AlertContext targets, so the chat poster needs working credentials.
 
@@ -151,15 +151,15 @@ Same `aws logs tail` commands as the synthetic case.
 - **Concurrency:** Strands' `Agent` rejects parallel `stream_async` calls on the same container, but `TelemetryCapturingA2AExecutor` wraps `execute()` in an `asyncio.Lock` so duplicate invokes (e.g., AgentCore edge retries during cold-start) queue instead of returning `Internal error`. Throughput is still one-investigation-per-container; if you need parallelism, scale out the runtime rather than relying on serialization.
 - **Postmortem command:** `/postmortem` from a thread invokes the master with a `task=pir` payload instead of a fan-out. That path is implemented but not currently part of the master's tool surface and is not exercised by either testing path here.
 
-## /status command
+## /sre-snapshot command
 
-`/status` is the operator-driven snapshot command. The Lambda intake routes it to `_process_status_command`, which acks immediately, then invokes the Master Agent with `{"task": "snapshot", platform, channel_id, user_id, requested_at}`. The master's `capture_status_snapshot` tool runs `StatusSnapshotOrchestrator`, fans out a snapshot request to every active specialized agent under a 30-second hard cutoff, and posts a `SnapshotSections` payload at top-level (not as a thread reply) when collection completes.
+`/sre-snapshot` is the operator-driven snapshot command. The Lambda intake routes it to `_process_status_command`, which acks immediately, then invokes the Master Agent with `{"task": "snapshot", platform, channel_id, user_id, requested_at}`. The master's `capture_status_snapshot` tool runs `StatusSnapshotOrchestrator`, fans out a snapshot request to every active specialized agent under a 30-second hard cutoff, and posts a `SnapshotSections` payload at top-level (not as a thread reply) when collection completes.
 
-Test it via the synthetic webhook (no Slack workspace required) or by running `/status` in a real channel.
+Test it via the synthetic webhook (no Slack workspace required) or by running `/sre-snapshot` in a real channel.
 
-### Synthetic /status
+### Synthetic /sre-snapshot
 
-Same script as the alert path, with `--command /status`:
+Same script as the alert path, with `--command /sre-snapshot`:
 
 ```bash
 SLACK_SIGNING_SECRET="$(aws secretsmanager get-secret-value \
@@ -170,12 +170,12 @@ SLACK_SIGNING_SECRET="$(aws secretsmanager get-secret-value \
     --url 'https://<lambda-url-id>.lambda-url.us-east-1.on.aws/' \
     --channel <channel-id> \
     --team <team-id> \
-    --command /status
+    --command /sre-snapshot
 ```
 
 Expected: `HTTP 200` within ~1 second (the synchronous ack). The master agent runs the snapshot in the background and posts the result to `<channel-id>` at top-level within 30 seconds.
 
-> **Note**: the synthetic `/status` ack is sent to a fake `response_url` in the script's body, so the user-visible "🩺 Capturing status snapshot..." ack is never seen — Lambda still POSTs it, just into the void. The actual snapshot still posts via the bot token to `<channel-id>` and is visible if the bot is a member of that channel.
+> **Note**: the synthetic `/sre-snapshot` ack is sent to a fake `response_url` in the script's body, so the user-visible "🩺 Capturing status snapshot..." ack is never seen — Lambda still POSTs it, just into the void. The actual snapshot still posts via the bot token to `<channel-id>` and is visible if the bot is a member of that channel.
 
 ### What appears in chat
 
@@ -216,14 +216,14 @@ _model=… · network=PUBLIC · skills=scan_slack_channels, capture_snapshot_
 
 Each per-agent block opens with a registry-derived header line (model · network · skills) and ends with the agent's own snapshot sections. Anomalies render with a ⚠️ marker plus an italic `anomaly_summary` line under the header. Failures render as ❌ with the error message. Disabled-in-config agents render as 🚫.
 
-### Real /status
+### Real /sre-snapshot
 
-Type `/status` in any channel. The bot posts the snapshot at top-level in that same channel — no thread context required.
+Type `/sre-snapshot` in any channel. The bot posts the snapshot at top-level in that same channel — no thread context required.
 
-### Caveats specific to /status
+### Caveats specific to /sre-snapshot
 
 - **Non-thread post**: unlike `/postmortem`, the snapshot is posted at the top of the channel. The Slack platform's `_post_reply` drops the empty `thread_ts` for this path so Slack accepts the message.
-- **30-second hard cutoff**: agents that don't respond within 30s render as ❌ "no response within 30s". There is no late-enrichment phase — `/status` is single-shot.
-- **No deduplication**: re-running `/status` always produces a fresh snapshot. Operators may legitimately want to retry after a fix.
+- **30-second hard cutoff**: agents that don't respond within 30s render as ❌ "no response within 30s". There is no late-enrichment phase — `/sre-snapshot` is single-shot.
+- **No deduplication**: re-running `/sre-snapshot` always produces a fresh snapshot. Operators may legitimately want to retry after a fix.
 - **Master section is registry-only today**: the IAM grants `bedrock-agentcore:GetAgentRuntime` and `dynamodb:DescribeTable` (slice 6) so future versions of `MasterSnapshotBuilder` can probe runtime status and table reachability, but the slice 3 baseline only renders the registry view.
-- **CloudWatch Logs cost**: `/status` runs one `GetMetricData` (cheap) plus one bounded Logs Insights query against the top 10 log groups (~$0.005 per invocation). If `/status` ends up running on a tight loop, this adds up; rate-limit at the operator level if needed.
+- **CloudWatch Logs cost**: `/sre-snapshot` runs one `GetMetricData` (cheap) plus one bounded Logs Insights query against the top 10 log groups (~$0.005 per invocation). If `/sre-snapshot` ends up running on a tight loop, this adds up; rate-limit at the operator level if needed.

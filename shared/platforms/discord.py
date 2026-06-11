@@ -213,7 +213,7 @@ class DiscordChatPlatform:
         }
         body: dict = {"content": text}
 
-        # No thread anchor means "post at top-level" (e.g. /status snapshots).
+        # No thread anchor means "post at top-level" (e.g. /sre-snapshot snapshots).
         if target.thread_anchor:
             body["message_reference"] = {"message_id": target.thread_anchor}
 

@@ -6,8 +6,9 @@ __pycache__/
 .build/
 .terraform/
 *.tfstate*
+*.tfvars
 .kiro/
 CLAUDE.local.md
 docs/superpowers/
-docs/slack-app/manifest.local.yaml
+docs/slack-app/manifest.*.yaml
 

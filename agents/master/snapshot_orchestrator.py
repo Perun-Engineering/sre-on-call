@@ -1,9 +1,9 @@
-"""Master agent's status-snapshot orchestrator — the engine behind ``/status``.
+"""Master agent's status-snapshot orchestrator — the engine behind ``/sre-snapshot``.
 
 Differs materially from :class:`agents.master.orchestrator.InvestigationOrchestrator`:
 
 * **Single 30-second hard cutoff** — no late-enrichment phase. Operators
-  staring at a chat channel waiting for ``/status`` results don't want to
+  staring at a chat channel waiting for ``/sre-snapshot`` results don't want to
   see two follow-up posts; one snapshot is the deliverable.
 * **Synthesises the master's own block** — the master itself contributes a
   section to the snapshot (registry view + configured model), built
@@ -14,7 +14,7 @@ Differs materially from :class:`agents.master.orchestrator.InvestigationOrchestr
   via a ``<<<SNAPSHOT_RESULT ... SNAPSHOT_RESULT>>>`` footer that the
   orchestrator extracts via :data:`shared.tool_result.SNAPSHOT_RESULT`.
 * **Posts a :class:`SnapshotSections` payload** at top-level (not a thread
-  reply) — ``/status`` is a deliberate operational broadcast, not an
+  reply) — ``/sre-snapshot`` is a deliberate operational broadcast, not an
   incident-thread reply.
 """
 
@@ -107,7 +107,7 @@ class MasterSnapshotBuilder:
 
 
 class StatusSnapshotOrchestrator:
-    """Orchestrates a ``/status`` snapshot across active specialized agents.
+    """Orchestrates a ``/sre-snapshot`` snapshot across active specialized agents.
 
     Lifecycle:
         1. Build a top-level :class:`DeliveryTarget` from the snapshot
@@ -157,13 +157,13 @@ class StatusSnapshotOrchestrator:
     # ------------------------------------------------------------------
 
     async def capture(self, snapshot_request: dict[str, Any]) -> None:
-        """Run the full ``/status`` snapshot lifecycle."""
+        """Run the full ``/sre-snapshot`` snapshot lifecycle."""
         requested_at = snapshot_request.get("requested_at") or now_iso()
         platform = self._get_platform(snapshot_request["platform"])
         target = DeliveryTarget(
             platform=snapshot_request["platform"],
             channel_id=snapshot_request["channel_id"],
-            thread_anchor=None,  # /status is a top-level broadcast, not a reply
+            thread_anchor=None,  # /sre-snapshot is a top-level broadcast, not a reply
         )
 
         # Phase 1: master's own block (synchronous)

@@ -262,7 +262,7 @@ class TestSlackPostReply:
         )
 
     def test_none_anchor_omits_kwarg_for_top_level_post(self) -> None:
-        """A top-level /status target has thread_anchor=None — Slack rejects
+        """A top-level /sre-snapshot target has thread_anchor=None — Slack rejects
         thread_ts="" so the kwarg must be dropped entirely."""
         from unittest.mock import patch as _patch, AsyncMock
         platform = SlackChatPlatform(signing_secret="x", bot_token="y")

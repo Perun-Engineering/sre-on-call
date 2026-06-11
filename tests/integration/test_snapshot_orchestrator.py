@@ -1,6 +1,6 @@
 """Integration tests for the master agent's StatusSnapshotOrchestrator.
 
-Slice 3 of the ``/status`` command. Exercises the orchestrator end-to-end
+Slice 3 of the ``/sre-snapshot`` command. Exercises the orchestrator end-to-end
 with a controllable :class:`FakeHTTPClient` and a fake :class:`ChatPlatform`
 that records the rendered :class:`SnapshotSections` payloads. No real
 A2A traffic, no real chat platform.
@@ -513,7 +513,7 @@ class TestSnapshotOrchestratorRouting:
         target, payload, _ = next(
             d for d in platform.deliveries if isinstance(d[1], SnapshotSections)
         )
-        # /status delivers at top-level — no thread anchor.
+        # /sre-snapshot delivers at top-level — no thread anchor.
         assert target.thread_anchor is None
         assert target.channel_id == "C12345"
         assert target.platform == "slack"

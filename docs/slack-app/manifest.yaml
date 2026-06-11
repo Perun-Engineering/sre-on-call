@@ -27,7 +27,7 @@ features:
       description: Generate a Post-Incident Report from the current incident thread
       usage_hint: run inside an incident thread
       should_escape: false
-    - command: /status
+    - command: /sre-snapshot
       url: https://your-function-url.lambda-url.us-east-1.on.aws/
       description: Capture a status snapshot of the infrastructure observed by SRE agents
       usage_hint: run anywhere

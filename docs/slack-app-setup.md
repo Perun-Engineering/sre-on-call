@@ -16,10 +16,10 @@ subscription. A manual click-through is in [Appendix A](#appendix-a--manual-setu
 | Bot scope `chat:write` | OAuth | Post the incident report / PIR back in the alert thread |
 | Bot scope `channels:history` | OAuth | Slack Scanner reads history of **public** channels the bot is in |
 | Bot scope `groups:history` | OAuth | Slack Scanner reads history of **private** channels the bot is in |
-| Bot scope `commands` | OAuth | Required to register/run the `/postmortem` and `/status` slash commands |
+| Bot scope `commands` | OAuth | Required to register/run the `/postmortem` and `/sre-snapshot` slash commands |
 | Event subscription `app_mention` | Events API | Delivers the triggering mention to the Lambda function URL |
 | Slash command `/postmortem` | Commands | Generates a Post-Incident Report from an incident thread |
-| Slash command `/status` | Commands | Captures a read-only snapshot of the infrastructure observed by SRE agents (cluster state, top log groups by ingestion, chat platform reachability). Posts at top-level — not a thread reply |
+| Slash command `/sre-snapshot` | Commands | Captures a read-only snapshot of the infrastructure observed by SRE agents (cluster state, top log groups by ingestion, chat platform reachability). Posts at top-level — not a thread reply |
 | Signing secret | Credentials | Lambda verifies every request's HMAC signature (`SLACK_SIGNING_SECRET`) |
 | Bot User OAuth token (`xoxb-…`) | Credentials | Lambda + scanner call the Slack Web API (`SLACK_BOT_TOKEN`) |
 
@@ -145,16 +145,16 @@ confirm `app_mention` is listed, then **Save Changes**.
 
 ### 10. Confirm the slash commands
 
-The manifest creates two slash commands pointing at your function URL — `/postmortem` and `/status`. Check both under **Slash Commands**.
+The manifest creates two slash commands pointing at your function URL — `/postmortem` and `/sre-snapshot`. Check both under **Slash Commands**.
 
 ![Slash command](slack-app/images/10-slash-command.png)
 
 | Command | When to use | Posts as |
 |---|---|---|
 | `/postmortem` | Inside an incident thread to generate a Post-Incident Report from the thread context | Thread reply on the alert |
-| `/status` | Anywhere — operational snapshot of cluster state, top log groups by ingestion, and chat platform reachability | Top-level message in the channel where invoked |
+| `/sre-snapshot` | Anywhere — operational snapshot of cluster state, top log groups by ingestion, and chat platform reachability | Top-level message in the channel where invoked |
 
-`/status` does not require a thread context. The Master Agent fans out to every active specialized agent under a 30-second hard cutoff and posts a snapshot at top-level when collection completes.
+`/sre-snapshot` does not require a thread context. The Master Agent fans out to every active specialized agent under a 30-second hard cutoff and posts a snapshot at top-level when collection completes.
 
 ### 11. Invite the bot to channels
 
@@ -205,7 +205,7 @@ Use this if you'd rather click through each screen.
    toggle the bot user on if prompted.
 4. **Slash Commands → Create New Command.** Command `/postmortem`, Request URL =
    your function URL, short description, usage hint `run inside an incident
-   thread`, **Save**. Then **Create New Command** again — Command `/status`,
+   thread`, **Save**. Then **Create New Command** again — Command `/sre-snapshot`,
    same Request URL, description "Capture a status snapshot of the
    infrastructure observed by SRE agents", usage hint `run anywhere`, **Save**.
 5. **Install App → Install to Workspace → Allow.** Copy the Bot User OAuth

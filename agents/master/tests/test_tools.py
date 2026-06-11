@@ -181,7 +181,7 @@ class TestCaptureStatusSnapshotTool:
                 self.agent_endpoints: dict[str, str] = {}
 
             async def capture(self, request: dict) -> None:
-                # /status with no active agents still posts a master-only
+                # /sre-snapshot with no active agents still posts a master-only
                 # snapshot — capture() is allowed to run.
                 await finish.wait()
 

@@ -1,7 +1,7 @@
 """Unit tests for the SnapshotReport / SnapshotSections data model and the
 ``MarkupReportRenderer.render_snapshot`` output for both dialects.
 
-These tests cover slice 1 of the ``/status`` command: data model + renderer
+These tests cover slice 1 of the ``/sre-snapshot`` command: data model + renderer
 scaffolding. No agent-side or master-side behaviour is exercised here —
 just the dataclasses and the dialect-aware rendering of pre-built
 ``SnapshotSections`` payloads.

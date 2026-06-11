@@ -178,14 +178,14 @@ def _process_alert(alert_context: AlertContext, dispatch: MasterDispatch) -> dic
 def _process_command(
     command: CommandRequest, platform: ChatPlatform, dispatch: MasterDispatch
 ) -> dict:
-    """Handle a slash command (e.g. ``/postmortem``, ``/status``).
+    """Handle a slash command (e.g. ``/postmortem``, ``/sre-snapshot``).
 
     Each command is allow-listed by name and routed to its own handler.
     Unknown commands fall through with an ephemeral "Unknown command" reply.
     """
     if command.command == "/postmortem":
         return _process_postmortem_command(command, platform, dispatch)
-    if command.command == "/status":
+    if command.command == "/sre-snapshot":
         return _process_status_command(command, platform, dispatch)
     return _http_response(200, {"text": f"Unknown command: {command.command}"})
 
@@ -217,7 +217,7 @@ def _process_postmortem_command(
 def _process_status_command(
     command: CommandRequest, platform: ChatPlatform, dispatch: MasterDispatch
 ) -> dict:
-    """Handle ``/status`` — operator-driven snapshot. No thread required.
+    """Handle ``/sre-snapshot`` — operator-driven snapshot. No thread required.
 
     Acks synchronously, then fires the Master Agent with a snapshot task.
     The master fans out to active specialized agents and posts a
