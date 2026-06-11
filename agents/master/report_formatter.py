@@ -156,6 +156,7 @@ class ReportFormatter:
         disabled_agents: set[str] | None = None,
         analysis: AnalysisSection | None = None,
         skipped_agents: dict[str, str] | None = None,
+        interactive_page_url: str | None = None,
     ) -> ReportSections:
         """Build the structured Incident Report sections.
 
@@ -188,6 +189,7 @@ class ReportFormatter:
         )
         sections.variant_label = alert_context.variant_label
         sections.analysis = analysis
+        sections.interactive_page_url = interactive_page_url
         return sections
 
     def build_started_sections(

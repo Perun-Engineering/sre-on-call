@@ -711,3 +711,10 @@ class TestBuildPageModel:
             "root_cause_hypothesis": "rc", "correlation": "co",
             "confidence": "high", "suggested_next_action": "na",
         }
+
+
+def test_build_incident_sections_carries_interactive_page_url(formatter, alert_context):
+    sections = formatter.build_incident_sections(
+        alert_context, {}, interactive_page_url="https://d/pages/inv.html?x=1"
+    )
+    assert sections.interactive_page_url == "https://d/pages/inv.html?x=1"
