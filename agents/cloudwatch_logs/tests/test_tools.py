@@ -914,3 +914,81 @@ class TestCaptureSnapshotPrimaryFailures:
         assert "get_metric_data" in (report.anomaly_summary or "")
         # Insights query never attempted when ranking failed
         logs.start_query.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Chart descriptor + series emission
+# ---------------------------------------------------------------------------
+
+
+class TestChartEmission:
+    def _client_with_rows(self, rows, status="Complete"):
+        client = MagicMock()
+        client.describe_log_groups.return_value = _make_describe_response(
+            ["/aws/lambda/x"],
+        )
+        client.start_query.return_value = {"queryId": "qid"}
+        client.get_query_results.return_value = {"status": status, "results": rows}
+        return client
+
+    def test_emits_descriptor_and_series(self, monkeypatch):
+        monkeypatch.setenv("CHART_SNAPSHOTS_ENABLED", "true")
+        rows = [[
+            {"field": "@timestamp", "value": "2026-01-01T00:00:00"},
+            {"field": "@message", "value": "boom"},
+        ]]
+        client = self._client_with_rows(rows)
+
+        result = _execute_query(client, ["/aws/lambda/x"], "fields @message", 1000, 2000)
+
+        charted = [f for f in result.findings if f.chart is not None]
+        assert charted, "row findings should carry a chart descriptor"
+        chart_id = charted[0].chart.chart_id
+        assert chart_id in result.chart_series
+        assert result.chart_series[chart_id].points[0]["@message"] == "boom"
+
+    def test_no_chart_when_disabled(self, monkeypatch):
+        monkeypatch.setenv("CHART_SNAPSHOTS_ENABLED", "false")
+        rows = [[{"field": "@message", "value": "boom"}]]
+        client = self._client_with_rows(rows)
+
+        result = _execute_query(client, ["/aws/lambda/x"], "fields @message", 1000, 2000)
+
+        assert result.chart_series == {}
+        assert all(f.chart is None for f in result.findings)
+
+    def test_no_chart_on_empty_results(self, monkeypatch):
+        monkeypatch.setenv("CHART_SNAPSHOTS_ENABLED", "true")
+        client = self._client_with_rows([])
+
+        result = _execute_query(client, ["/aws/lambda/x"], "fields @message", 1000, 2000)
+
+        assert result.chart_series == {}
+
+    def test_series_capped_at_1000(self, monkeypatch):
+        monkeypatch.setenv("CHART_SNAPSHOTS_ENABLED", "true")
+        rows = [[{"field": "@message", "value": str(i)}] for i in range(1100)]
+        client = self._client_with_rows(rows)
+
+        result = _execute_query(client, ["/aws/lambda/x"], "fields @message", 1000, 2000)
+
+        chart_id = next(iter(result.chart_series))
+        series = result.chart_series[chart_id]
+        assert series.truncated is True
+        assert len(series.points) == 1000
+
+    def test_binned_query_sets_series_kind(self, monkeypatch):
+        monkeypatch.setenv("CHART_SNAPSHOTS_ENABLED", "true")
+        rows = [[
+            {"field": "bin", "value": "2026-01-01T00:00:00"},
+            {"field": "count", "value": "5"},
+        ]]
+        client = self._client_with_rows(rows)
+
+        result = _execute_query(
+            client, ["/aws/lambda/x"],
+            "filter @message like /err/ | stats count() by bin(5m)", 1000, 2000,
+        )
+
+        chart_id = next(iter(result.chart_series))
+        assert result.chart_series[chart_id].series_kind == "binned"
