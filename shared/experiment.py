@@ -48,3 +48,31 @@ class ExperimentResult:
     agent_durations: dict[str, float] = field(default_factory=dict)
     total_duration_seconds: float = 0.0
     timestamp: str = ""  # ISO 8601
+    # Cost/token totals summed across the variant's agents (issue #26). ``None``
+    # when no agent supplied telemetry — e.g. rows written before this field
+    # existed still load, with the cost column left blank in the judge report.
+    total_cost_usd: float | None = None
+    total_tokens: int | None = None
+
+
+# Rubric dimensions the LLM judge scores each variant pair on (issue #26).
+JUDGEMENT_DIMENSIONS = ("coverage", "severity", "actionability", "noise")
+
+
+@dataclass
+class Judgement:
+    """An LLM judge's pairwise verdict comparing two variant reports.
+
+    ``overall_winner`` and every value in ``dimension_winners`` is one of
+    ``"a"``, ``"b"``, or ``"tie"``. A dimension resolves to ``"tie"`` when the
+    judge's pick flips with presentation order (position bias) — see
+    :class:`shared.experiment_judge.ExperimentJudge`.
+    """
+
+    experiment_id: str
+    investigation_id: str
+    overall_winner: str  # "a" | "b" | "tie"
+    dimension_winners: dict[str, str]  # dimension -> "a" | "b" | "tie"
+    judge_model_id: str
+    rationale: str = ""
+    timestamp: str = ""  # ISO 8601
