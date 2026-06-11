@@ -466,6 +466,10 @@ class InvestigationOrchestrator:
             routing=routing.manifest_record,
         )
 
+        # Snapshot the series behind chart-carrying findings (#32). Same
+        # fail-open contract as the manifest write above.
+        self._snapshot_charts(alert_context=alert_context, results=results)
+
         # --- Phase 8: record the incident outcome for similar-incident lookup ---
         # Embeds the alert + stores a compact record (issue #30) so a future,
         # similar alert can surface this one. Fail-open and skipped entirely
@@ -847,6 +851,61 @@ class InvestigationOrchestrator:
             routing=routing,
         )
         self._trace_store.put_manifest(manifest)
+
+    def _snapshot_charts(
+        self,
+        alert_context: AlertContext,
+        results: dict[str, AgentResult | AgentFailure],
+    ) -> None:
+        """Write the series behind every descriptor-carrying finding to S3.
+
+        Approach A (#32): specialized agents ship the rows they already
+        harvested on :attr:`AgentResult.chart_series`; the master persists each
+        once under ``charts/<chart_id>.json`` so the interactive incident page
+        (#33) can draw graphs from an immutable record. Runs in Phase 7, after
+        the report is posted, so it never delays the user-facing report.
+
+        Fail-open: ``self._trace_store`` may be ``None`` (tracing disabled),
+        and every store write swallows its own errors — this never raises.
+        """
+        if self._trace_store is None:
+            return
+
+        seen: set[str] = set()
+        for result in results.values():
+            if not isinstance(result, AgentResult):
+                continue
+            descriptors = {
+                f.chart.chart_id: f.chart
+                for f in result.findings
+                if f.chart is not None
+            }
+            for chart_id, series in result.chart_series.items():
+                if chart_id in seen:
+                    continue
+                seen.add(chart_id)
+                desc = descriptors.get(chart_id)
+                payload = {
+                    "schema_version": 1,
+                    "chart_id": chart_id,
+                    "investigation_id": alert_context.investigation_id,
+                    "source": desc.source if desc else "",
+                    "descriptor": {
+                        "log_groups": desc.log_groups,
+                        "query": desc.query,
+                        "start_epoch": desc.start_epoch,
+                        "end_epoch": desc.end_epoch,
+                    } if desc else {},
+                    "series_kind": series.series_kind,
+                    "truncated": series.truncated,
+                    "points": series.points,
+                    "captured_at": now_iso(),
+                }
+                self._trace_store.put_chart_series(
+                    investigation_id=alert_context.investigation_id,
+                    chart_id=chart_id,
+                    payload=payload,
+                )
 
     def _record_incident_outcome(
         self,
