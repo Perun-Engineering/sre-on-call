@@ -52,13 +52,16 @@ def alert_context():
     )
 
 
-def _make_finding(content="test finding", severity="info", source="test-source", metadata=None):
+def _make_finding(
+    content="test finding", severity="info", source="test-source", metadata=None, link=None
+):
     return Finding(
         source=source,
         timestamp="2025-01-15T14:32:00Z",
         content=content,
         severity=severity,
         metadata=metadata or {},
+        link=link,
     )
 
 
@@ -250,6 +253,49 @@ class TestFormatIncidentReport:
         assert "slack finding 1" in report
         assert "slack finding 2" in report
         assert "cw finding 1" in report
+
+    def test_finding_link_renders_inline_slack(self, formatter, alert_context):
+        """A finding's deep link renders inline on its evidence line (Slack)."""
+        url = (
+            "https://us-east-1.console.aws.amazon.com/cloudwatch/home"
+            "?region=us-east-1#logsV2:logs-insights$3FqueryDetail$3D~(end~'x))"
+        )
+        results = {
+            "cloudwatch_logs": _make_success_result(
+                "cloudwatch_logs",
+                [_make_finding("OOMKilled", severity="critical", link=url)],
+            ),
+        }
+        report = _render_report(formatter, alert_context, results)
+        # The content and the Slack-form link share one bullet line.
+        assert f"- OOMKilled <{url}|🔗 view>" in report
+
+    def test_finding_link_renders_inline_discord(self, formatter, alert_context):
+        url = (
+            "https://us-east-1.console.aws.amazon.com/cloudwatch/home"
+            "?region=us-east-1#logsV2:logs-insights$3FqueryDetail$3D~(end~'x))"
+        )
+        results = {
+            "cloudwatch_logs": _make_success_result(
+                "cloudwatch_logs",
+                [_make_finding("OOMKilled", severity="critical", link=url)],
+            ),
+        }
+        report = _render_report(
+            formatter, alert_context, results, renderer=DiscordReportRenderer(),
+        )
+        assert f"- OOMKilled [🔗 view]({url})" in report
+
+    def test_finding_without_link_renders_no_link_markup(self, formatter, alert_context):
+        results = {
+            "cloudwatch_logs": _make_success_result(
+                "cloudwatch_logs",
+                [_make_finding("plain finding", source="lg")],
+            ),
+        }
+        report = _render_report(formatter, alert_context, results)
+        assert "- plain finding" in report
+        assert "🔗 view" not in report
 
     def test_links_from_metadata(self, formatter, alert_context):
         results = {

@@ -481,6 +481,110 @@ class TestExecuteQuery:
         assert "failed" in result.errors[-1].lower()
 
 
+class TestExecuteQueryDeepLinks:
+    """Result findings carry a Logs Insights deep link into their query/window."""
+
+    START_TIME = 1736951220
+    END_TIME = 1736951820
+    QUERY = "fields @timestamp, @message | filter @message like /ERROR/"
+
+    def _client_in_region(self, region: str = "us-east-1") -> MagicMock:
+        client = MagicMock()
+        client.meta.region_name = region
+        return client
+
+    def test_result_findings_get_deep_link(self):
+        client = self._client_in_region()
+        client.describe_log_groups.return_value = _make_describe_response(
+            ["/aws/lambda/svc"]
+        )
+        client.start_query.return_value = {"queryId": "qid-1"}
+        client.get_query_results.return_value = {
+            "status": "Complete",
+            "results": _make_query_results([
+                {"@timestamp": "2025-01-15T14:32:00", "@message": "ERROR: timeout"},
+            ]),
+        }
+
+        result = _execute_query(
+            client, ["/aws/lambda/svc"], self.QUERY, self.START_TIME, self.END_TIME,
+        )
+
+        finding = next(f for f in result.findings if "timeout" in f.content)
+        assert finding.link is not None
+        # Points at the Logs Insights console with the escaped query + group.
+        assert finding.link.startswith(
+            "https://us-east-1.console.aws.amazon.com/cloudwatch/home"
+        )
+        assert "logs-insights" in finding.link
+        assert "*2faws*2flambda*2fsvc" in finding.link
+
+    def test_timeout_finding_gets_deep_link(self):
+        client = self._client_in_region()
+        client.describe_log_groups.return_value = _make_describe_response(
+            ["/aws/lambda/svc"]
+        )
+        client.start_query.return_value = {"queryId": "qid-1"}
+        client.get_query_results.return_value = {
+            "status": "Running",
+            "results": [],
+        }
+
+        with patch("agents.cloudwatch_logs.tools._QUERY_POLL_TIMEOUT_SECONDS", 0):
+            result = _execute_query(
+                client, ["/aws/lambda/svc"], self.QUERY, self.START_TIME, self.END_TIME,
+            )
+
+        timeout_finding = next(f for f in result.findings if f.metadata.get("timeout"))
+        assert timeout_finding.link is not None
+        assert "logs-insights" in timeout_finding.link
+
+    def test_skipped_group_finding_has_no_link(self):
+        client = self._client_in_region()
+
+        def describe_side_effect(**kwargs):
+            if kwargs["logGroupNamePrefix"] == "/aws/lambda/exists":
+                return _make_describe_response(["/aws/lambda/exists"])
+            return _make_describe_response([])
+
+        client.describe_log_groups.side_effect = describe_side_effect
+        client.start_query.return_value = {"queryId": "qid-1"}
+        client.get_query_results.return_value = {"status": "Complete", "results": []}
+
+        result = _execute_query(
+            client,
+            ["/aws/lambda/exists", "/aws/lambda/gone"],
+            self.QUERY,
+            self.START_TIME,
+            self.END_TIME,
+        )
+
+        skipped = next(f for f in result.findings if f.metadata.get("skipped"))
+        assert skipped.link is None
+
+    def test_link_construction_failure_is_fail_open(self):
+        # No region on the client => no link, but findings still come through.
+        client = MagicMock()
+        client.meta.region_name = None
+        client.describe_log_groups.return_value = _make_describe_response(
+            ["/aws/lambda/svc"]
+        )
+        client.start_query.return_value = {"queryId": "qid-1"}
+        client.get_query_results.return_value = {
+            "status": "Complete",
+            "results": _make_query_results([
+                {"@timestamp": "2025-01-15T14:32:00", "@message": "ERROR: boom"},
+            ]),
+        }
+
+        result = _execute_query(
+            client, ["/aws/lambda/svc"], self.QUERY, self.START_TIME, self.END_TIME,
+        )
+
+        finding = next(f for f in result.findings if "boom" in f.content)
+        assert finding.link is None
+
+
 # ---------------------------------------------------------------------------
 # capture_snapshot — /sre-snapshot path (i-a: IncomingBytes ranking + bounded Insights)
 # ---------------------------------------------------------------------------

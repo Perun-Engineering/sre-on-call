@@ -22,7 +22,7 @@ from agents.discord_scanner.tools import (
     DiscordRESTClient,
     _execute_capture_snapshot,
 )
-from shared.report_renderer import DiscordReportRenderer, ReportSections, EvidenceBlock, EnrichmentSections
+from shared.report_renderer import DiscordReportRenderer, ReportSections, EvidenceBlock, EvidenceLine, EnrichmentSections
 from shared.models import AlertContext
 
 
@@ -244,7 +244,7 @@ class TestDiscordReportRenderer:
             time_of_detection="2025-01-15T14:32:00Z",
             summary="Test summary",
             root_cause="Unknown",
-            evidence_blocks=[EvidenceBlock(emoji="📡", display_name="Test", lines=["finding 1"])],
+            evidence_blocks=[EvidenceBlock(emoji="📡", display_name="Test", lines=[EvidenceLine("finding 1")])],
             impact_assessment="High impact",
             recommended_actions="1. Fix it",
             links=[],

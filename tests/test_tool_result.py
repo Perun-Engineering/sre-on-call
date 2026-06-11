@@ -40,6 +40,52 @@ def test_format_result_embeds_structured_agent_result_footer():
     assert recovered == agent_result
 
 
+def test_finding_link_survives_agent_result_round_trip():
+    """A finding's deep link must round-trip through the AGENT_RESULT footer."""
+    link = (
+        "https://us-east-1.console.aws.amazon.com/cloudwatch/home"
+        "?region=us-east-1#logsV2:logs-insights$3FqueryDetail$3D~(end~'x))"
+    )
+    agent_result = AgentResult(
+        agent_name="cloudwatch_logs",
+        status="success",
+        findings=[
+            Finding(
+                source="/aws/lambda/foo",
+                timestamp="2026-06-11T00:00:00Z",
+                content="OOMKilled",
+                severity="critical",
+                link=link,
+            )
+        ],
+        summary="Inspected 1 item(s). Found 1 finding(s).",
+    )
+
+    _, recovered = AGENT_RESULT.extract(format_result(agent_result))
+
+    assert recovered is not None
+    assert recovered.findings[0].link == link
+
+
+def test_finding_without_link_round_trips_as_none():
+    agent_result = AgentResult(
+        agent_name="eks",
+        status="success",
+        findings=[
+            Finding(
+                source="pod/x",
+                timestamp="2026-06-11T00:00:00Z",
+                content="phase=Failed",
+                severity="critical",
+            )
+        ],
+        summary="s",
+    )
+    _, recovered = AGENT_RESULT.extract(format_result(agent_result))
+    assert recovered is not None
+    assert recovered.findings[0].link is None
+
+
 # ---------------------------------------------------------------------------
 # SnapshotReport footer roundtrip
 # ---------------------------------------------------------------------------

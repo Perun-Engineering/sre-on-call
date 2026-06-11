@@ -50,6 +50,7 @@ class Finding:
     content: str  # The finding content
     severity: str  # "critical", "warning", "info"
     metadata: dict = field(default_factory=dict)  # Source-specific metadata
+    link: str | None = None  # Deep link into the data source the finding came from
 
 
 @dataclass
