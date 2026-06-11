@@ -22,10 +22,14 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Generic, Protocol, TypeVar
 
-from shared.a2a_protocol import build_a2a_request, extract_response_text
+from shared.a2a_protocol import (
+    build_a2a_request,
+    extract_response_data,
+    extract_response_text,
+)
 from shared.agent_footer import AgentFooter
 from shared.constants import HARD_CUTOFF_SECONDS
 
@@ -138,8 +142,12 @@ class A2AReply(Generic[T]):
 
     ``text`` is the agent's reply with the requested footer stripped (any
     *other* footers — e.g. ``AGENT_METADATA`` — are left in place for the
-    caller to peel). ``payload`` is the parsed footer, or ``None`` when it
-    is absent or malformed (footers are permissive on read). ``error`` is
+    caller to peel). ``payload`` is the requested footer's value, preferring
+    the structured A2A DataPart and falling back to the legacy text footer, or
+    ``None`` when neither is present or both are malformed (footers are
+    permissive on read). ``data`` maps every structured DataPart's kind to its
+    raw payload dict, so callers can decode additional kinds (``AGENT_METADATA``,
+    future chart descriptors) via :meth:`AgentFooter.decode_data`. ``error`` is
     the JSON-RPC ``error.message`` when the agent returned a protocol-level
     error, else ``None``.
     """
@@ -147,6 +155,7 @@ class A2AReply(Generic[T]):
     text: str
     payload: T | None
     error: str | None
+    data: dict[str, dict] = field(default_factory=dict)
 
 
 class A2AClient:
@@ -181,6 +190,13 @@ class A2AClient:
             message = response["error"].get("message", "Unknown A2A error")
             return A2AReply(text="", payload=None, error=message)
 
-        raw = extract_response_text(response.get("result", {}))
-        clean, payload = footer.extract(raw)
-        return A2AReply(text=clean, payload=payload, error=None)
+        result = response.get("result", {})
+        raw = extract_response_text(result)
+        data = extract_response_data(result)
+        # Always strip the legacy text footer so the human-readable reply is
+        # clean even in the dual-write window; prefer the structured DataPart
+        # payload when present, falling back to the text footer (mixed-version:
+        # an agent still on the pre-#24 image emits only the text footer).
+        clean, text_payload = footer.extract(raw)
+        payload = footer.decode_data(data[footer.kind]) if footer.kind in data else text_payload
+        return A2AReply(text=clean, payload=payload, error=None, data=data)

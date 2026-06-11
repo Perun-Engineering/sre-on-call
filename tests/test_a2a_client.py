@@ -143,6 +143,72 @@ async def test_send_strips_only_the_requested_footer():
     assert AGENT_METADATA.find(reply.text) is not None
 
 
+def _task_with_data(text: str, data_parts: list[dict]) -> dict:
+    """A Task reply carrying an agent_response text artifact + an agent_data
+    artifact of structured DataParts (the issue #24 dual-write shape)."""
+    return {
+        "jsonrpc": "2.0",
+        "result": {
+            "kind": "task",
+            "artifacts": [
+                {"name": "agent_response", "parts": [{"kind": "text", "text": text}]},
+                {"name": "agent_data", "parts": data_parts},
+            ],
+        },
+    }
+
+
+async def test_send_prefers_datapart_payload_over_text_footer():
+    """When a DataPart is present, it wins over the legacy text footer."""
+    from_data = AgentResult(agent_name="eks", status="success", findings=[], summary="from-data")
+    from_text = AgentResult(agent_name="eks", status="error", findings=[], summary="from-text")
+    response = _task_with_data(
+        format_result(from_text),
+        [{"kind": "data", "data": AGENT_RESULT.encode_data(from_data)}],
+    )
+    client = A2AClient(_FakeTransport(response))
+
+    reply = await client.send("u", "{}", footer=AGENT_RESULT, request_id="r")
+
+    assert reply.payload is not None
+    assert reply.payload.status == "success"  # DataPart, not the text footer
+    # Text footer is still stripped from the human-readable reply.
+    assert "AGENT_RESULT" not in reply.text
+
+
+async def test_send_falls_back_to_text_footer_without_datapart():
+    """No DataPart → the legacy text footer is parsed (mixed-version: old agent)."""
+    agent_result = AgentResult(agent_name="eks", status="success", findings=[], summary="legacy")
+    client = A2AClient(_FakeTransport(_wrapped(format_result(agent_result))))
+
+    reply = await client.send("u", "{}", footer=AGENT_RESULT, request_id="r")
+
+    assert reply.payload is not None and reply.payload.summary == "legacy"
+    assert reply.data == {}
+
+
+async def test_send_exposes_all_datapart_payloads_keyed_by_kind():
+    """reply.data carries every structured payload (e.g. AGENT_METADATA) for the caller."""
+    from shared.agent_telemetry import AGENT_METADATA
+    from shared.models import AgentMetadata
+
+    result = AgentResult(agent_name="eks", status="success", findings=[], summary="ok")
+    meta = AgentMetadata(input_tokens=100, output_tokens=50)
+    response = _task_with_data(
+        format_result(result),
+        [
+            {"kind": "data", "data": AGENT_RESULT.encode_data(result)},
+            {"kind": "data", "data": AGENT_METADATA.encode_data(meta)},
+        ],
+    )
+    client = A2AClient(_FakeTransport(response))
+
+    reply = await client.send("u", "{}", footer=AGENT_RESULT, request_id="r")
+
+    assert set(reply.data) == {"AGENT_RESULT", "AGENT_METADATA"}
+    assert AGENT_METADATA.decode_data(reply.data["AGENT_METADATA"]) == meta
+
+
 async def test_send_drops_malformed_footer_but_keeps_text():
     """A malformed footer yields payload=None while the marker is still stripped."""
     body = "Some summary. <<<AGENT_RESULT {not valid json} AGENT_RESULT>>>"

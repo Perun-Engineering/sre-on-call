@@ -34,6 +34,51 @@ def build_a2a_request(text: str, request_id: str) -> dict[str, Any]:
     }
 
 
+def _iter_parts(result_data: dict) -> Any:
+    """Yield every ``parts`` list reachable in an A2A ``result``.
+
+    Covers all three reply shapes (inline ``parts``, wrapped ``message.parts``,
+    and every artifact's ``parts``) so a structured payload is found wherever
+    the server placed it.
+    """
+    inline = result_data.get("parts")
+    if isinstance(inline, list):
+        yield inline
+    message = result_data.get("message")
+    if isinstance(message, dict) and isinstance(message.get("parts"), list):
+        yield message["parts"]
+    artifacts = result_data.get("artifacts")
+    if isinstance(artifacts, list):
+        for artifact in artifacts:
+            if isinstance(artifact, dict) and isinstance(artifact.get("parts"), list):
+                yield artifact["parts"]
+
+
+def extract_response_data(result_data: dict) -> dict[str, dict]:
+    """Collect SRE structured DataPart payloads from an A2A ``result``.
+
+    Scans every parts list (inline, wrapped message, and all artifacts) for
+    ``{"kind": "data", "data": {"kind": <KIND>, "payload": {...}}}`` envelopes
+    — the structured-transport counterpart to the text footers parsed by
+    :meth:`shared.agent_footer.AgentFooter.extract`. Returns ``{KIND: payload}``;
+    malformed or non-SRE data parts are skipped. On duplicate kinds the last
+    occurrence wins, matching the "appended footer is authoritative" rule.
+    """
+    collected: dict[str, dict] = {}
+    for parts in _iter_parts(result_data):
+        for part in parts:
+            if not isinstance(part, dict) or part.get("kind") != "data":
+                continue
+            envelope = part.get("data")
+            if not isinstance(envelope, dict):
+                continue
+            kind = envelope.get("kind")
+            payload = envelope.get("payload")
+            if isinstance(kind, str) and isinstance(payload, dict):
+                collected[kind] = payload
+    return collected
+
+
 def _extract_text_parts(parts: Any) -> str:
     if not isinstance(parts, list):
         return ""

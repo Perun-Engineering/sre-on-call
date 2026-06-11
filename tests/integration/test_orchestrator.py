@@ -808,6 +808,61 @@ class TestAgentMetadataPropagation:
 
 
 
+    async def test_prefers_datapart_metadata_over_text_footer(self, alert_context):
+        """Issue #24: when both are present, the DataPart metadata wins."""
+        from shared.agent_telemetry import AGENT_METADATA
+        from shared.tool_result import AGENT_RESULT, format_result
+
+        text_meta = AgentMetadata(input_tokens=1, output_tokens=1, total_tokens=2)
+        data_meta = AgentMetadata(
+            model_id="us.anthropic.claude-haiku-4-5-20251001-v1:0",
+            input_tokens=120,
+            output_tokens=42,
+            total_tokens=162,
+            cost_usd=0.00033,
+        )
+        agent_result = AgentResult(
+            agent_name="eks", status="success", findings=[], summary="Pod healthy.",
+        )
+        text_body = f"{format_result(agent_result)}\n\n{AGENT_METADATA.encode(text_meta)}"
+
+        class StubClient:
+            async def post_json(self, url, payload):
+                return {
+                    "jsonrpc": "2.0",
+                    "id": payload["id"],
+                    "result": {
+                        "kind": "task",
+                        "artifacts": [
+                            {
+                                "name": "agent_response",
+                                "parts": [{"kind": "text", "text": text_body}],
+                            },
+                            {
+                                "name": "agent_data",
+                                "parts": [
+                                    {"kind": "data", "data": AGENT_RESULT.encode_data(agent_result)},
+                                    {"kind": "data", "data": AGENT_METADATA.encode_data(data_meta)},
+                                ],
+                            },
+                        ],
+                    },
+                }
+
+        orch = InvestigationOrchestrator(
+            http_client=StubClient(),
+            chat_platform=FakeChatPlatform(),
+            registry=_build_registry(active_specialized=["eks"]),
+        )
+
+        result = await orch.invoke_agent("eks", alert_context)
+
+        assert result.metadata.model_id == data_meta.model_id
+        assert result.metadata.input_tokens == 120  # DataPart, not the text footer's 1
+        assert result.metadata.cost_usd == 0.00033
+        assert "Pod healthy" in result.summary
+
+
 class TestDisabledInConfigPropagation:
     """Disabled-in-config agents are excluded from fan-out but rendered in
     the Incident Report's evidence section as 🚫 disabled blocks."""

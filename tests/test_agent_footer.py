@@ -176,6 +176,27 @@ class TestSpoofingDefense:
         assert "<<<" not in recovered.name and ">>>" not in recovered.name
 
 
+# ---------------------------------------------------------------------------
+# DataPart envelope (issue #24) — structured form for A2A DataPart transport
+# ---------------------------------------------------------------------------
+
+
+class TestDataEnvelope:
+    def test_encode_data_round_trip(self, footer):
+        original = _Sample(name="hello", value=42)
+        envelope = footer.encode_data(original)
+        assert envelope == {"kind": "SAMPLE", "payload": {"name": "hello", "value": 42}}
+        assert footer.decode_data(envelope["payload"]) == original
+
+    def test_decode_data_drops_malformed_payload_silently(self, footer):
+        # Missing required key — parser raises KeyError, decode swallows it.
+        assert footer.decode_data({"name": "x"}) is None
+
+    def test_decode_data_drops_non_dict_silently(self, footer):
+        assert footer.decode_data("not a dict") is None
+        assert footer.decode_data(None) is None
+
+
 class TestNeutralizeMarkers:
     def test_collapses_triple_angles(self):
         from shared.agent_footer import neutralize_markers
