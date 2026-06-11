@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 
 
@@ -56,6 +57,71 @@ class Finding:
     severity: str  # "critical", "warning", "info"
     metadata: dict = field(default_factory=dict)  # Source-specific metadata
     link: str | None = None  # Deep link into the data source the finding came from
+    chart: ChartDescriptor | None = None  # set when this finding's query is chartable
+
+
+@dataclass
+class ChartDescriptor:
+    """A tiny, source-agnostic pointer to a chartable query.
+
+    Rides every :class:`Finding` produced from one charted query; findings
+    from the same query share a ``chart_id``. The descriptor answers *which
+    chart*; the series data (:class:`ChartSeries`) is carried once per
+    ``chart_id`` on :class:`AgentResult.chart_series` and joined back here.
+    """
+
+    chart_id: str  # deterministic — see create()
+    source: str  # e.g. "cloudwatch_logs_insights"
+    log_groups: list[str]
+    query: str
+    start_epoch: int
+    end_epoch: int
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        source: str,
+        log_groups: list[str],
+        query: str,
+        start_epoch: int,
+        end_epoch: int,
+    ) -> ChartDescriptor:
+        """Build a descriptor with a deterministic ``chart_id``.
+
+        The id is ``sha256(source|sorted(log_groups)|query|start|end)`` hex,
+        truncated to 16 chars. Deterministic so identical queries dedup to one
+        chart file and the renderer (#33) can recompute it without storage.
+        """
+        key = (
+            f"{source}|{'|'.join(sorted(log_groups))}|{query}"
+            f"|{start_epoch}|{end_epoch}"
+        )
+        chart_id = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+        return cls(
+            chart_id=chart_id,
+            source=source,
+            log_groups=list(log_groups),
+            query=query,
+            start_epoch=start_epoch,
+            end_epoch=end_epoch,
+        )
+
+
+@dataclass
+class ChartSeries:
+    """The harvested series for one ``chart_id`` — the data behind a chart.
+
+    Stored once per ``chart_id`` on :class:`AgentResult.chart_series` (so many
+    findings sharing a chart don't duplicate the rows). ``points`` are the raw
+    query rows as ``{field: value}`` dicts; the renderer decides how to plot
+    them. ``series_kind`` is a best-effort hint and ``truncated`` flags a
+    capped series.
+    """
+
+    points: list[dict] = field(default_factory=list)
+    series_kind: str = "log_rows"  # or "binned"
+    truncated: bool = False
 
 
 @dataclass
@@ -69,6 +135,7 @@ class AgentResult:
     error_message: str | None = None  # Populated when status == "error"
     duration_seconds: float = 0.0  # How long the agent took
     metadata: AgentMetadata = field(default_factory=AgentMetadata)
+    chart_series: dict[str, ChartSeries] = field(default_factory=dict)  # chart_id -> series
 
 
 @dataclass

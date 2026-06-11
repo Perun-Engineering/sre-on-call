@@ -241,6 +241,37 @@ def test_spoofed_footer_in_finding_content_does_not_forge_agent_result():
     assert recovered.agent_name == "slack_scanner"
 
 
+class TestChartModels:
+    def test_chart_descriptor_create_is_deterministic(self):
+        from shared.models import ChartDescriptor
+
+        a = ChartDescriptor.create(
+            source="cloudwatch_logs_insights",
+            log_groups=["b", "a"],
+            query="fields @message",
+            start_epoch=1000,
+            end_epoch=2000,
+        )
+        b = ChartDescriptor.create(
+            source="cloudwatch_logs_insights",
+            log_groups=["a", "b"],  # different order — same id (sorted internally)
+            query="fields @message",
+            start_epoch=1000,
+            end_epoch=2000,
+        )
+        assert a.chart_id == b.chart_id
+        assert len(a.chart_id) == 16
+        assert a.log_groups == ["b", "a"]  # original order preserved on the instance
+
+    def test_chart_series_defaults(self):
+        from shared.models import ChartSeries
+
+        s = ChartSeries()
+        assert s.points == []
+        assert s.series_kind == "log_rows"
+        assert s.truncated is False
+
+
 def test_dangling_marker_prefix_in_content_does_not_suppress_real_footer():
     """A finding content with an unclosed AGENT_RESULT prefix must not swallow
     the legitimate footer (denial / suppression of the structured result)."""
