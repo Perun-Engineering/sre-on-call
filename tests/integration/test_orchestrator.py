@@ -202,6 +202,8 @@ def _make_orchestrator(
     synthesizer=None,
     embedding_client=None,
     history_store=None,
+    router=None,
+    followup=None,
 ) -> InvestigationOrchestrator:
     """Create an orchestrator with short timeouts for testing.
 
@@ -218,6 +220,8 @@ def _make_orchestrator(
         synthesizer=synthesizer,
         embedding_client=embedding_client,
         history_store=history_store,
+        router=router,
+        followup=followup,
     )
     # Override deadlines for fast tests
     orch.INITIAL_DEADLINE_SECONDS = initial_deadline
@@ -1234,3 +1238,305 @@ class TestOrchestratorIncidentHistoryWrite:
         # Default orchestrator (no client/store, env cleared) must not raise.
         orch = _make_orchestrator()
         await orch.investigate(alert_context)
+
+
+# ---------------------------------------------------------------------------
+# Tests: Phase 0.5 routing + Stage 2 follow-up (#28)
+# ---------------------------------------------------------------------------
+
+import json as _json
+
+from agents.master.routing import AgentRouter, RoutingResult
+from agents.master.followup import FollowupPlanner
+from agents.master.synthesis import AnalysisSynthesizer
+from shared.trace_store import EVENT_FOLLOWUP_DECISION, EVENT_ROUTING_DECISION
+
+
+class _FakeRouter:
+    """Injectable router returning a fixed RoutingResult (or None=fail-open)."""
+
+    def __init__(self, result):
+        self._result = result
+        self.calls: list[list[str]] = []
+
+    async def route(self, alert_context, candidates):
+        self.calls.append([c.agent_id for c in candidates])
+        return self._result
+
+
+class _FakePlanner:
+    """Injectable follow-up planner returning a fixed list of (id, hint)."""
+
+    def __init__(self, plan):
+        self._plan = plan
+        self.calls: list[list[str]] = []
+
+    async def plan(self, alert_context, results, candidates):
+        self.calls.append([c.agent_id for c in candidates])
+        return self._plan
+
+
+class _RaisingStructuredAgent:
+    """A model client that always fails — used to prove fail-open behavior."""
+
+    async def structured_output_async(self, output_model, prompt):
+        raise RuntimeError("bedrock down")
+
+
+class _PerUrlDelayClient:
+    """HTTP client that delays only a chosen URL, others respond instantly."""
+
+    def __init__(self, slow_url: str, delay: float):
+        self.slow_url = slow_url
+        self.delay = delay
+        self.calls: list[tuple[str, dict]] = []
+
+    async def post_json(self, url: str, payload: dict) -> dict:
+        self.calls.append((url, payload))
+        if url == self.slow_url:
+            await asyncio.sleep(self.delay)
+        return _default_a2a_response(payload)
+
+
+def _payload_text(payload: dict) -> str:
+    return payload["params"]["message"]["parts"][0]["text"]
+
+
+class TestRoutingDispatch:
+    @pytest.mark.asyncio
+    async def test_dispatches_only_selected_agents(self, alert_context):
+        router = _FakeRouter(
+            RoutingResult(
+                selected={"eks": "", "cloudwatch_logs": ""},
+                skipped={"slack_scanner": "no chatter relevance"},
+                rationale="logs + k8s suffice",
+            )
+        )
+        http_client = FakeHTTPClient()
+        chat = FakeChatPlatform()
+        orch = _make_orchestrator(http_client=http_client, chat_platform=chat, router=router)
+
+        await orch.investigate(alert_context)
+
+        urls = {url for url, _ in http_client.calls}
+        assert urls == {EKS_URL, CLOUDWATCH_URL}
+        assert SLACK_URL not in urls
+
+    @pytest.mark.asyncio
+    async def test_skipped_agent_renders_distinctly_not_as_failure(self, alert_context):
+        router = _FakeRouter(
+            RoutingResult(
+                selected={"eks": "", "cloudwatch_logs": ""},
+                skipped={"slack_scanner": "no chatter relevance"},
+                rationale="r",
+            )
+        )
+        chat = FakeChatPlatform()
+        orch = _make_orchestrator(chat_platform=chat, router=router)
+
+        await orch.investigate(alert_context)
+
+        _, _, report = _find_report_msg(chat.messages)
+        assert "➖" in report
+        assert "not investigated" in report
+        assert "no chatter relevance" in report
+        assert "⚠️ Slack Scanner data unavailable" not in report
+
+    @pytest.mark.asyncio
+    async def test_per_agent_hint_injected_on_payload(self, alert_context):
+        router = _FakeRouter(
+            RoutingResult(
+                selected={"eks": "describe payment pods in the window"},
+                skipped={"slack_scanner": "x", "cloudwatch_logs": "y"},
+                rationale="r",
+            )
+        )
+        http_client = FakeHTTPClient()
+        orch = _make_orchestrator(http_client=http_client, router=router)
+
+        await orch.investigate(alert_context)
+
+        eks_payloads = [p for u, p in http_client.calls if u == EKS_URL]
+        assert eks_payloads, "eks should have been dispatched"
+        text = _payload_text(eks_payloads[0])
+        assert "describe payment pods in the window" in text
+        assert _json.loads(text)["investigation_hints"] == "describe payment pods in the window"
+
+    @pytest.mark.asyncio
+    async def test_router_none_dispatches_all(self, alert_context):
+        router = _FakeRouter(None)  # fail-open: dispatch every active agent
+        http_client = FakeHTTPClient()
+        orch = _make_orchestrator(http_client=http_client, router=router)
+
+        await orch.investigate(alert_context)
+
+        urls = {url for url, _ in http_client.calls}
+        assert urls == {SLACK_URL, CLOUDWATCH_URL, EKS_URL}
+
+
+class TestFailingModelClientDegradesToToday:
+    """Acceptance: a failing model client degrades to *exactly* today's
+    behavior — all active agents dispatched, no follow-up, report still posts."""
+
+    @pytest.mark.asyncio
+    async def test_all_fail_open_to_baseline(self, alert_context):
+        router = AgentRouter(agent=_RaisingStructuredAgent())
+        followup = FollowupPlanner(agent=_RaisingStructuredAgent())
+        synth = AnalysisSynthesizer(agent=_RaisingStructuredAgent())
+        http_client = FakeHTTPClient()
+        chat = FakeChatPlatform()
+        orch = _make_orchestrator(
+            http_client=http_client,
+            chat_platform=chat,
+            router=router,
+            followup=followup,
+            synthesizer=synth,
+        )
+
+        await orch.investigate(alert_context)
+
+        urls = [url for url, _ in http_client.calls]
+        # Every active agent dispatched, exactly once — no follow-up round.
+        assert sorted(urls) == sorted([SLACK_URL, CLOUDWATCH_URL, EKS_URL])
+        # Report still posts, with no skipped block and no Analysis section.
+        _, _, report = _find_report_msg(chat.messages)
+        assert "Incident Report" in report
+        assert "➖" not in report
+        assert "🧠 Analysis" not in report
+
+
+class TestFollowupRound:
+    @pytest.mark.asyncio
+    async def test_followup_dispatches_one_refined_round(self, alert_context):
+        planner = _FakePlanner([("eks", "recheck payment pods now")])
+        http_client = FakeHTTPClient()
+        chat = FakeChatPlatform()
+        orch = _make_orchestrator(
+            http_client=http_client,
+            chat_platform=chat,
+            followup=planner,
+            initial_deadline=0.1,
+            hard_cutoff=3.0,
+        )
+
+        await orch.investigate(alert_context)
+
+        assert planner.calls, "follow-up planner should be consulted"
+        eks_payloads = [_payload_text(p) for u, p in http_client.calls if u == EKS_URL]
+        # eks dispatched twice: initial sweep + refined follow-up.
+        assert len(eks_payloads) == 2
+        assert any("recheck payment pods now" in t for t in eks_payloads)
+
+    @pytest.mark.asyncio
+    async def test_followup_holds_hard_cutoff(self, alert_context):
+        # Router skips eks initially; the follow-up re-dispatches it, but eks
+        # hangs well past the cutoff. The investigation must still terminate at
+        # the cutoff, not wait for the slow agent.
+        router = _FakeRouter(
+            RoutingResult(
+                selected={"slack_scanner": "", "cloudwatch_logs": ""},
+                skipped={"eks": "not k8s on first read"},
+                rationale="r",
+            )
+        )
+        planner = _FakePlanner([("eks", "confirm in k8s")])
+        http_client = _PerUrlDelayClient(slow_url=EKS_URL, delay=5.0)
+        chat = FakeChatPlatform()
+        orch = _make_orchestrator(
+            http_client=http_client,
+            chat_platform=chat,
+            router=router,
+            followup=planner,
+            initial_deadline=0.1,
+            hard_cutoff=1.5,
+        )
+
+        loop = asyncio.get_event_loop()
+        t0 = loop.time()
+        await orch.investigate(alert_context)
+        elapsed = loop.time() - t0
+
+        # Cutoff held: did NOT wait for the 5s follow-up agent.
+        assert elapsed < 2.3, f"investigation overran the cutoff: {elapsed:.2f}s"
+        # The follow-up genuinely dispatched eks (otherwise the test is vacuous).
+        assert any(u == EKS_URL for u, _ in http_client.calls)
+        assert _find_report_msg(chat.messages)
+
+    @pytest.mark.asyncio
+    async def test_no_followup_when_disabled(self, alert_context):
+        http_client = FakeHTTPClient()
+        orch = _make_orchestrator(http_client=http_client, followup=None)
+
+        await orch.investigate(alert_context)
+
+        # Exactly one dispatch per active agent — no extra round.
+        urls = [url for url, _ in http_client.calls]
+        assert sorted(urls) == sorted([SLACK_URL, CLOUDWATCH_URL, EKS_URL])
+
+
+class TestBothDisabledIsTodaysBehavior:
+    @pytest.mark.asyncio
+    async def test_no_routing_no_followup(self, alert_context):
+        http_client = FakeHTTPClient()
+        chat = FakeChatPlatform()
+        # router/followup default to None (env unset) — byte-for-byte today's.
+        orch = _make_orchestrator(http_client=http_client, chat_platform=chat)
+
+        await orch.investigate(alert_context)
+
+        urls = [url for url, _ in http_client.calls]
+        assert sorted(urls) == sorted([SLACK_URL, CLOUDWATCH_URL, EKS_URL])
+        _, _, report = _find_report_msg(chat.messages)
+        assert "➖" not in report
+
+
+class TestRoutingTrace:
+    @pytest.mark.asyncio
+    async def test_routing_decision_in_trace_archive(self, alert_context):
+        with mock_aws():
+            s3, ddb = _make_trace_resources()
+            trace_store = TraceStore(
+                bucket=_TRACE_BUCKET,
+                table_name=_TRACE_TABLE,
+                s3_client=s3,
+                dynamodb_resource=ddb,
+            )
+            registry = _build_registry()
+            router = _FakeRouter(
+                RoutingResult(
+                    selected={"eks": "check pods"},
+                    skipped={"slack_scanner": "sk", "cloudwatch_logs": "sk2"},
+                    rationale="k8s only",
+                )
+            )
+            orch = InvestigationOrchestrator(
+                http_client=FakeHTTPClient(),
+                chat_platform=FakeChatPlatform(),
+                report_formatter=ReportFormatter(registry),
+                registry=registry,
+                trace_store=trace_store,
+                router=router,
+            )
+            orch.INITIAL_DEADLINE_SECONDS = 0.1
+            orch.HARD_CUTOFF_SECONDS = 0.5
+
+            await orch.investigate(alert_context)
+
+            objs = s3.list_objects_v2(Bucket=_TRACE_BUCKET, Prefix="dt=")
+            keys = [o["Key"] for o in objs.get("Contents", [])]
+            event_keys = [k for k in keys if "/events/" in k]
+            assert sum(EVENT_ROUTING_DECISION in k for k in event_keys) == 1
+
+            # The routing event payload carries selected hints + skip reasons.
+            routing_key = next(k for k in event_keys if EVENT_ROUTING_DECISION in k)
+            body = s3.get_object(Bucket=_TRACE_BUCKET, Key=routing_key)["Body"].read()
+            payload = _json.loads(body)["payload"]
+            assert payload["selected"] == {"eks": "check pods"}
+            assert "slack_scanner" in payload["skipped"]
+
+            # The manifest records the routing block too.
+            manifest_key = next(k for k in keys if "/manifest.json" in k)
+            manifest = _json.loads(
+                s3.get_object(Bucket=_TRACE_BUCKET, Key=manifest_key)["Body"].read()
+            )
+            assert manifest["routing"]["selected"] == {"eks": "check pods"}

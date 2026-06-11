@@ -20,7 +20,7 @@ import asyncio
 import json
 import logging
 import time
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 
 from shared.a2a_client import (
     A2AReply,
@@ -41,13 +41,17 @@ from shared.tool_result import AGENT_RESULT
 from shared.trace_store import (
     EVENT_A2A_REQUEST,
     EVENT_A2A_RESPONSE,
+    EVENT_FOLLOWUP_DECISION,
     EVENT_INVESTIGATION_TERMINATED,
+    EVENT_ROUTING_DECISION,
     SOURCE_MASTER,
     ResultSummary,
     TraceManifest,
     TraceStore,
 )
+from agents.master.followup import FollowupCandidate, FollowupPlanner
 from agents.master.report_formatter import ReportFormatter
+from agents.master.routing import AgentCandidate, AgentRouter, RoutingResult
 from agents.master.synthesis import AnalysisSynthesizer, IncidentAnalysis
 from shared.report_renderer import AnalysisSection
 
@@ -56,6 +60,12 @@ logger = logging.getLogger(__name__)
 # Cap on the outcome record's free-text summary when no synthesis correlation
 # is available to fall back on — keeps the history item compact.
 _OUTCOME_SUMMARY_CHARS = 600
+
+# Stage 2 follow-up only runs when at least this much of the hard-cutoff budget
+# remains after the initial report — enough to plan and land a refined dispatch.
+# The dispatched follow-up tasks are *also* bounded by the Phase 4 cutoff loop,
+# so the 5-minute deadline holds regardless; this just avoids a pointless call.
+_MIN_FOLLOWUP_BUDGET_SECONDS = 1.0
 
 
 def _to_analysis_section(analysis: IncidentAnalysis | None) -> AnalysisSection | None:
@@ -155,6 +165,23 @@ def _merge_metadata(
     return replace(base, **overrides)
 
 
+@dataclass(frozen=True)
+class _RoutingPlan:
+    """The orchestrator's resolved dispatch plan for one investigation.
+
+    ``selected_ids`` is the ordered set of agents to fan out to; ``hints`` maps
+    each onto its per-agent investigation hint; ``skipped`` maps deliberately
+    skipped agents onto the router's reason (rendered ➖ in the report).
+    ``manifest_record`` is the JSON-safe routing block for the trace manifest,
+    or ``None`` when routing was disabled or fell open (dispatched all).
+    """
+
+    selected_ids: list[str]
+    hints: dict[str, str]
+    skipped: dict[str, str]
+    manifest_record: dict | None
+
+
 # ---------------------------------------------------------------------------
 # InvestigationOrchestrator
 # ---------------------------------------------------------------------------
@@ -193,6 +220,8 @@ class InvestigationOrchestrator:
         synthesizer: AnalysisSynthesizer | None = None,
         embedding_client: EmbeddingClient | None = None,
         history_store: IncidentHistoryStore | None = None,
+        router: AgentRouter | None = None,
+        followup: FollowupPlanner | None = None,
     ) -> None:
         self._chat_platform: ChatPlatform | None = chat_platform
         self._registry: AgentRegistry = registry or get_registry()
@@ -204,6 +233,14 @@ class InvestigationOrchestrator:
         self._synthesizer = (
             synthesizer if synthesizer is not None else AnalysisSynthesizer.from_env()
         )
+
+        # Phase 0.5 routing (issue #28) is opt-in via ALERT_ROUTING_ENABLED, and
+        # the Stage 2 follow-up round via FOLLOWUP_ROUND_ENABLED. Both from_env()
+        # return None when disabled, in which case the orchestrator dispatches
+        # every active agent and runs no follow-up — byte-for-byte today's flow.
+        # Both call sites are independently fail-open. Tests inject a fake or None.
+        self._router = router if router is not None else AgentRouter.from_env()
+        self._followup = followup if followup is not None else FollowupPlanner.from_env()
 
         self.disabled_agents: set[str] = {
             a.id for a in self._registry.disabled_in_config(kind="specialized")
@@ -256,13 +293,22 @@ class InvestigationOrchestrator:
         platform = self._get_platform(alert_context.platform)
         target = DeliveryTarget.for_alert(alert_context)
 
+        # --- Phase 0.5: routing — which agents to dispatch + per-agent hints --
+        # Fail-open: routing disabled or any error → dispatch every active
+        # agent (today's behavior). Skipped agents render distinctly in the
+        # report. Routing runs before the announce so the kick-off notice
+        # reflects the agents we're actually querying; its latency is spent out
+        # of the 60s window and is captured by the elapsed math below.
+        routing = await self._route(alert_context)
+        dispatched_agents = routing.selected_ids
+        skipped_agents = routing.skipped
+
         # --- Phase 0: announce which agents will be queried ------------------
         # Fire-and-forget so fan-out starts immediately; a slow chat post
         # would otherwise add an RTT to every investigation. The "started"
         # notice lists only agents we're actively dispatching to — disabled-
-        # in-config agents only appear in the Incident Report's Evidence
-        # section, not the kick-off announcement.
-        dispatched_agents = list(self.agent_endpoints.keys())
+        # in-config and router-skipped agents only appear in the Incident
+        # Report's Evidence section, not the kick-off announcement.
         if dispatched_agents:
             started_sections = self.report_formatter.build_started_sections(
                 alert_context, dispatched_agents,
@@ -273,8 +319,13 @@ class InvestigationOrchestrator:
             )
 
         # --- Phase 1: fan-out ------------------------------------------------
+        # Each selected agent receives the alert with its router-supplied hint
+        # injected onto the payload; the rest of the active roster is skipped.
         pending = self._fanout.dispatch(
-            lambda agent_id: self._invoke_agent_safe(agent_id, alert_context)
+            lambda agent_id: self._invoke_agent_safe(
+                agent_id, self._with_hint(alert_context, routing.hints.get(agent_id))
+            ),
+            agent_ids=dispatched_agents,
         )
 
         # --- Phase 2: wait up to INITIAL_DEADLINE_SECONDS --------------------
@@ -303,6 +354,7 @@ class InvestigationOrchestrator:
             pending_agents=pending_ids,
             disabled_agents=self.disabled_agents,
             analysis=analysis,
+            skipped_agents=skipped_agents,
         )
 
         try:
@@ -315,6 +367,16 @@ class InvestigationOrchestrator:
                 "(all retries exhausted).",
                 alert_context.investigation_id,
             )
+
+        # --- Stage 2: one bounded follow-up round ----------------------------
+        # Fail-open and hard-capped: at most one extra dispatch to ≤N agents,
+        # only when the remaining cutoff budget can absorb it. New tasks merge
+        # into `pending` and land through the Phase 4 enrichment path below;
+        # the 5-minute cutoff is held by that loop's deadline + cancel.
+        pending, followup_dispatched = await self._maybe_followup(
+            alert_context, results, pending, start_time
+        )
+        dispatched_agents = sorted(set(dispatched_agents) | followup_dispatched)
 
         # --- Phase 4: accept late results until HARD_CUTOFF_SECONDS ----------
         # Each harvest re-waits the *same* in-flight requests — no re-send.
@@ -377,6 +439,7 @@ class InvestigationOrchestrator:
             pending_ids=pending_ids,
             started_at_iso=started_at_iso,
             start_time=start_time,
+            routing=routing.manifest_record,
         )
 
         # --- Phase 8: record the incident outcome for similar-incident lookup ---
@@ -433,6 +496,135 @@ class InvestigationOrchestrator:
             return None
         analysis = await self._synthesizer.synthesize(alert_context, results)
         return _to_analysis_section(analysis)
+
+    # ------------------------------------------------------------------
+    # Routing + follow-up (issue #28)
+    # ------------------------------------------------------------------
+
+    async def _route(self, alert_context: AlertContext) -> _RoutingPlan:
+        """Resolve which active agents to dispatch and their per-agent hints.
+
+        Fail-open: with routing disabled, or on any router failure / a decision
+        that would skip every agent, returns a plan that dispatches every
+        active agent with no hints — exactly today's behavior. The routing
+        decision (when present) is written to the trace archive.
+        """
+        all_ids = list(self.agent_endpoints)
+        if self._router is None:
+            return _RoutingPlan(all_ids, {}, {}, None)
+
+        candidates = [
+            AgentCandidate(aid, self._candidate_description(aid)) for aid in all_ids
+        ]
+        result: RoutingResult | None = await self._router.route(alert_context, candidates)
+        if result is None:
+            return _RoutingPlan(all_ids, {}, {}, None)
+
+        selected_ids = [aid for aid in all_ids if aid in result.selected]
+        record = {
+            "selected": result.selected,
+            "skipped": result.skipped,
+            "rationale": result.rationale,
+        }
+        self._put_trace_event(alert_context, EVENT_ROUTING_DECISION, record)
+        return _RoutingPlan(selected_ids, result.selected, result.skipped, record)
+
+    def _candidate_description(self, agent_id: str) -> str:
+        """Short role blurb for the router/follow-up prompt, from the registry."""
+        try:
+            return self._registry.lookup(agent_id).display_name
+        except KeyError:
+            return agent_id
+
+    @staticmethod
+    def _with_hint(alert_context: AlertContext, hint: str | None) -> AlertContext:
+        """Return the alert with a per-agent investigation hint injected, if any."""
+        if not hint:
+            return alert_context
+        return replace(alert_context, investigation_hints=hint)
+
+    async def _maybe_followup(
+        self,
+        alert_context: AlertContext,
+        results: dict[str, AgentResult | AgentFailure],
+        pending: dict[str, asyncio.Task[AgentResult]],
+        start_time: float,
+    ) -> tuple[dict[str, asyncio.Task[AgentResult]], set[str]]:
+        """Run at most one bounded follow-up round, fail-open.
+
+        Returns the (possibly extended) ``pending`` map and the set of agents
+        the follow-up dispatched. Skips entirely when follow-up is disabled,
+        when the remaining cutoff budget is too small, or when there are no
+        eligible (not-currently-in-flight) candidates. The planning call is
+        bounded by the remaining budget, and the dispatched tasks are harvested
+        by the Phase 4 cutoff loop — so the 5-minute deadline always holds.
+        """
+        if self._followup is None:
+            return pending, set()
+
+        elapsed = asyncio.get_event_loop().time() - start_time
+        remaining = self.HARD_CUTOFF_SECONDS - elapsed
+        if remaining <= _MIN_FOLLOWUP_BUDGET_SECONDS:
+            return pending, set()
+
+        # Eligible candidates are active agents not currently in flight —
+        # re-dispatching a still-pending agent would clobber its live task.
+        candidate_ids = [aid for aid in self.agent_endpoints if aid not in pending]
+        if not candidate_ids:
+            return pending, set()
+        candidates = [
+            FollowupCandidate(aid, self._candidate_description(aid))
+            for aid in candidate_ids
+        ]
+
+        try:
+            plan = await asyncio.wait_for(
+                self._followup.plan(alert_context, results, candidates),
+                timeout=remaining,
+            )
+        except Exception:
+            logger.warning(
+                "Follow-up planning exceeded the remaining budget for "
+                "investigation %s; skipping the round.",
+                alert_context.investigation_id,
+                exc_info=True,
+            )
+            return pending, set()
+
+        if not plan:
+            return pending, set()
+
+        self._put_trace_event(
+            alert_context,
+            EVENT_FOLLOWUP_DECISION,
+            {"dispatches": [{"agent_id": aid, "hint": hint} for aid, hint in plan]},
+        )
+
+        dispatched: set[str] = set()
+        for agent_id, hint in plan:
+            new_tasks = self._fanout.dispatch(
+                lambda aid, _hint=hint: self._invoke_agent_safe(
+                    aid, self._with_hint(alert_context, _hint)
+                ),
+                agent_ids=[agent_id],
+            )
+            pending.update(new_tasks)
+            dispatched.add(agent_id)
+        return pending, dispatched
+
+    def _put_trace_event(
+        self, alert_context: AlertContext, event_type: str, payload: dict
+    ) -> None:
+        """Write a routing/follow-up decision event to the trace archive (no-op
+        when tracing is disabled). The trace store swallows its own errors."""
+        if self._trace_store is None:
+            return
+        self._trace_store.put_event(
+            investigation_id=alert_context.investigation_id,
+            source=SOURCE_MASTER,
+            event_type=event_type,
+            payload=payload,
+        )
 
     async def _post_started_notice(
         self,
@@ -550,6 +742,7 @@ class InvestigationOrchestrator:
         pending_ids: set[str],
         started_at_iso: str,
         start_time: float,
+        routing: dict | None = None,
     ) -> None:
         """Emit the investigation_terminated event + write the manifest.
 
@@ -624,6 +817,7 @@ class InvestigationOrchestrator:
             results_summary=results_summary,
             status=status,
             error_count=error_count,
+            routing=routing,
         )
         self._trace_store.put_manifest(manifest)
 

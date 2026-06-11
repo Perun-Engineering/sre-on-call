@@ -18,7 +18,7 @@ initial deadline then in late-enrichment windows to the hard cutoff; the
 from __future__ import annotations
 
 import asyncio
-from typing import Awaitable, Callable, TypeVar
+from typing import Any, Callable, Coroutine, TypeVar
 
 from shared.a2a_client import A2AClient, AsyncHTTPClient, RoutingHTTPClient
 from shared.agents import Agent, AgentRegistry, get_registry
@@ -55,12 +55,25 @@ class Fanout:
         return self._registry.disabled_in_config(kind="specialized")
 
     def dispatch(
-        self, make_coro: Callable[[str], Awaitable[R]]
+        self,
+        make_coro: Callable[[str], Coroutine[Any, Any, R]],
+        agent_ids: list[str] | None = None,
     ) -> dict[str, asyncio.Task[R]]:
-        """Spawn one task per active agent from the caller-supplied coroutine."""
+        """Spawn one task per dispatched agent from the caller-supplied coroutine.
+
+        ``agent_ids`` selects a subset of the active agents (issue #28's
+        router-chosen targets), preserving the registry render order and
+        silently dropping ids that aren't active endpoints. ``None`` dispatches
+        every active agent — today's behaviour.
+        """
+        if agent_ids is None:
+            selected = list(self.agent_endpoints)
+        else:
+            wanted = set(agent_ids)
+            selected = [aid for aid in self.agent_endpoints if aid in wanted]
         return {
             agent_id: asyncio.create_task(make_coro(agent_id), name=f"fanout-{agent_id}")
-            for agent_id in self.agent_endpoints
+            for agent_id in selected
         }
 
     @staticmethod

@@ -521,6 +521,65 @@ class TestDisabledInConfigEvidence:
         assert "☸️ *EKS Cluster State* 🚫" in report
 
 
+class TestRouterSkippedEvidence:
+    """Router-skipped agents render as a distinct ➖ 'not investigated' block —
+    never as a failure (issue #28)."""
+
+    def test_skipped_agent_renders_as_distinct_block(self, formatter, alert_context):
+        sections = formatter.build_incident_sections(
+            alert_context,
+            agent_results={},
+            skipped_agents={"discord_scanner": "no chat signal for a CPU alert"},
+        )
+        report = SlackReportRenderer().render_report(sections)
+
+        assert "🎮 *Discord Scanner* ➖" in report
+        assert "not investigated" in report
+        assert "no chat signal for a CPU alert" in report
+        # A skip is NOT a failure.
+        assert "⚠️ Discord Scanner data unavailable" not in report
+
+    def test_skipped_renders_in_discord_dialect(self, formatter, alert_context):
+        sections = formatter.build_incident_sections(
+            alert_context,
+            agent_results={},
+            skipped_agents={"discord_scanner": "out of scope"},
+        )
+        report = DiscordReportRenderer().render_report(sections)
+        assert "➖" in report
+        assert "not investigated" in report
+
+    def test_skipped_alongside_active_and_disabled(self, formatter, alert_context):
+        results = {
+            "slack_scanner": _make_success_result(
+                "slack_scanner",
+                [_make_finding("Alert in #ops", source="ops")],
+                "Found alerts",
+            ),
+        }
+        sections = formatter.build_incident_sections(
+            alert_context,
+            agent_results=results,
+            disabled_agents={"discord_scanner"},
+            skipped_agents={"eks": "alert is not k8s-related"},
+        )
+        report = SlackReportRenderer().render_report(sections)
+
+        assert "📡 *Slack Scanner*" in report
+        assert "🎮 *Discord Scanner* 🚫" in report
+        assert "☸️ *EKS Cluster State* ➖" in report
+
+    def test_skipped_agent_does_not_add_manual_check_action(self, formatter, alert_context):
+        # A skipped agent must not generate a "Manually check X" recommended
+        # action — that's reserved for failures.
+        sections = formatter.build_incident_sections(
+            alert_context,
+            agent_results={},
+            skipped_agents={"eks": "out of scope"},
+        )
+        assert "Manually check" not in sections.recommended_actions
+
+
 class TestUnhealthyAgentEvidence:
     """Agents reporting status='unhealthy' render as 🚫 with an 'investigate
     agent configuration' nudge — distinct from status='error' which is a

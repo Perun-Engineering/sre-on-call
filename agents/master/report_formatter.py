@@ -148,6 +148,7 @@ class ReportFormatter:
         pending_agents: set[str] | None = None,
         disabled_agents: set[str] | None = None,
         analysis: AnalysisSection | None = None,
+        skipped_agents: dict[str, str] | None = None,
     ) -> ReportSections:
         """Build the structured Incident Report sections.
 
@@ -162,7 +163,13 @@ class ReportFormatter:
         evidence blocks for transparency. Their ids must be in the
         registry; otherwise ``KeyError`` propagates.
 
-        Agents not in any of the three sets are treated as not configured
+        ``skipped_agents`` (issue #28) maps an agent the master's router
+        deliberately did *not* dispatch for *this* alert onto the router's
+        reason. They render as a distinct ➖ "not investigated" block —
+        never as a failure — so a deliberate skip reads differently from an
+        agent that errored or timed out.
+
+        Agents not in any of these sets are treated as not configured
         for this investigation and omitted entirely.
         """
         sections = self._build_report_sections(
@@ -170,6 +177,7 @@ class ReportFormatter:
             agent_results,
             pending_agents or set(),
             disabled_agents or set(),
+            skipped_agents or {},
         )
         sections.variant_label = alert_context.variant_label
         sections.analysis = analysis
@@ -298,6 +306,7 @@ class ReportFormatter:
         agent_results: dict[str, AgentResult | AgentFailure],
         pending_agents: set[str],
         disabled_agents: set[str],
+        skipped_agents: dict[str, str],
     ) -> ReportSections:
         summary_parts = self._collect_summary_parts(agent_results)
         root_cause_parts = self._collect_root_cause_parts(agent_results)
@@ -308,7 +317,7 @@ class ReportFormatter:
             summary=self._joined_summary_or_fallback(alert_context, summary_parts),
             root_cause=self._joined_root_cause_or_fallback(root_cause_parts),
             evidence_blocks=self._build_evidence_blocks(
-                agent_results, pending_agents, disabled_agents,
+                agent_results, pending_agents, disabled_agents, skipped_agents,
             ),
             impact_assessment=self._build_impact_assessment(alert_context, agent_results),
             recommended_actions=self._build_recommended_actions(agent_results, pending_agents),
@@ -408,6 +417,7 @@ class ReportFormatter:
         agent_results: dict[str, AgentResult | AgentFailure],
         pending_agents: set[str],
         disabled_agents: set[str],
+        skipped_agents: dict[str, str],
     ) -> list[EvidenceBlock]:
         """Build one evidence block per agent the orchestrator considered.
 
@@ -415,13 +425,19 @@ class ReportFormatter:
         - Agents that returned a result (success / error / unhealthy).
         - Agents still pending at the initial deadline (⏳).
         - Agents that are deployed-but-inactive in this deployment (🚫).
+        - Agents the router deliberately skipped for this alert (➖).
 
-        Agents not in any of the three sets are skipped — emitting "data
+        Agents not in any of these sets are skipped — emitting "data
         unavailable" for an agent the orchestrator chose not to invoke would
         mislead. Order follows the registry's specialized agent order;
         unknown ids fall to the end alphabetically.
         """
-        configured = set(agent_results.keys()) | pending_agents | disabled_agents
+        configured = (
+            set(agent_results.keys())
+            | pending_agents
+            | disabled_agents
+            | set(skipped_agents)
+        )
         ordered_known = [a for a in self._ordered_specialized_ids() if a in configured]
         ordered = ordered_known + sorted(configured - set(ordered_known))
 
@@ -433,6 +449,7 @@ class ReportFormatter:
                 agent_results.get(agent_key),
                 pending_agents,
                 disabled_agents,
+                skipped_agents,
                 display_name,
             )
             blocks.append(
@@ -452,8 +469,20 @@ class ReportFormatter:
         result: AgentResult | AgentFailure | None,
         pending_agents: set[str],
         disabled_agents: set[str],
+        skipped_agents: dict[str, str],
         display_name: str,
     ) -> tuple[list[EvidenceLine], EvidenceStatus, str | None]:
+        if result is None and agent_key in skipped_agents:
+            reason = skipped_agents[agent_key] or "router judged it not relevant to this alert"
+            return (
+                [
+                    EvidenceLine(
+                        f"➖ {display_name} not investigated — {reason}"
+                    )
+                ],
+                "skipped",
+                None,
+            )
         if result is None and agent_key in disabled_agents:
             return (
                 [

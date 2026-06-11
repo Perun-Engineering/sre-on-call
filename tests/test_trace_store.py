@@ -92,6 +92,20 @@ def _make_manifest(**overrides) -> TraceManifest:
     return TraceManifest(**base)
 
 
+class TestManifestRouting:
+    def test_routing_omitted_when_none(self) -> None:
+        assert "routing" not in _make_manifest().to_json_dict()
+
+    def test_routing_serialized_when_present(self) -> None:
+        routing = {
+            "selected": {"eks": "check payment pods"},
+            "skipped": {"slack_scanner": "no chatter relevance"},
+            "rationale": "logs + k8s suffice",
+        }
+        d = _make_manifest(routing=routing).to_json_dict()
+        assert d["routing"] == routing
+
+
 # ---------------------------------------------------------------------------
 # Construction
 # ---------------------------------------------------------------------------

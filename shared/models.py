@@ -39,6 +39,11 @@ class AlertContext:
     experiment_id: str | None = None  # Set when running under an A/B experiment
     variant_id: str | None = None  # "a" or "b"; None when no experiment
     variant_label: str | None = None  # Human-readable variant name
+    # Per-agent investigation hint set by the master's router (issue #28):
+    # a focused, one-sentence steer (suspected pods, candidate log groups,
+    # time-window emphasis) injected just before dispatch. None for the
+    # unrouted/today's path; carried verbatim on the A2A payload.
+    investigation_hints: str | None = None
 
 
 @dataclass

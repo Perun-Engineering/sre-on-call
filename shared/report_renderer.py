@@ -13,7 +13,7 @@ from typing import Literal, Protocol, Union, assert_never
 
 from shared.models import SnapshotSection
 
-EvidenceStatus = Literal["ok", "pending", "error", "disabled"]
+EvidenceStatus = Literal["ok", "pending", "error", "disabled", "skipped"]
 EnrichmentStatus = Literal["ok", "error"]
 SnapshotStatus = Literal["ok", "anomaly", "error", "disabled"]
 
@@ -605,6 +605,8 @@ class MarkupReportRenderer:
                 status_marker = " ⚠️"
             elif b.status == "disabled":
                 status_marker = " 🚫"
+            elif b.status == "skipped":
+                status_marker = " ➖"
             parts.append(f"\n{b.emoji} {d.bold(b.display_name)}{status_marker}")
             if b.metadata_line:
                 parts.append(f"_{b.metadata_line}_")

@@ -122,6 +122,32 @@ class TestFanoutDispatch:
             settled, _ = await Fanout.harvest(pending, timeout=1.0)
         assert settled["eks"] == "done-eks"
 
+    @pytest.mark.asyncio
+    async def test_dispatch_subset_only_spawns_named_agents(self):
+        fan = _fanout()
+
+        async def make_coro(agent_id: str) -> str:
+            return f"done-{agent_id}"
+
+        pending = fan.dispatch(make_coro, agent_ids=["eks", "slack_scanner"])
+        try:
+            assert set(pending) == {"eks", "slack_scanner"}
+        finally:
+            await Fanout.harvest(pending, timeout=1.0)
+
+    @pytest.mark.asyncio
+    async def test_dispatch_subset_ignores_unknown_ids(self):
+        fan = _fanout()
+
+        async def make_coro(agent_id: str) -> str:
+            return f"done-{agent_id}"
+
+        pending = fan.dispatch(make_coro, agent_ids=["eks", "ghost"])
+        try:
+            assert set(pending) == {"eks"}
+        finally:
+            await Fanout.harvest(pending, timeout=1.0)
+
 
 # ---------------------------------------------------------------------------
 # Fanout harvest + cancel
