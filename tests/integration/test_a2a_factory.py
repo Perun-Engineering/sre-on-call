@@ -7,9 +7,40 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from shared.a2a_factory import DEFAULT_MODEL_ID, TelemetryCapturingA2AExecutor, _resolve_model
+from shared import busy_state
+from shared.a2a_factory import (
+    DEFAULT_MODEL_ID,
+    TelemetryCapturingA2AExecutor,
+    _ping_status,
+    _resolve_model,
+)
 from shared.models import AgentResult, Finding
 from shared.tool_result import AGENT_RESULT
+
+
+def test_ping_status_healthy_when_idle():
+    assert busy_state.is_busy() is False
+    assert _ping_status() == "Healthy"
+
+
+async def test_ping_status_reflects_busy_idle_transitions():
+    """Acceptance: /ping flips to HealthyBusy around a background task."""
+    release = asyncio.Event()
+
+    async def work() -> None:
+        await release.wait()
+
+    task = asyncio.create_task(work())
+    busy_state.track(task)
+    try:
+        assert _ping_status() == "HealthyBusy"
+    finally:
+        release.set()
+        await task
+        # Let the done-callback discard the task before re-checking.
+        await asyncio.sleep(0)
+
+    assert _ping_status() == "Healthy"
 
 
 def test_default_model_is_claude_haiku_4_5():

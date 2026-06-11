@@ -31,11 +31,10 @@ from strands import tool
 
 from agents.master.orchestrator import InvestigationOrchestrator
 from agents.master.snapshot_orchestrator import StatusSnapshotOrchestrator
+from shared import busy_state
 from shared.models import AlertContext
 
 logger = logging.getLogger(__name__)
-
-_BACKGROUND_TASKS: set[asyncio.Task] = set()
 
 
 def _alert_context_from_payload(payload: dict) -> AlertContext:
@@ -94,9 +93,10 @@ async def investigate_alert(alert_context_json: str) -> str:
         orchestrator.investigate(alert_context),
         name=f"investigate-{alert_context.investigation_id}",
     )
-    # Hold a strong reference so the loop doesn't GC the task mid-flight.
-    _BACKGROUND_TASKS.add(task)
-    task.add_done_callback(_BACKGROUND_TASKS.discard)
+    # Track as in-flight work: holds a strong reference so the loop doesn't GC
+    # the task mid-flight, and flips /ping to HealthyBusy so AgentCore won't
+    # reclaim the instance before the investigation finishes.
+    busy_state.track(task)
 
     return (
         f"Investigation {alert_context.investigation_id} started "
@@ -149,9 +149,10 @@ async def capture_status_snapshot(snapshot_request_json: str) -> str:
         orchestrator.capture(payload),
         name=f"snapshot-{requested_at or 'now'}",
     )
-    # Hold a strong reference so the loop doesn't GC the task mid-flight.
-    _BACKGROUND_TASKS.add(bg_task)
-    bg_task.add_done_callback(_BACKGROUND_TASKS.discard)
+    # Track as in-flight work: holds a strong reference so the loop doesn't GC
+    # the task mid-flight, and flips /ping to HealthyBusy so AgentCore won't
+    # reclaim the instance before the snapshot is collected.
+    busy_state.track(bg_task)
 
     return (
         f"Status snapshot started "
