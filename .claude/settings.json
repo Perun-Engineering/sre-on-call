@@ -1,0 +1,5 @@
+{
+  "enabledPlugins": {
+    "aws-agents@claude-plugins-official": true
+  }
+}
