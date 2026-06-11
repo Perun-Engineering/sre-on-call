@@ -30,6 +30,7 @@ from strands.models.bedrock import BedrockModel
 from strands.multiagent.a2a import A2AServer
 from strands.multiagent.a2a.executor import StrandsA2AExecutor
 
+from shared import busy_state
 from shared.agent_telemetry import AGENT_METADATA, compute_cost_usd
 from shared.models import AgentMetadata
 from shared.time_utils import now_iso
@@ -187,6 +188,18 @@ def _load_card(agent_dir: pathlib.Path) -> dict:
         return json.load(fh)
 
 
+def _ping_status() -> str:
+    """AgentCore health status reported by ``/ping``.
+
+    ``HealthyBusy`` while fire-and-forget background work (master
+    investigations/snapshots, tracked via :mod:`shared.busy_state`) is in
+    flight, so AgentCore won't reclaim the instance mid-run; ``Healthy``
+    otherwise. Specialized agents respond synchronously and register no
+    background work, so they always report ``Healthy``.
+    """
+    return "HealthyBusy" if busy_state.is_busy() else "Healthy"
+
+
 def agent_main(agent_dir: str | pathlib.Path) -> None:
     """Full agent lifecycle entry point.
 
@@ -271,7 +284,7 @@ def agent_main(agent_dir: str | pathlib.Path) -> None:
 
         @app.get("/ping")
         async def _ping() -> dict[str, str]:
-            return {"status": "Healthy"}
+            return {"status": _ping_status()}
 
         logger.info("%s A2A server starting on %s:%d", card["name"], host, port)
         uvicorn.run(app, host=host, port=port)
