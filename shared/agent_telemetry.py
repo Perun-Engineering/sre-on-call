@@ -24,8 +24,8 @@ _MODEL_PRICING_USD_PER_MTOK: dict[str, tuple[float, float]] = {
     "us.anthropic.claude-sonnet-4-20250514-v1:0": (3.0, 15.0),
     "anthropic.claude-sonnet-4-20250514-v1:0": (3.0, 15.0),
     # Claude Sonnet 4.6 (master orchestrator — issue #46)
-    "us.anthropic.claude-sonnet-4-6-20250929-v1:0": (3.0, 15.0),
-    "anthropic.claude-sonnet-4-6-20250929-v1:0": (3.0, 15.0),
+    "us.anthropic.claude-sonnet-4-6": (3.0, 15.0),
+    "global.anthropic.claude-sonnet-4-6": (3.0, 15.0),
 }
 
 
