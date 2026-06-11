@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 
 from shared.a2a_client import (
@@ -163,6 +164,29 @@ def _merge_metadata(
         return base
     overrides = {k: v for k, v in asdict(overlay).items() if v is not None}
     return replace(base, **overrides)
+
+
+def _sum_agent_telemetry(
+    results: Mapping[str, AgentResult | AgentFailure],
+) -> tuple[float | None, int | None]:
+    """Sum per-agent cost and token usage for the experiment result (issue #26).
+
+    Returns ``(total_cost_usd, total_tokens)``; either is ``None`` when no agent
+    reported that figure, so the judge report shows a blank rather than a
+    misleading zero.
+    """
+    total_cost = 0.0
+    total_tokens = 0
+    cost_seen = tokens_seen = False
+    for r in results.values():
+        meta = r.metadata
+        if meta.cost_usd is not None:
+            total_cost += meta.cost_usd
+            cost_seen = True
+        if meta.total_tokens is not None:
+            total_tokens += meta.total_tokens
+            tokens_seen = True
+    return (total_cost if cost_seen else None, total_tokens if tokens_seen else None)
 
 
 @dataclass(frozen=True)
@@ -715,6 +739,7 @@ class InvestigationOrchestrator:
         for aid, r in results.items():
             if isinstance(r, AgentResult):
                 durations[aid] = r.duration_seconds
+        total_cost, total_tokens = _sum_agent_telemetry(results)
         total = asyncio.get_event_loop().time() - start_time
         try:
             store.put_result(ExperimentResult(
@@ -725,6 +750,8 @@ class InvestigationOrchestrator:
                 agent_durations=durations,
                 total_duration_seconds=total,
                 timestamp=alert_context.alert_timestamp,
+                total_cost_usd=total_cost,
+                total_tokens=total_tokens,
             ))
         except Exception:
             logger.exception(
