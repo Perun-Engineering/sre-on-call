@@ -192,6 +192,32 @@ class SlackChatPlatform:
         )
         urllib.request.urlopen(req)
 
+    # --- notice -----------------------------------------------------------
+
+    def notice(self, target: DeliveryTarget, text: str) -> None:
+        """Post a plain-text reply via ``chat.postMessage``, fail-open.
+
+        Synchronous (urllib) so it runs inside the Lambda intake handler.
+        Threads under ``target.thread_anchor`` when present; Slack rejects an
+        empty ``thread_ts`` so it is omitted for top-level posts.
+        """
+        try:
+            payload: dict = {"channel": target.channel_id, "text": text}
+            if target.thread_anchor:
+                payload["thread_ts"] = target.thread_anchor
+            req = urllib.request.Request(
+                "https://slack.com/api/chat.postMessage",
+                data=json.dumps(payload).encode(),
+                headers={
+                    "Content-Type": "application/json; charset=utf-8",
+                    "Authorization": f"Bearer {self._bot_token}",
+                },
+                method="POST",
+            )
+            urllib.request.urlopen(req)
+        except Exception:
+            logger.warning("Slack notice post failed; continuing.", exc_info=True)
+
     # --- deliver ----------------------------------------------------------
 
     async def deliver(

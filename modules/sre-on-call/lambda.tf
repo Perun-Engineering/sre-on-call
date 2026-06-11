@@ -8,6 +8,26 @@
 #     and AgentCore invoke permission
 ###############################################################################
 
+# ── Variables: intake alert-classification gate ────────────────────────────
+
+variable "enable_alert_classification" {
+  description = "Gate investigations behind alert classification at intake. When enabled, non-alert mentions (chatter) get a lightweight in-thread notice instead of a full agent fan-out. Fail-open: ambiguous messages still investigate. Set false to investigate every mention."
+  type        = bool
+  default     = true
+}
+
+variable "enable_classifier_llm" {
+  description = "Enable the Tier 2 LLM classifier — one Bedrock Converse call to judge messages the cheap heuristics can't classify. Fail-open: an error defaults to investigating. Requires the Lambda role to have bedrock:InvokeModel."
+  type        = bool
+  default     = false
+}
+
+variable "classifier_model_id" {
+  description = "Bedrock model ID for the Tier 2 classifier call. Empty string falls back to MODEL_ID, then the bundled Haiku default. A cheap fast model is appropriate."
+  type        = string
+  default     = ""
+}
+
 # ── Build: Function package (lambda_adapter/ + shared/) ─────────────────────
 # The runtime needs both packages; archive_file alone can only zip a single
 # directory, so a small build step assembles the staging directory first.
@@ -120,17 +140,24 @@ resource "aws_lambda_function" "lambda_adapter" {
   layers = [aws_lambda_layer_version.deps.arn]
 
   environment {
-    variables = {
-      SLACK_SIGNING_SECRET     = aws_secretsmanager_secret.slack_signing_secret.arn
-      SLACK_BOT_TOKEN          = aws_secretsmanager_secret.slack_bot_token.arn
-      DISCORD_PUBLIC_KEY       = aws_secretsmanager_secret.discord_public_key.arn
-      DISCORD_BOT_TOKEN        = aws_secretsmanager_secret.discord_bot_token.arn
-      DEDUP_TABLE_NAME         = aws_dynamodb_table.dedup.name
-      EXPERIMENTS_TABLE_NAME   = aws_dynamodb_table.experiments.name
-      MASTER_AGENT_RUNTIME_ARN = aws_bedrockagentcore_agent_runtime.master.agent_runtime_arn
-      TRACES_BUCKET_NAME       = aws_s3_bucket.traces.bucket
-      TRACES_TABLE_NAME        = aws_dynamodb_table.traces.name
-    }
+    variables = merge(
+      {
+        SLACK_SIGNING_SECRET         = aws_secretsmanager_secret.slack_signing_secret.arn
+        SLACK_BOT_TOKEN              = aws_secretsmanager_secret.slack_bot_token.arn
+        DISCORD_PUBLIC_KEY           = aws_secretsmanager_secret.discord_public_key.arn
+        DISCORD_BOT_TOKEN            = aws_secretsmanager_secret.discord_bot_token.arn
+        DEDUP_TABLE_NAME             = aws_dynamodb_table.dedup.name
+        EXPERIMENTS_TABLE_NAME       = aws_dynamodb_table.experiments.name
+        MASTER_AGENT_RUNTIME_ARN     = aws_bedrockagentcore_agent_runtime.master.agent_runtime_arn
+        TRACES_BUCKET_NAME           = aws_s3_bucket.traces.bucket
+        TRACES_TABLE_NAME            = aws_dynamodb_table.traces.name
+        ALERT_CLASSIFICATION_ENABLED = var.enable_alert_classification ? "true" : "false"
+        CLASSIFIER_LLM_ENABLED       = var.enable_classifier_llm ? "true" : "false"
+      },
+      var.classifier_model_id != "" ? {
+        CLASSIFIER_MODEL_ID = var.classifier_model_id
+      } : {}
+    )
   }
 
   depends_on = [aws_cloudwatch_log_group.lambda_adapter]

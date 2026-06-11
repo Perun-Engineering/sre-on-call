@@ -13,7 +13,7 @@ import hashlib
 import hmac
 import json
 import time
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -195,6 +195,55 @@ class TestDeliverDispatch:
         platform._renderer.render.assert_called_once_with(sections)
         post_mock.assert_awaited_once_with(self._target(), "RENDERED")
         assert rendered == "RENDERED"
+
+
+class TestNotice:
+    """notice() posts a plain-text reply synchronously and never raises."""
+
+    def test_slack_notice_posts_threaded_message(self) -> None:
+        platform = SlackChatPlatform(signing_secret="x", bot_token="tok-1")
+        target = DeliveryTarget(platform="slack", channel_id="C1", thread_anchor="ts-1")
+        with patch("urllib.request.urlopen") as urlopen:
+            platform.notice(target, "mention me on an alert message to investigate")
+        req = urlopen.call_args[0][0]
+        assert req.full_url == "https://slack.com/api/chat.postMessage"
+        assert req.headers["Authorization"] == "Bearer tok-1"
+        body = json.loads(req.data)
+        assert body["channel"] == "C1"
+        assert body["thread_ts"] == "ts-1"
+        assert "investigate" in body["text"]
+
+    def test_slack_notice_omits_thread_ts_at_top_level(self) -> None:
+        platform = SlackChatPlatform(signing_secret="x", bot_token="tok-1")
+        target = DeliveryTarget(platform="slack", channel_id="C1", thread_anchor=None)
+        with patch("urllib.request.urlopen") as urlopen:
+            platform.notice(target, "hi")
+        body = json.loads(urlopen.call_args[0][0].data)
+        assert "thread_ts" not in body
+
+    def test_slack_notice_fail_open_on_http_error(self) -> None:
+        platform = SlackChatPlatform(signing_secret="x", bot_token="tok-1")
+        target = DeliveryTarget(platform="slack", channel_id="C1", thread_anchor="ts-1")
+        with patch("urllib.request.urlopen", side_effect=RuntimeError("boom")):
+            platform.notice(target, "hi")  # must not raise
+
+    def test_discord_notice_posts_with_message_reference(self) -> None:
+        platform = DiscordChatPlatform(public_key="00" * 32, bot_token="bot-1")
+        target = DeliveryTarget(platform="discord", channel_id="999", thread_anchor="42")
+        with patch("urllib.request.urlopen") as urlopen:
+            platform.notice(target, "hi")
+        req = urlopen.call_args[0][0]
+        assert req.full_url == "https://discord.com/api/v10/channels/999/messages"
+        assert req.headers["Authorization"] == "Bot bot-1"
+        body = json.loads(req.data)
+        assert body["content"] == "hi"
+        assert body["message_reference"] == {"message_id": "42"}
+
+    def test_discord_notice_fail_open(self) -> None:
+        platform = DiscordChatPlatform(public_key="00" * 32, bot_token="bot-1")
+        target = DeliveryTarget(platform="discord", channel_id="999", thread_anchor="42")
+        with patch("urllib.request.urlopen", side_effect=RuntimeError("boom")):
+            platform.notice(target, "hi")  # must not raise
 
 
 class TestRenderDispatch:

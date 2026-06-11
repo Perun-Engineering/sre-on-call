@@ -194,6 +194,32 @@ class DiscordChatPlatform:
         )
         urllib.request.urlopen(req)
 
+    # --- notice -----------------------------------------------------------
+
+    def notice(self, target: DeliveryTarget, text: str) -> None:
+        """Post a plain-text channel message, fail-open.
+
+        Synchronous (urllib) so it runs inside the Lambda intake handler.
+        Replies to ``target.thread_anchor`` when present via ``message_reference``.
+        """
+        try:
+            url = f"https://discord.com/api/v10/channels/{target.channel_id}/messages"
+            body: dict = {"content": text}
+            if target.thread_anchor:
+                body["message_reference"] = {"message_id": target.thread_anchor}
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(body).encode(),
+                headers={
+                    "Authorization": f"Bot {self._bot_token}",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            urllib.request.urlopen(req)
+        except Exception:
+            logger.warning("Discord notice post failed; continuing.", exc_info=True)
+
     # --- deliver ----------------------------------------------------------
 
     async def deliver(
