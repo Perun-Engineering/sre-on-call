@@ -168,6 +168,16 @@ CATALOGUE: tuple[Agent, ...] = (
         url_env="PROMETHEUS_AGENT_URL",
         default_local_url="http://localhost:9003",
     ),
+    Agent(
+        id="incident_history",
+        display_name="Incident History",
+        emoji="📚",
+        order=6,
+        kind="specialized",
+        runtime_arn_env="INCIDENT_HISTORY_AGENT_RUNTIME_ARN",
+        url_env="INCIDENT_HISTORY_AGENT_URL",
+        default_local_url="http://localhost:9006",
+    ),
 )
 
 

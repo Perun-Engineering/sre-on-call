@@ -29,7 +29,9 @@ from shared.a2a_client import (
 from shared.agent_telemetry import AGENT_METADATA
 from shared.agents import AgentRegistry, get_registry
 from shared.constants import HARD_CUTOFF_SECONDS, INITIAL_DEADLINE_SECONDS
+from shared.embeddings import EmbeddingClient
 from shared.fanout import Fanout
+from shared.incident_history_store import IncidentHistoryStore, IncidentOutcome
 from shared.models import AgentFailure, AgentMetadata, AgentResult, AlertContext
 from shared.time_utils import now_iso
 from shared.platforms import ChatPlatform, DeliveryTarget, deliver_with_retry, for_platform
@@ -50,6 +52,10 @@ from agents.master.synthesis import AnalysisSynthesizer, IncidentAnalysis
 from shared.report_renderer import AnalysisSection
 
 logger = logging.getLogger(__name__)
+
+# Cap on the outcome record's free-text summary when no synthesis correlation
+# is available to fall back on — keeps the history item compact.
+_OUTCOME_SUMMARY_CHARS = 600
 
 
 def _to_analysis_section(analysis: IncidentAnalysis | None) -> AnalysisSection | None:
@@ -185,6 +191,8 @@ class InvestigationOrchestrator:
         results_store: ExperimentResultsStore | None = None,
         trace_store: TraceStore | None = None,
         synthesizer: AnalysisSynthesizer | None = None,
+        embedding_client: EmbeddingClient | None = None,
+        history_store: IncidentHistoryStore | None = None,
     ) -> None:
         self._chat_platform: ChatPlatform | None = chat_platform
         self._registry: AgentRegistry = registry or get_registry()
@@ -213,6 +221,17 @@ class InvestigationOrchestrator:
         # TRACES_BUCKET_NAME / TRACES_TABLE_NAME are unset (e.g. local dev,
         # tests). All trace_store calls below must check for None.
         self._trace_store = trace_store if trace_store is not None else TraceStore.from_env()
+
+        # Incident-history write path (issue #30). Both are opt-in via env:
+        # EmbeddingClient.from_env() is None unless INCIDENT_HISTORY_ENABLED;
+        # IncidentHistoryStore.from_env() is None unless TRACES_TABLE_NAME. When
+        # either is None the Phase 8 write is skipped — no embedding, no record.
+        self._embedding_client = (
+            embedding_client if embedding_client is not None else EmbeddingClient.from_env()
+        )
+        self._history_store = (
+            history_store if history_store is not None else IncidentHistoryStore.from_env()
+        )
 
     @property
     def registry(self) -> AgentRegistry:
@@ -358,6 +377,17 @@ class InvestigationOrchestrator:
             pending_ids=pending_ids,
             started_at_iso=started_at_iso,
             start_time=start_time,
+        )
+
+        # --- Phase 8: record the incident outcome for similar-incident lookup ---
+        # Embeds the alert + stores a compact record (issue #30) so a future,
+        # similar alert can surface this one. Fail-open and skipped entirely
+        # when history isn't configured. Runs after the report is posted, so
+        # the embedding call never delays the user-facing report.
+        self._record_incident_outcome(
+            alert_context=alert_context,
+            analysis=analysis,
+            report_summary=initial_report_summary,
         )
 
     # ------------------------------------------------------------------
@@ -596,6 +626,51 @@ class InvestigationOrchestrator:
             error_count=error_count,
         )
         self._trace_store.put_manifest(manifest)
+
+    def _record_incident_outcome(
+        self,
+        *,
+        alert_context: AlertContext,
+        analysis: AnalysisSection | None,
+        report_summary: str,
+    ) -> None:
+        """Embed the alert and store a compact outcome record (issue #30).
+
+        Fail-open and a no-op unless both the embedding client and the history
+        store are configured. The root cause comes from the synthesized
+        Analysis section (#27); the summary prefers the analysis correlation,
+        falling back to a truncated report. A vector that can't be produced
+        means the record would never be searchable, so the write is skipped.
+        """
+        if self._embedding_client is None or self._history_store is None:
+            return
+        try:
+            embedding = self._embedding_client.embed(alert_context.alert_text)
+            if embedding is None:
+                return
+            root_cause = analysis.root_cause_hypothesis if analysis else None
+            summary = (
+                (analysis.correlation if analysis else "")
+                or report_summary[:_OUTCOME_SUMMARY_CHARS]
+            )
+            self._history_store.put_outcome(
+                IncidentOutcome(
+                    investigation_id=alert_context.investigation_id,
+                    alert_text=alert_context.alert_text,
+                    summary=summary,
+                    embedding=embedding,
+                    platform=alert_context.platform,
+                    channel_id=alert_context.channel_id,
+                    message_id=alert_context.message_id,
+                    alert_timestamp=alert_context.alert_timestamp,
+                    root_cause=root_cause,
+                )
+            )
+        except Exception:
+            logger.exception(
+                "Failed to record incident outcome for investigation %s",
+                alert_context.investigation_id,
+            )
 
     @staticmethod
     def _merge(

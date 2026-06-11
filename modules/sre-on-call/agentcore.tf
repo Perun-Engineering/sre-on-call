@@ -44,6 +44,12 @@ variable "synthesis_model_id" {
   default     = ""
 }
 
+variable "embedding_model_id" {
+  description = "Bedrock model ID for alert-text embeddings used by the incident_history similar-incident lookup (issue #30). Titan Text Embeddings V2 by default."
+  type        = string
+  default     = "amazon.titan-embed-text-v2:0"
+}
+
 # ── Locals ───────────────────────────────────────────────────────────────────
 
 locals {
@@ -66,11 +72,12 @@ locals {
   })
 
   agent_images = {
-    master          = "${var.agent_container_registry}/${var.project_name}-master:${var.agent_image_tag}"
-    slack_scanner   = "${var.agent_container_registry}/${var.project_name}-slack-scanner:${var.agent_image_tag}"
-    discord_scanner = "${var.agent_container_registry}/${var.project_name}-discord-scanner:${var.agent_image_tag}"
-    cloudwatch_logs = "${var.agent_container_registry}/${var.project_name}-cloudwatch-logs:${var.agent_image_tag}"
-    eks             = "${var.agent_container_registry}/${var.project_name}-eks:${var.agent_image_tag}"
+    master           = "${var.agent_container_registry}/${var.project_name}-master:${var.agent_image_tag}"
+    slack_scanner    = "${var.agent_container_registry}/${var.project_name}-slack-scanner:${var.agent_image_tag}"
+    discord_scanner  = "${var.agent_container_registry}/${var.project_name}-discord-scanner:${var.agent_image_tag}"
+    cloudwatch_logs  = "${var.agent_container_registry}/${var.project_name}-cloudwatch-logs:${var.agent_image_tag}"
+    eks              = "${var.agent_container_registry}/${var.project_name}-eks:${var.agent_image_tag}"
+    incident_history = "${var.agent_container_registry}/${var.project_name}-incident-history:${var.agent_image_tag}"
   }
 
   # Single source of truth for which specialized agents are deployed and active.
@@ -79,7 +86,7 @@ locals {
   # not created for it) — see shared/agents.py docstring for the lifecycle.
   config_yaml = yamldecode(file(var.config_path))
   agent_enabled = {
-    for name in ["slack_scanner", "discord_scanner", "cloudwatch_logs", "eks"] :
+    for name in ["slack_scanner", "discord_scanner", "cloudwatch_logs", "eks", "incident_history"] :
     name => contains(keys(local.config_yaml.agents), name) && lookup(local.config_yaml.agents[name], "enabled", true)
   }
 }
@@ -263,6 +270,40 @@ resource "aws_bedrockagentcore_agent_runtime" "eks" {
   }
 }
 
+resource "aws_bedrockagentcore_agent_runtime" "incident_history" {
+  count = local.agent_enabled["incident_history"] ? 1 : 0
+
+  agent_runtime_name = replace("${local.agent_prefix}_incident_history", "-", "_")
+  description        = "Surfaces past investigations whose alert text is similar to the current alert, ranked by Titan embedding similarity over the trace archive."
+  role_arn           = aws_iam_role.incident_history_agent[0].arn
+
+  agent_runtime_artifact {
+    container_configuration {
+      container_uri = local.agent_images.incident_history
+    }
+  }
+
+  network_configuration {
+    network_mode = "PUBLIC"
+  }
+
+  protocol_configuration {
+    server_protocol = "A2A"
+  }
+
+  environment_variables = merge(local.base_env, {
+    AWS_REGION               = var.aws_region
+    MODEL_ID                 = var.model_id
+    TRACES_TABLE_NAME        = aws_dynamodb_table.traces.name
+    INCIDENT_HISTORY_ENABLED = "true"
+    EMBEDDING_MODEL_ID       = var.embedding_model_id
+  })
+
+  tags = {
+    Agent = "incident_history"
+  }
+}
+
 # ── Master Agent — orchestrator with the four specialized ARNs in its env ──
 
 resource "aws_bedrockagentcore_agent_runtime" "master" {
@@ -310,6 +351,15 @@ resource "aws_bedrockagentcore_agent_runtime" "master" {
     local.agent_enabled["eks"] ? {
       EKS_AGENT_RUNTIME_ARN = aws_bedrockagentcore_agent_runtime.eks[0].agent_runtime_arn
     } : {},
+    # When incident_history is deployed, the master both dispatches to it
+    # (runtime ARN) and turns on its own Phase 8 write path: embed the alert
+    # (INCIDENT_HISTORY_ENABLED + EMBEDDING_MODEL_ID) and store the outcome in
+    # the traces table (TRACES_TABLE_NAME, already set above).
+    local.agent_enabled["incident_history"] ? {
+      INCIDENT_HISTORY_AGENT_RUNTIME_ARN = aws_bedrockagentcore_agent_runtime.incident_history[0].agent_runtime_arn
+      INCIDENT_HISTORY_ENABLED           = "true"
+      EMBEDDING_MODEL_ID                 = var.embedding_model_id
+    } : {},
   )
 
   tags = {
@@ -338,6 +388,9 @@ output "specialized_agent_runtime_arns" {
     } : {},
     local.agent_enabled["eks"] ? {
       eks = aws_bedrockagentcore_agent_runtime.eks[0].agent_runtime_arn
+    } : {},
+    local.agent_enabled["incident_history"] ? {
+      incident_history = aws_bedrockagentcore_agent_runtime.incident_history[0].agent_runtime_arn
     } : {},
   )
 }
