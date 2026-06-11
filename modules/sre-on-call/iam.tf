@@ -117,6 +117,27 @@ resource "aws_iam_role_policy" "lambda_adapter_agentcore" {
   })
 }
 
+# Tier 2 intake classifier (one Bedrock Converse turn). Only attached when the
+# LLM classifier is enabled, so the Lambda role stays least-privilege otherwise.
+resource "aws_iam_role_policy" "lambda_adapter_bedrock_classifier" {
+  count = var.enable_classifier_llm ? 1 : 0
+
+  name = "bedrock-classifier-invoke"
+  role = aws_iam_role.lambda_adapter.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "InvokeClassifierModel"
+        Effect   = "Allow"
+        Action   = ["bedrock:InvokeModel"]
+        Resource = ["arn:aws:bedrock:*::foundation-model/*", "arn:aws:bedrock:*:*:inference-profile/*"]
+      }
+    ]
+  })
+}
+
 resource "aws_iam_role_policy" "lambda_adapter_logs" {
   name = "cloudwatch-logs"
   role = aws_iam_role.lambda_adapter.id

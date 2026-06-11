@@ -17,6 +17,7 @@ import logging
 import os
 from dataclasses import asdict, replace
 
+from lambda_adapter.classifier import classify_alert, llm_classifier_from_env
 from lambda_adapter.dedup import DeduplicationStore
 from lambda_adapter.master_dispatch import AgentCoreMasterDispatch, MasterDispatch
 from shared.experiment_store import ExperimentStore
@@ -26,6 +27,7 @@ from shared.platforms import (
     ChallengeWebhook,
     ChatPlatform,
     CommandWebhook,
+    DeliveryTarget,
     InvalidWebhook,
 )
 from shared.time_utils import now_iso
@@ -37,6 +39,25 @@ from shared.trace_store import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Reply posted (in-thread) when a mention is classified as non-alert chatter.
+_NON_ALERT_NOTICE = (
+    "👋 I investigate infrastructure alerts. Mention me on an alert message "
+    "(or include the word *investigate*) and I'll dig in."
+)
+
+
+def _truthy(value: str | None) -> bool:
+    return (value or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _classification_enabled() -> bool:
+    """Whether the intake classification gate is active.
+
+    On by default; set ``ALERT_CLASSIFICATION_ENABLED`` to a falsy value as an
+    operational kill-switch to investigate every mention unconditionally.
+    """
+    return _truthy(os.environ.get("ALERT_CLASSIFICATION_ENABLED", "true"))
 
 
 def _get_env(name: str) -> str:
@@ -102,14 +123,20 @@ def process_webhook(
         return _process_command(webhook_event.command, platform, dispatch)
 
     if isinstance(webhook_event, AlertWebhook):
-        return _process_alert(webhook_event.context, dispatch)
+        return _process_alert(webhook_event.context, platform, dispatch)
 
     # Defensive: unknown variant — return 500 rather than silently passing.
     raise RuntimeError(f"Unhandled WebhookEvent variant: {type(webhook_event).__name__}")
 
 
-def _process_alert(alert_context: AlertContext, dispatch: MasterDispatch) -> dict:
-    """Dedup the alert and fire the Master Agent (or A/B variants)."""
+def _process_alert(
+    alert_context: AlertContext, platform: ChatPlatform, dispatch: MasterDispatch
+) -> dict:
+    """Classify, dedup, and fire the Master Agent (or A/B variants).
+
+    Non-alert mentions (casual chatter) are gated out before the fan-out: they
+    get a lightweight in-thread notice and no investigation is dispatched.
+    """
     dedup_table = _get_env("DEDUP_TABLE_NAME")
     store = DeduplicationStore(table_name=dedup_table)
     is_new = store.record_if_new(
@@ -139,6 +166,24 @@ def _process_alert(alert_context: AlertContext, dispatch: MasterDispatch) -> dic
             alert_context.message_id,
         )
         return _http_response(200)
+
+    # Classification gate: suppress the investigation fan-out for mentions that
+    # are not alerts. Runs only for new investigations (duplicates already
+    # returned above) and is fail-open — an ambiguous message investigates.
+    if _classification_enabled():
+        classification = classify_alert(
+            alert_context.alert_text, llm=llm_classifier_from_env()
+        )
+        if not classification.is_alert:
+            logger.info(
+                "Non-alert mention gated: id=%s channel=%s tier=%s reason=%s",
+                alert_context.investigation_id,
+                alert_context.channel_id,
+                classification.tier,
+                classification.reason,
+            )
+            _post_non_alert_notice(platform, alert_context)
+            return _http_response(200, {"ok": True, "classified": "non_alert"})
 
     if trace_store is not None:
         trace_store.put_event(
@@ -173,6 +218,24 @@ def _process_alert(alert_context: AlertContext, dispatch: MasterDispatch) -> dic
         alert_context.message_id,
     )
     return _http_response(200, {"ok": True})
+
+
+def _post_non_alert_notice(
+    platform: ChatPlatform, alert_context: AlertContext
+) -> None:
+    """Reply to a gated non-alert mention, fail-open.
+
+    The HTTP 200 the webhook returns is independent of this courtesy reply, so
+    any delivery error is swallowed rather than surfaced to the platform.
+    """
+    try:
+        platform.notice(DeliveryTarget.for_alert(alert_context), _NON_ALERT_NOTICE)
+    except Exception:
+        logger.warning(
+            "Failed to post non-alert notice for %s; continuing.",
+            alert_context.investigation_id,
+            exc_info=True,
+        )
 
 
 def _process_command(

@@ -8,7 +8,7 @@ A multi-agent bot that automatically investigates infrastructure alerts across S
 Slack/Discord webhook
         │
         ▼
-   Lambda Adapter ── (signature verify, dedup, ack) ──▶ chat platform
+   Lambda Adapter ── (signature verify, dedup, classify, ack) ──▶ chat platform
         │
         │ bedrock-agentcore.invoke_agent_runtime (JSON-RPC 2.0 / A2A)
         ▼
@@ -21,7 +21,7 @@ Slack/Discord webhook
                                                         configured via config.yaml)
 ```
 
-- **Lambda Adapter** — receives Slack/Discord webhooks, verifies signatures, deduplicates via DynamoDB, posts ack, then invokes the Master Agent runtime.
+- **Lambda Adapter** — receives Slack/Discord webhooks, verifies signatures, deduplicates via DynamoDB, **classifies the mention** (suppresses non-alert chatter before the fan-out — see below), then invokes the Master Agent runtime.
 - **Master Agent** — orchestrates the investigation: fans out to specialized agents, enforces deadlines, posts the Incident Report. See [`agents/master/README.md`](agents/master/README.md).
 - **Specialized agents** — one per data source. Each has its own README:
   - [Slack Scanner](agents/slack_scanner/README.md) — Slack channel history correlation.
@@ -41,7 +41,8 @@ All agents run on AWS Bedrock AgentCore Runtime, communicate via the A2A protoco
 ├── config.yaml                     # Per-agent skills + MCP servers (single source of truth)
 ├── lambda_adapter/                 # Lambda webhook ingestion
 │   ├── handler.py                  # Lambda entry point
-│   ├── intake.py                   # Dedup + master agent invocation
+│   ├── intake.py                   # Dedup + classification gate + master agent invocation
+│   ├── classifier.py               # Alert-vs-chatter classification (heuristics + optional LLM)
 │   └── dedup.py                    # DynamoDB deduplication store
 ├── agents/
 │   ├── master/                     # Master orchestration agent
@@ -189,9 +190,30 @@ Optional:
 See **[docs/testing.md](docs/testing.md)** for the full Slack App + bot setup. Quick version:
 
 1. Set the Event Subscriptions URL to the deployed Lambda function URL.
-2. Subscribe to the **`app_mention`** bot event only (the adapter has no event-type filter; subscribing to broader events will trigger an investigation per message).
+2. Subscribe to the **`app_mention`** bot event only. The intake [classification gate](#alert-classification-gate) suppresses obvious non-alert chatter, but subscribing to broader events still wastes classifier work — keep it to `app_mention`.
 3. Bot scopes: `app_mentions:read`, `chat:write`, `channels:history`.
 4. Hydrate secrets with the real Bot Token (`xoxb-…`) and Signing Secret.
+
+## Alert classification gate
+
+Not every `@bot` mention is an alert — a casual "thanks!" should not launch a
+full agent fan-out. The Lambda intake classifies each new mention before
+dispatch:
+
+- **Tier 1 — heuristics** (`lambda_adapter/classifier.py`, pure & deterministic):
+  scans for alert-shaped markers (severity keywords, Alertmanager/Grafana
+  formatting, dashboard/console links) and, conversely, obvious chatter
+  (greetings, acknowledgements, bare mentions). A confident verdict wins here.
+- **Tier 2 — LLM** (optional, `CLASSIFIER_LLM_ENABLED=true`): one Bedrock
+  Converse turn (Haiku by default) judges messages Tier 1 can't call.
+- **Manual override**: include the word **`investigate`** in the mention to
+  force an investigation regardless of classification.
+
+The gate is **fail-open** — an ambiguous message, a disabled/erroring LLM, or
+any unexpected error all default to *investigate*, so a real page is never
+silently dropped. A gated mention gets a one-line in-thread nudge instead of a
+fan-out. Disable the whole gate with `ALERT_CLASSIFICATION_ENABLED=false`
+(Terraform: `enable_alert_classification = false`).
 
 ## Testing
 
@@ -212,6 +234,9 @@ These are set on the Lambda function and the AgentCore runtimes by Terraform; yo
 | `DISCORD_PUBLIC_KEY` | Lambda | Secrets Manager ARN holding the Discord application public key |
 | `DISCORD_BOT_TOKEN` | Lambda, Master, Discord Scanner | Secrets Manager ARN holding the Discord bot token |
 | `DEDUP_TABLE_NAME` | Lambda | DynamoDB deduplication table name |
+| `ALERT_CLASSIFICATION_ENABLED` | Lambda | Gate non-alert mentions out of the fan-out (default `true`; kill-switch) |
+| `CLASSIFIER_LLM_ENABLED` | Lambda | Enable the Tier 2 LLM classifier for ambiguous mentions (default `false`) |
+| `CLASSIFIER_MODEL_ID` | Lambda | Bedrock model for the Tier 2 classifier (falls back to `MODEL_ID`, then Haiku) |
 | `EXPERIMENTS_TABLE_NAME` | Lambda | DynamoDB A/B experiment config table name |
 | `MASTER_AGENT_RUNTIME_ARN` | Lambda | AgentCore runtime ARN of the master agent |
 | `TRACES_BUCKET_NAME` | Lambda, Master | S3 bucket for per-investigation trace archive (optional — unset disables tracing) |

@@ -128,6 +128,18 @@ class ChatPlatform(Protocol):
         """Send the synchronous slash-command callback expected by the platform."""
         ...  # pragma: no cover
 
+    def notice(self, target: "DeliveryTarget", text: str) -> None:
+        """Post a short plain-text reply at *target*, synchronously.
+
+        Used by the intake gate to nudge non-alert mentions ("mention me on an
+        alert message to investigate") without spinning up the master agent.
+        Unlike :meth:`deliver` this takes no structured payload and runs in the
+        synchronous Lambda handler; unlike :meth:`ack` it needs no slash-command
+        ``response_url``. Implementations fail-open — a delivery error must not
+        propagate, since the intake HTTP 200 is independent of this courtesy reply.
+        """
+        ...  # pragma: no cover
+
     async def deliver(
         self, target: "DeliveryTarget", payload: DeliverPayload
     ) -> str:
