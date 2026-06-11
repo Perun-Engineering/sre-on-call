@@ -62,6 +62,12 @@ variable "enable_followup_round" {
   default     = false
 }
 
+variable "enable_chart_snapshots" {
+  description = "Enable the cloudwatch_logs agent to attach chart descriptors to findings and ship the harvested query rows as a series, which the master snapshots to the trace bucket under charts/<id>.json for the interactive incident page (#32). Fail-open and additive; persistence is gated by the traces bucket being configured. Set false to suppress the extra A2A payload + S3 objects."
+  type        = bool
+  default     = true
+}
+
 variable "followup_model_id" {
   description = "Bedrock model ID for the master's follow-up planning call. Empty string falls back to the master's MODEL_ID."
   type        = string
@@ -252,8 +258,9 @@ resource "aws_bedrockagentcore_agent_runtime" "cloudwatch_logs" {
   }
 
   environment_variables = merge(local.base_env, {
-    AWS_REGION = var.aws_region
-    MODEL_ID   = var.model_id
+    AWS_REGION              = var.aws_region
+    MODEL_ID                = var.model_id
+    CHART_SNAPSHOTS_ENABLED = var.enable_chart_snapshots ? "true" : "false"
   })
 
   tags = {
