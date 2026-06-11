@@ -45,6 +45,14 @@ locals {
     BEDROCK_GUARDRAIL_VERSION = aws_bedrock_guardrail.agents[0].version
   } : {}
 
+  # Base env injected into every runtime: guardrail (if any) plus the SSM
+  # parameter shared.config reads config.yaml from at cold-start. Editing
+  # config.yaml + `terraform apply` re-publishes the parameter; agents pick up
+  # the change on next cold-start with no image rebuild.
+  base_env = merge(local.guardrail_env, {
+    CONFIG_SSM_PARAMETER = aws_ssm_parameter.config.name
+  })
+
   agent_images = {
     master          = "${var.agent_container_registry}/${var.project_name}-master:${var.agent_image_tag}"
     slack_scanner   = "${var.agent_container_registry}/${var.project_name}-slack-scanner:${var.agent_image_tag}"
@@ -91,6 +99,22 @@ resource "aws_bedrock_guardrail" "agents" {
   }
 }
 
+# ── Externalized agent config ───────────────────────────────────────────────
+
+# config.yaml published to SSM so runtimes read it at cold-start instead of from
+# a baked-in image copy. Same file Terraform reads for deploy scoping above, so
+# config.yaml stays the single source of truth.
+resource "aws_ssm_parameter" "config" {
+  name        = "/${var.project_name}/${var.environment}/config"
+  description = "sre-on-call agent config.yaml — read by shared.config at runtime."
+  type        = "String"
+  value       = file(var.config_path)
+
+  tags = {
+    Project = var.project_name
+  }
+}
+
 # ── Specialized Agents ──────────────────────────────────────────────────────
 
 resource "aws_bedrockagentcore_agent_runtime" "slack_scanner" {
@@ -114,7 +138,7 @@ resource "aws_bedrockagentcore_agent_runtime" "slack_scanner" {
     server_protocol = "A2A"
   }
 
-  environment_variables = merge(local.guardrail_env, {
+  environment_variables = merge(local.base_env, {
     AWS_REGION      = var.aws_region
     MODEL_ID        = var.model_id
     SLACK_BOT_TOKEN = aws_secretsmanager_secret.slack_bot_token.arn
@@ -146,7 +170,7 @@ resource "aws_bedrockagentcore_agent_runtime" "discord_scanner" {
     server_protocol = "A2A"
   }
 
-  environment_variables = merge(local.guardrail_env, {
+  environment_variables = merge(local.base_env, {
     AWS_REGION        = var.aws_region
     MODEL_ID          = var.model_id
     DISCORD_BOT_TOKEN = aws_secretsmanager_secret.discord_bot_token.arn
@@ -178,7 +202,7 @@ resource "aws_bedrockagentcore_agent_runtime" "cloudwatch_logs" {
     server_protocol = "A2A"
   }
 
-  environment_variables = merge(local.guardrail_env, {
+  environment_variables = merge(local.base_env, {
     AWS_REGION = var.aws_region
     MODEL_ID   = var.model_id
   })
@@ -216,7 +240,7 @@ resource "aws_bedrockagentcore_agent_runtime" "eks" {
     server_protocol = "A2A"
   }
 
-  environment_variables = merge(local.guardrail_env, {
+  environment_variables = merge(local.base_env, {
     AWS_REGION       = var.aws_region
     MODEL_ID         = var.model_id
     EKS_CLUSTER_NAME = var.eks_cluster_name
@@ -249,7 +273,7 @@ resource "aws_bedrockagentcore_agent_runtime" "master" {
   }
 
   environment_variables = merge(
-    local.guardrail_env,
+    local.base_env,
     {
       AWS_REGION         = var.aws_region
       MODEL_ID           = var.model_id

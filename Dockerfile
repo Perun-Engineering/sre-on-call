@@ -44,7 +44,8 @@ COPY --from=deps /install /usr/local
 
 COPY shared/ ./shared/
 COPY agents/ ./agents/
-COPY config.yaml ./config.yaml
+# config.yaml is NOT baked in — runtimes read it from SSM (CONFIG_SSM_PARAMETER,
+# set by Terraform). Local dev/tests read the repo file via shared.config.
 
 EXPOSE 9000
 

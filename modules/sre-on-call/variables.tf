@@ -55,7 +55,7 @@ variable "lambda_provisioned_concurrency" {
 # ── Module source wiring ─────────────────────────────────────────────────────
 
 variable "config_path" {
-  description = "Path to config.yaml listing each agent's enabled skills/MCPs. Read at plan time to decide which specialized agents are deployed; must match the config.yaml baked into the agent images."
+  description = "Path to config.yaml listing each agent's enabled skills/MCPs. Read at plan time to decide which specialized agents are deployed, and published to SSM (aws_ssm_parameter.config) for runtimes to read at cold-start."
   type        = string
 }
 

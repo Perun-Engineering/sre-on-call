@@ -100,6 +100,13 @@ data "aws_iam_policy_document" "agentcore_runtime_exec" {
   }
 
   statement {
+    sid       = "SSMConfigParameter"
+    effect    = "Allow"
+    actions   = ["ssm:GetParameter"]
+    resources = [aws_ssm_parameter.config.arn]
+  }
+
+  statement {
     sid    = "GetAgentAccessToken"
     effect = "Allow"
     actions = [
