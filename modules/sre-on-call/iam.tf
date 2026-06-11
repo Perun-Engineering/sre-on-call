@@ -210,6 +210,7 @@ resource "aws_iam_role_policy" "master_agent_a2a_invoke" {
             local.agent_enabled["discord_scanner"] ? [aws_bedrockagentcore_agent_runtime.discord_scanner[0].agent_runtime_arn] : [],
             local.agent_enabled["cloudwatch_logs"] ? [aws_bedrockagentcore_agent_runtime.cloudwatch_logs[0].agent_runtime_arn] : [],
             local.agent_enabled["eks"] ? [aws_bedrockagentcore_agent_runtime.eks[0].agent_runtime_arn] : [],
+            local.agent_enabled["incident_history"] ? [aws_bedrockagentcore_agent_runtime.incident_history[0].agent_runtime_arn] : [],
           ) : [arn, "${arn}/*"]
         ])
       }
@@ -242,6 +243,7 @@ resource "aws_iam_role_policy" "master_agent_agentcore_read" {
             local.agent_enabled["discord_scanner"] ? [aws_bedrockagentcore_agent_runtime.discord_scanner[0].agent_runtime_arn] : [],
             local.agent_enabled["cloudwatch_logs"] ? [aws_bedrockagentcore_agent_runtime.cloudwatch_logs[0].agent_runtime_arn] : [],
             local.agent_enabled["eks"] ? [aws_bedrockagentcore_agent_runtime.eks[0].agent_runtime_arn] : [],
+            local.agent_enabled["incident_history"] ? [aws_bedrockagentcore_agent_runtime.incident_history[0].agent_runtime_arn] : [],
           ) : [arn, "${arn}/*"]
         ])
       }
@@ -540,6 +542,68 @@ resource "aws_iam_role_policy" "eks_agent_cluster_access" {
   })
 }
 
+# ── 8. Incident_History_Agent Role (issue #30) ──────────────────────────────
+#
+# The Incident_History_Agent needs:
+#   - DynamoDB Scan on the traces table to read incident-outcome records
+#   - KMS decrypt on the traces CMK (the table is SSE-KMS encrypted)
+#   - bedrock:InvokeModel for Titan embeddings (granted by the shared
+#     agentcore_runtime_exec policy in iam_agentcore.tf)
+
+resource "aws_iam_role" "incident_history_agent" {
+  count = local.agent_enabled["incident_history"] ? 1 : 0
+
+  name = "${var.project_name}-${var.environment}-incident-history-agent"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "bedrock-agentcore.amazonaws.com"
+        }
+      }
+    ]
+  })
+
+  tags = {
+    Name = "${var.project_name}-incident-history-agent-role"
+  }
+}
+
+resource "aws_iam_role_policy" "incident_history_agent_traces_read" {
+  count = local.agent_enabled["incident_history"] ? 1 : 0
+
+  name = "incident-history-read"
+  role = aws_iam_role.incident_history_agent[0].id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "ScanTraceArchiveForSimilarIncidents"
+        Effect = "Allow"
+        Action = [
+          "dynamodb:Scan",
+          "dynamodb:GetItem",
+        ]
+        Resource = aws_dynamodb_table.traces.arn
+      },
+      {
+        Sid    = "TraceArchiveKMSDecrypt"
+        Effect = "Allow"
+        Action = [
+          "kms:Decrypt",
+          "kms:DescribeKey",
+        ]
+        Resource = aws_kms_key.traces.arn
+      },
+    ]
+  })
+}
+
 # ── Outputs ──────────────────────────────────────────────────────────────────
 
 output "lambda_adapter_role_arn" {
@@ -570,4 +634,9 @@ output "cloudwatch_logs_agent_role_arn" {
 output "eks_agent_role_arn" {
   description = "ARN of the EKS_Agent IAM role (null when eks is disabled)"
   value       = try(aws_iam_role.eks_agent[0].arn, null)
+}
+
+output "incident_history_agent_role_arn" {
+  description = "ARN of the Incident_History_Agent IAM role (null when incident_history is disabled)"
+  value       = try(aws_iam_role.incident_history_agent[0].arn, null)
 }

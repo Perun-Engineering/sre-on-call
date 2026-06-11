@@ -2,7 +2,7 @@
 #
 # Single multi-stage Dockerfile for all sre-on-call agents.
 # Build per agent with: docker build --build-arg AGENT=<name> -t <repo>:<tag> .
-#   AGENT in: master, slack_scanner, discord_scanner, cloudwatch_logs, eks
+#   AGENT in: master, slack_scanner, discord_scanner, cloudwatch_logs, eks, incident_history
 #
 
 # ── Stage 1: install Python deps ─────────────────────────────────────────────
@@ -30,7 +30,7 @@ FROM python:3.12-slim AS runtime
 
 ARG AGENT
 RUN test -n "$AGENT" \
-    || (echo "ERROR: build-arg AGENT is required (master|slack_scanner|discord_scanner|cloudwatch_logs|eks)" && exit 1)
+    || (echo "ERROR: build-arg AGENT is required (master|slack_scanner|discord_scanner|cloudwatch_logs|eks|incident_history)" && exit 1)
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

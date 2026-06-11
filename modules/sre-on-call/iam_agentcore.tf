@@ -14,6 +14,7 @@ locals {
     local.agent_enabled["discord_scanner"] ? { discord_scanner = aws_iam_role.discord_scanner_agent[0].name } : {},
     local.agent_enabled["cloudwatch_logs"] ? { cloudwatch_logs = aws_iam_role.cloudwatch_logs_agent[0].name } : {},
     local.agent_enabled["eks"] ? { eks = aws_iam_role.eks_agent[0].name } : {},
+    local.agent_enabled["incident_history"] ? { incident_history = aws_iam_role.incident_history_agent[0].name } : {},
   )
 }
 

@@ -44,3 +44,10 @@ agents:
       - gather_eks_state
       - capture_snapshot
     mcps: []
+
+  incident_history:
+    enabled: true
+    skills:
+      - find_similar_incidents
+      - capture_snapshot
+    mcps: []

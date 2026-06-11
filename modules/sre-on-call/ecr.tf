@@ -9,6 +9,7 @@ locals {
     "${var.project_name}-discord-scanner",
     "${var.project_name}-cloudwatch-logs",
     "${var.project_name}-eks",
+    "${var.project_name}-incident-history",
   ]
 }
 

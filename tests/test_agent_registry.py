@@ -48,7 +48,7 @@ def _config(*, agents: dict[str, AgentConfig] | None = None) -> ProjectConfig:
 class TestCatalogueInvariants:
     """Static catalogue facts that must hold regardless of deployment config."""
 
-    def test_catalogue_includes_master_and_five_specialized(self):
+    def test_catalogue_includes_master_and_six_specialized(self):
         ids = {a.id for a in CATALOGUE}
         assert ids == {
             "master",
@@ -57,6 +57,7 @@ class TestCatalogueInvariants:
             "cloudwatch_logs",
             "eks",
             "prometheus",
+            "incident_history",
         }
 
     def test_master_is_orchestrator_kind(self):
@@ -215,6 +216,7 @@ class TestRegistryQueries:
             "cloudwatch_logs",
             "eks",
             "prometheus",
+            "incident_history",
         }
         assert orchestrator_ids == {"master"}
 

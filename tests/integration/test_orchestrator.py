@@ -200,6 +200,8 @@ def _make_orchestrator(
     hard_cutoff: float = 0.5,
     registry: AgentRegistry | None = None,
     synthesizer=None,
+    embedding_client=None,
+    history_store=None,
 ) -> InvestigationOrchestrator:
     """Create an orchestrator with short timeouts for testing.
 
@@ -214,6 +216,8 @@ def _make_orchestrator(
         report_formatter=ReportFormatter(registry),
         registry=registry,
         synthesizer=synthesizer,
+        embedding_client=embedding_client,
+        history_store=history_store,
     )
     # Override deadlines for fast tests
     orch.INITIAL_DEADLINE_SECONDS = initial_deadline
@@ -602,6 +606,7 @@ class TestOrchestratorEndpointConfig:
             assert sorted(orch.agent_endpoints.keys()) == [
                 "cloudwatch_logs",
                 "eks",
+                "incident_history",
                 "slack_scanner",
             ]
         finally:
@@ -1162,3 +1167,70 @@ class TestOrchestratorSynthesis:
         assert any("Analysis" in t for t in enrichment_texts)
         # One synthesis for the initial report plus one per late result.
         assert len(synth.calls) >= 2
+
+
+# ---------------------------------------------------------------------------
+# Tests: Phase 8 — incident-history outcome write (issue #30)
+# ---------------------------------------------------------------------------
+
+
+class _FakeEmbedder:
+    """Stand-in EmbeddingClient: records inputs, returns a fixed vector."""
+
+    def __init__(self, vector):
+        self.vector = vector
+        self.texts: list[str] = []
+
+    def embed(self, text):
+        self.texts.append(text)
+        return self.vector
+
+
+class _RecordingHistoryStore:
+    """Stand-in IncidentHistoryStore: captures put_outcome calls."""
+
+    def __init__(self):
+        self.outcomes = []
+
+    def put_outcome(self, outcome):
+        self.outcomes.append(outcome)
+
+
+class TestOrchestratorIncidentHistoryWrite:
+    """Phase 8 embeds the alert and stores one outcome record, fail-open."""
+
+    @pytest.mark.asyncio
+    async def test_records_outcome_with_embedding_and_refs(self, alert_context):
+        embedder = _FakeEmbedder([0.1, 0.2, 0.3])
+        store = _RecordingHistoryStore()
+        orch = _make_orchestrator(embedding_client=embedder, history_store=store)
+
+        await orch.investigate(alert_context)
+
+        assert len(store.outcomes) == 1
+        outcome = store.outcomes[0]
+        assert outcome.investigation_id == alert_context.investigation_id
+        assert outcome.alert_text == alert_context.alert_text
+        assert outcome.embedding == [0.1, 0.2, 0.3]
+        assert outcome.platform == alert_context.platform
+        assert outcome.channel_id == alert_context.channel_id
+        # The alert text is what gets embedded.
+        assert embedder.texts == [alert_context.alert_text]
+
+    @pytest.mark.asyncio
+    async def test_skips_write_when_embedding_unavailable(self, alert_context):
+        # Embedding failure (None) => no searchable record, so nothing stored.
+        store = _RecordingHistoryStore()
+        orch = _make_orchestrator(
+            embedding_client=_FakeEmbedder(None), history_store=store
+        )
+
+        await orch.investigate(alert_context)
+
+        assert store.outcomes == []
+
+    @pytest.mark.asyncio
+    async def test_noop_when_history_not_configured(self, alert_context):
+        # Default orchestrator (no client/store, env cleared) must not raise.
+        orch = _make_orchestrator()
+        await orch.investigate(alert_context)
