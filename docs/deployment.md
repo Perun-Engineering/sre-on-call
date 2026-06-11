@@ -229,7 +229,7 @@ AWS_PROFILE=<profile> terraform apply \
 
 This provisions: a CloudFront distribution, an RSA signing keypair (private key stored in Secrets Manager), the `page_renderer` Lambda, and an S3 event notification that triggers the renderer when `page_model.json` lands in the traces bucket.
 
-After apply, **redeploy (or refresh) the master runtime** so it picks up the new env vars (`INCIDENT_PAGE_ENABLED`, `CLOUDFRONT_DOMAIN`, `CF_KEY_PAIR_ID`, `CF_SIGNING_SECRET_ARN`). No image rebuild needed — `terraform apply` updates the runtime env vars in place; wait ~30–60s for the new version to reach `READY`.
+After apply, **redeploy (or refresh) the master runtime** so it picks up the new env vars (`INCIDENT_PAGE_ENABLED`, `INCIDENT_PAGE_BASE_URL`, `CLOUDFRONT_KEY_PAIR_ID`, `CLOUDFRONT_PRIVATE_KEY_SECRET_ARN`, `INCIDENT_PAGE_URL_TTL_SECONDS`). No image rebuild needed — `terraform apply` updates the runtime env vars in place; wait ~30–60s for the new version to reach `READY`.
 
 **Flow:** the master writes `page_model.json` to the investigation's S3 prefix in Phase 7 (after the report posts). The renderer Lambda fires on that write, composes `pages/<investigation_id>.html` (self-contained, inlined ECharts), and writes it back to S3 with SSE-S3/AES256 (no KMS needed for CloudFront). The master signs a CloudFront URL and includes it as "📊 Interactive report" in the Slack/Discord report. Unfurl is suppressed to avoid Slack auto-expanding the link.
 
