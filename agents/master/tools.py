@@ -4,7 +4,7 @@ Two async tools wrap the master's two orchestration paths:
 
 * :func:`investigate_alert` — full incident investigation lifecycle, fanning
   out to active specialized agents and posting an Incident Report.
-* :func:`capture_status_snapshot` — read-only ``/status`` snapshot, fanning
+* :func:`capture_status_snapshot` — read-only ``/sre-snapshot`` snapshot, fanning
   out a snapshot request and posting a :class:`SnapshotSections` payload at
   top-level.
 
@@ -107,7 +107,7 @@ async def investigate_alert(alert_context_json: str) -> str:
 
 @tool
 async def capture_status_snapshot(snapshot_request_json: str) -> str:
-    """Run the ``/status`` snapshot lifecycle for an operator.
+    """Run the ``/sre-snapshot`` snapshot lifecycle for an operator.
 
     Fans out a snapshot A2A request to every active specialized agent (per
     the registry's view of ``config.yaml``), aggregates the

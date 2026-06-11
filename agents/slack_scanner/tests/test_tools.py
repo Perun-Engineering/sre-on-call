@@ -5,7 +5,7 @@ algorithm via ``execute_channel_scan``, including channel history
 retrieval, bot/alert message filtering, investigation window scoping,
 and Slack API error handling.
 
-Also covers ``_execute_capture_snapshot`` — the ``/status`` snapshot
+Also covers ``_execute_capture_snapshot`` — the ``/sre-snapshot`` snapshot
 surface — exercising happy / anomaly / error paths against a mock
 :class:`slack_sdk.WebClient`.
 
@@ -332,7 +332,7 @@ class TestExecuteScan:
 
 
 # ---------------------------------------------------------------------------
-# capture_snapshot — /status path
+# capture_snapshot — /sre-snapshot path
 # ---------------------------------------------------------------------------
 
 REQUESTED_AT = "2026-05-28T19:00:00+00:00"

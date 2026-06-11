@@ -209,7 +209,7 @@ class SlackChatPlatform:
             "channel": target.channel_id,
             "text": text,
         }
-        # No thread anchor means "post at top-level" — used by /status
+        # No thread anchor means "post at top-level" — used by /sre-snapshot
         # snapshots, which are operational broadcasts, not thread replies.
         # The Slack API rejects ``thread_ts=""`` so we omit it in that case.
         if target.thread_anchor:

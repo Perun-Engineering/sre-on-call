@@ -248,7 +248,7 @@ def _execute_query(
 
 
 # ---------------------------------------------------------------------------
-# /status snapshot — top log groups by ingestion (i-a)
+# /sre-snapshot snapshot — top log groups by ingestion (i-a)
 # ---------------------------------------------------------------------------
 
 

@@ -199,7 +199,7 @@ See **[docs/testing.md](docs/testing.md)**. Three paths:
 
 - **Synthetic alert** — `scripts/synthetic_slack_webhook.py` builds a correctly-signed `app_mention` payload and POSTs to the Lambda URL. Useful for fast smoke tests.
 - **Real Slack alert** — invite the bot to a channel and `@bot …` to trigger an investigation end-to-end.
-- **`/status` snapshot** — the same script with `--command /status` (or run `/status` in any channel after Slack registration). Posts a top-level snapshot of cluster state, top log groups by ingestion, and chat platform reachability.
+- **`/sre-snapshot` snapshot** — the same script with `--command /sre-snapshot` (or run `/sre-snapshot` in any channel after Slack registration). Posts a top-level snapshot of cluster state, top log groups by ingestion, and chat platform reachability.
 
 ## Environment variables
 

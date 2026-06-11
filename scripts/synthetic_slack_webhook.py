@@ -6,7 +6,7 @@ By default the script sends an ``app_mention`` event (JSON body) — the
 same shape Slack would send when a user mentions the bot in a channel.
 
 With ``--command`` it sends a slash-command POST instead — the same shape
-Slack would send when a user runs ``/status`` (or ``/postmortem``) in a
+Slack would send when a user runs ``/sre-snapshot`` (or ``/postmortem``) in a
 channel. The body is form-encoded and the content type changes
 accordingly; the signing scheme is identical.
 
@@ -20,13 +20,13 @@ Usage::
         --team <team-id> \\
         [--text "ALERT: high CPU on api-server"]
 
-    # /status slash command (snapshot path)
+    # /sre-snapshot slash command (snapshot path)
     SLACK_SIGNING_SECRET=... \\
     ./scripts/synthetic_slack_webhook.py \\
         --url https://<id>.lambda-url.us-east-1.on.aws/ \\
         --channel <channel-id> \\
         --team <team-id> \\
-        --command /status
+        --command /sre-snapshot
 
     # /postmortem slash command (PIR path — requires a thread_ts)
     SLACK_SIGNING_SECRET=... \\
@@ -142,7 +142,7 @@ def main() -> int:
         help=(
             "Send a slash-command POST instead of an app_mention event. "
             "Pass the command name including the leading slash, e.g. "
-            "'/status' or '/postmortem'."
+            "'/sre-snapshot' or '/postmortem'."
         ),
     )
     parser.add_argument(
@@ -150,7 +150,7 @@ def main() -> int:
         default=None,
         help=(
             "Thread timestamp to include in slash-command body. Required by "
-            "/postmortem; ignored by /status."
+            "/postmortem; ignored by /sre-snapshot."
         ),
     )
     args = parser.parse_args()

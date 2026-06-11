@@ -103,7 +103,7 @@ def scan_discord_channels(
 
 
 # ---------------------------------------------------------------------------
-# /status snapshot — bot reachability + guild count
+# /sre-snapshot snapshot — bot reachability + guild count
 # ---------------------------------------------------------------------------
 
 

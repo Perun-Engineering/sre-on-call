@@ -2,7 +2,7 @@
 
 Owns the two transport-payload dataclasses an agent's text response carries
 to the master orchestrator: :class:`shared.models.AgentResult` (alert path)
-and :class:`shared.models.SnapshotReport` (``/status`` path). Each is round-
+and :class:`shared.models.SnapshotReport` (``/sre-snapshot`` path). Each is round-
 tripped through an :class:`shared.agent_footer.AgentFooter` instance defined
 at the bottom of this module — :data:`AGENT_RESULT` and :data:`SNAPSHOT_RESULT`.
 """

@@ -269,7 +269,7 @@ class TestDiscordReportRenderer:
 
 
 # ---------------------------------------------------------------------------
-# capture_snapshot — /status path
+# capture_snapshot — /sre-snapshot path
 # ---------------------------------------------------------------------------
 
 

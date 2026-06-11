@@ -12,7 +12,7 @@ the single-call pipeline:
 ``AgentResult`` / ``SnapshotReport`` *semantics*. The caller picks which
 :class:`shared.agent_footer.AgentFooter` to expect and maps the resulting
 :class:`A2AReply` to its own domain type — the alert orchestrator to an
-``AgentResult(status="error")``, the ``/status`` orchestrator to a raised
+``AgentResult(status="error")``, the ``/sre-snapshot`` orchestrator to a raised
 ``RuntimeError``. A JSON-RPC ``error`` comes back as a *value* on the
 reply; transport/network failures still raise out of :meth:`A2AClient.send`.
 """

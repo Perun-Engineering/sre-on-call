@@ -108,7 +108,7 @@ class SnapshotBlock:
 
 @dataclass
 class SnapshotSections:
-    """Platform-agnostic ``/status`` snapshot output.
+    """Platform-agnostic ``/sre-snapshot`` snapshot output.
 
     Built by the master's ``StatusSnapshotOrchestrator`` from a deterministic
     aggregation of per-agent :class:`SnapshotReport` results. Rendered by
@@ -116,7 +116,7 @@ class SnapshotSections:
     native markup for chat delivery.
     """
 
-    requested_at: str  # ISO 8601 — when the operator ran /status
+    requested_at: str  # ISO 8601 — when the operator ran /sre-snapshot
     summary_line: str  # deterministic top-line ("3/4 agents healthy …")
     blocks: list[SnapshotBlock]
 

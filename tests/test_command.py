@@ -304,16 +304,16 @@ class TestCommandRouting:
 
 
 # ---------------------------------------------------------------------------
-# /status command routing
+# /sre-snapshot command routing
 # ---------------------------------------------------------------------------
 
 
 class TestStatusCommandRouting:
-    """Lambda intake handling for the operator-driven /status command."""
+    """Lambda intake handling for the operator-driven /sre-snapshot command."""
 
     def test_status_command_acks_and_dispatches_status(self):
         event = _build_command_event(
-            _build_slack_command_body(command="/status", thread_ts=None)
+            _build_slack_command_body(command="/sre-snapshot", thread_ts=None)
         )
         dispatch = RecordingMasterDispatch()
 
@@ -327,10 +327,10 @@ class TestStatusCommandRouting:
         assert dispatch.tasks[0].kind == "status"
 
     def test_status_command_does_not_require_thread(self):
-        """Unlike /postmortem, /status is fine without thread context — it's
+        """Unlike /postmortem, /sre-snapshot is fine without thread context — it's
         an operational broadcast, not an incident-thread reply."""
         event = _build_command_event(
-            _build_slack_command_body(command="/status", thread_ts=None)
+            _build_slack_command_body(command="/sre-snapshot", thread_ts=None)
         )
         dispatch = RecordingMasterDispatch()
 
@@ -343,7 +343,7 @@ class TestStatusCommandRouting:
     def test_status_task_carries_command_and_requested_at(self):
         event = _build_command_event(
             _build_slack_command_body(
-                command="/status", channel_id="C99999", user_id="U22222", thread_ts=None,
+                command="/sre-snapshot", channel_id="C99999", user_id="U22222", thread_ts=None,
             )
         )
         dispatch = RecordingMasterDispatch()
@@ -361,10 +361,10 @@ class TestStatusCommandRouting:
         assert "T" in task.requested_at
 
     def test_status_dispatches_status_not_postmortem(self):
-        """/status must dispatch a status task, even if a thread_ts is present
+        """/sre-snapshot must dispatch a status task, even if a thread_ts is present
         (Slack sometimes includes it). Routing is keyed on command name."""
         event = _build_command_event(
-            _build_slack_command_body(command="/status", thread_ts="1700000000.000100")
+            _build_slack_command_body(command="/sre-snapshot", thread_ts="1700000000.000100")
         )
         dispatch = RecordingMasterDispatch()
 

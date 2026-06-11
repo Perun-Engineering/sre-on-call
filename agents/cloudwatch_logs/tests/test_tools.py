@@ -482,7 +482,7 @@ class TestExecuteQuery:
 
 
 # ---------------------------------------------------------------------------
-# capture_snapshot — /status path (i-a: IncomingBytes ranking + bounded Insights)
+# capture_snapshot — /sre-snapshot path (i-a: IncomingBytes ranking + bounded Insights)
 # ---------------------------------------------------------------------------
 
 

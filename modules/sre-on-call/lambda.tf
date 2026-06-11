@@ -147,6 +147,39 @@ resource "aws_lambda_alias" "lambda_adapter_live" {
   description      = "Live alias for provisioned concurrency"
   function_name    = aws_lambda_function.lambda_adapter.function_name
   function_version = aws_lambda_function.lambda_adapter.version
+
+  lifecycle {
+    # When the alias moves to a newly published version, AWS auto-adds
+    # routing weights to the previous version to keep it serving until
+    # provisioned concurrency is ready on the new one. Ignore that drift
+    # here; null_resource.clear_alias_weights performs the cutover instead.
+    ignore_changes = [routing_config]
+  }
+}
+
+# Cut the live alias fully over to the freshly published version. AWS's
+# provisioned-concurrency safe-deployment leaves AdditionalVersionWeights on
+# the previous version, which (a) keeps old code serving and (b) makes
+# PutProvisionedConcurrencyConfig fail ("Alias with weights can not be used
+# with Provisioned Concurrency"). Clearing the weights resolves both. Keyed on
+# the function version so it only runs when a new version is published.
+resource "null_resource" "clear_alias_weights" {
+  triggers = {
+    function_version = aws_lambda_function.lambda_adapter.version
+  }
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      set -eu
+      aws lambda update-alias \
+        --region '${var.aws_region}' \
+        --function-name '${aws_lambda_function.lambda_adapter.function_name}' \
+        --name '${aws_lambda_alias.lambda_adapter_live.name}' \
+        --routing-config '{}' >/dev/null
+    EOT
+  }
+
+  depends_on = [aws_lambda_alias.lambda_adapter_live]
 }
 
 # ── Provisioned Concurrency ─────────────────────────────────────────────────
@@ -158,6 +191,10 @@ resource "aws_lambda_provisioned_concurrency_config" "lambda_adapter" {
   function_name                     = aws_lambda_function.lambda_adapter.function_name
   qualifier                         = aws_lambda_alias.lambda_adapter_live.name
   provisioned_concurrent_executions = var.lambda_provisioned_concurrency
+
+  # Weights must be cleared before this runs — AWS rejects provisioned
+  # concurrency on a weighted alias.
+  depends_on = [null_resource.clear_alias_weights]
 }
 
 # ── Lambda Function URL (Public Endpoint for Webhook Ingestion) ─────────────
@@ -173,14 +210,16 @@ resource "aws_lambda_function_url" "lambda_adapter" {
   cors {
     allow_origins = ["*"]
     allow_methods = ["POST"]
+    # AWS normalizes Lambda function-URL CORS header names to lowercase on read,
+    # so declare them lowercase to avoid a perpetual case-only plan diff.
     allow_headers = [
-      "Content-Type",
+      "content-type",
       # Slack headers
-      "X-Slack-Signature",
-      "X-Slack-Request-Timestamp",
+      "x-slack-signature",
+      "x-slack-request-timestamp",
       # Discord headers
-      "X-Signature-Ed25519",
-      "X-Signature-Timestamp",
+      "x-signature-ed25519",
+      "x-signature-timestamp",
     ]
     max_age = 86400
   }

@@ -196,7 +196,7 @@ resource "aws_iam_role_policy" "master_agent_a2a_invoke" {
   })
 }
 
-# Read AgentCore runtime status for the master's section in the /status
+# Read AgentCore runtime status for the master's section in the /sre-snapshot
 # snapshot ("READY" / "CREATING" / "FAILED" / etc. per deployed runtime).
 # Same resource set as the a2a-invoke policy so the master can introspect
 # every runtime it is allowed to call.
@@ -228,7 +228,7 @@ resource "aws_iam_role_policy" "master_agent_agentcore_read" {
   })
 }
 
-# DynamoDB reachability check for the master's section in the /status
+# DynamoDB reachability check for the master's section in the /sre-snapshot
 # snapshot. DescribeTable is read-only and surfaces TableStatus so the
 # operator can see "ACTIVE" / "UPDATING" / etc. without granting any
 # data-plane permissions on these tables to the master role.
@@ -447,7 +447,7 @@ resource "aws_iam_role_policy" "cloudwatch_logs_agent_logs" {
   })
 }
 
-# Read CloudWatch metrics for the /status snapshot (top log groups by
+# Read CloudWatch metrics for the /sre-snapshot snapshot (top log groups by
 # IncomingBytes in the last 15 min). The cloudwatch:GetMetricData action
 # does NOT support resource-level permissions per the AWS service docs —
 # this is the AWS-recommended way to grant it.

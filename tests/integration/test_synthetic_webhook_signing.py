@@ -3,7 +3,7 @@ must match the production verifier in lambda_adapter/slack/signature.py.
 
 If this test passes, a payload signed by the script will pass signature
 verification when the Lambda processes it. Covers both the default
-``app_mention`` path and the new slash-command (``/status`` /
+``app_mention`` path and the new slash-command (``/sre-snapshot`` /
 ``/postmortem``) path.
 """
 
@@ -70,7 +70,7 @@ def test_tampered_body_fails_verification():
 def test_slash_command_body_is_form_encoded():
     script = _load_script_module()
     body, content_type = script.build_slash_command_body(
-        command="/status",
+        command="/sre-snapshot",
         team="T123",
         channel="C456",
         user="U789",
@@ -80,7 +80,7 @@ def test_slash_command_body_is_form_encoded():
     # not JSON — the Lambda's intake routes on that content type.
     assert content_type == "application/x-www-form-urlencoded"
     fields = parse_qs(body, keep_blank_values=True)
-    assert fields["command"] == ["/status"]
+    assert fields["command"] == ["/sre-snapshot"]
     assert fields["team_id"] == ["T123"]
     assert fields["channel_id"] == ["C456"]
     assert fields["user_id"] == ["U789"]
@@ -100,7 +100,7 @@ def test_slash_command_body_includes_thread_ts_when_provided():
 def test_slash_command_body_omits_thread_ts_when_absent():
     script = _load_script_module()
     body, _ = script.build_slash_command_body(
-        command="/status",
+        command="/sre-snapshot",
         team="T1", channel="C1", user="U1", text="",
         thread_ts=None,
     )
@@ -114,7 +114,7 @@ def test_slash_command_signature_round_trips_through_production_verifier():
     script = _load_script_module()
     secret = "deadbeefdeadbeefdeadbeefdeadbeef"
     body, _ = script.build_slash_command_body(
-        command="/status",
+        command="/sre-snapshot",
         team="T1", channel="C1", user="U1", text="",
     )
     timestamp = str(int(time.time()))
