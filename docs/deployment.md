@@ -217,6 +217,26 @@ variable — `config.yaml` is the only switch. Validate before applying:
 python -m shared.config validate
 ```
 
+## Interactive incident page (opt-in)
+
+Off by default. Enable with:
+
+```bash
+AWS_PROFILE=<profile> terraform apply \
+    -var 'agent_image_tag=<tag>' \
+    -var 'enable_incident_page=true'
+```
+
+This provisions: a CloudFront distribution, an RSA signing keypair (private key stored in Secrets Manager), the `page_renderer` Lambda, and an S3 event notification that triggers the renderer when `page_model.json` lands in the traces bucket.
+
+After apply, **redeploy (or refresh) the master runtime** so it picks up the new env vars (`INCIDENT_PAGE_ENABLED`, `CLOUDFRONT_DOMAIN`, `CF_KEY_PAIR_ID`, `CF_SIGNING_SECRET_ARN`). No image rebuild needed — `terraform apply` updates the runtime env vars in place; wait ~30–60s for the new version to reach `READY`.
+
+**Flow:** the master writes `page_model.json` to the investigation's S3 prefix in Phase 7 (after the report posts). The renderer Lambda fires on that write, composes `pages/<investigation_id>.html` (self-contained, inlined ECharts), and writes it back to S3 with SSE-S3/AES256 (no KMS needed for CloudFront). The master signs a CloudFront URL and includes it as "📊 Interactive report" in the Slack/Discord report. Unfurl is suppressed to avoid Slack auto-expanding the link.
+
+Links expire after `incident_page_url_ttl_seconds` (default 7 days). A click before the renderer finishes, or on an expired link, returns 403 — CloudFront serves a "generating" fallback page. Re-run or re-share to refresh the signature.
+
+Fail-open: signer or renderer errors never block the chat report; the link is simply omitted.
+
 ## Prompt-injection guardrail (opt-in)
 
 Agents ingest untrusted content (Slack/Discord messages, CloudWatch logs,
