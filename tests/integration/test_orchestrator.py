@@ -204,6 +204,8 @@ def _make_orchestrator(
     history_store=None,
     router=None,
     followup=None,
+    page_signer=None,
+    trace_store=None,
 ) -> InvestigationOrchestrator:
     """Create an orchestrator with short timeouts for testing.
 
@@ -222,6 +224,8 @@ def _make_orchestrator(
         history_store=history_store,
         router=router,
         followup=followup,
+        page_signer=page_signer,
+        trace_store=trace_store,
     )
     # Override deadlines for fast tests
     orch.INITIAL_DEADLINE_SECONDS = initial_deadline
@@ -1630,3 +1634,33 @@ class TestSnapshotCharts:
         )
 
         orch._trace_store.put_chart_series.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Tests: Phase 3 + 7 — page signer + page model write (#33)
+# ---------------------------------------------------------------------------
+
+
+class TestOrchestratorPageModel:
+    """Master signs the page URL in Phase 3 and writes the page model in Phase 7."""
+
+    @pytest.mark.asyncio
+    async def test_signs_link_and_writes_page_model(self, alert_context):
+        from unittest.mock import MagicMock
+
+        page_signer = MagicMock()
+        page_signer.sign.return_value = "https://d/pages/x.html?Signature=1"
+        trace_store = MagicMock()
+
+        orch = _make_orchestrator(
+            page_signer=page_signer,
+            trace_store=trace_store,
+        )
+
+        await orch.investigate(alert_context)
+
+        page_signer.sign.assert_called_once()
+        trace_store.put_page_model.assert_called_once()
+        _, kwargs = trace_store.put_page_model.call_args
+        assert kwargs["investigation_id"]
+        assert "chart_ids" in kwargs["payload"]

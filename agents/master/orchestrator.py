@@ -54,6 +54,7 @@ from agents.master.followup import FollowupCandidate, FollowupPlanner
 from agents.master.report_formatter import ReportFormatter
 from agents.master.routing import AgentCandidate, AgentRouter, RoutingResult
 from agents.master.synthesis import AnalysisSynthesizer, IncidentAnalysis
+from shared.page_signer import CloudFrontUrlSigner
 from shared.report_renderer import AnalysisSection
 
 logger = logging.getLogger(__name__)
@@ -246,6 +247,7 @@ class InvestigationOrchestrator:
         history_store: IncidentHistoryStore | None = None,
         router: AgentRouter | None = None,
         followup: FollowupPlanner | None = None,
+        page_signer: CloudFrontUrlSigner | None = None,
     ) -> None:
         self._chat_platform: ChatPlatform | None = chat_platform
         self._registry: AgentRegistry = registry or get_registry()
@@ -282,6 +284,13 @@ class InvestigationOrchestrator:
         # TRACES_BUCKET_NAME / TRACES_TABLE_NAME are unset (e.g. local dev,
         # tests). All trace_store calls below must check for None.
         self._trace_store = trace_store if trace_store is not None else TraceStore.from_env()
+
+        # #33 — signs the stable interactive-page URL at report-post time.
+        # from_env() returns None unless INCIDENT_PAGE_ENABLED + config present,
+        # so the link is simply omitted when the feature is off. Fail-open.
+        self._page_signer = (
+            page_signer if page_signer is not None else CloudFrontUrlSigner.from_env()
+        )
 
         # Incident-history write path (issue #30). Both are opt-in via env:
         # EmbeddingClient.from_env() is None unless INCIDENT_HISTORY_ENABLED;
@@ -372,6 +381,11 @@ class InvestigationOrchestrator:
 
         analysis = await self._synthesize_analysis(alert_context, results)
 
+        page_url = (
+            self._page_signer.sign(alert_context.investigation_id)
+            if self._page_signer is not None
+            else None
+        )
         report_sections = self.report_formatter.build_incident_sections(
             alert_context,
             results,
@@ -379,6 +393,7 @@ class InvestigationOrchestrator:
             disabled_agents=self.disabled_agents,
             analysis=analysis,
             skipped_agents=skipped_agents,
+            interactive_page_url=page_url,
         )
 
         try:
@@ -469,6 +484,13 @@ class InvestigationOrchestrator:
         # Snapshot the series behind chart-carrying findings (#32). Same
         # fail-open contract as the manifest write above.
         self._snapshot_charts(alert_context=alert_context, results=results)
+
+        # Write the #33 page model last in Phase 7 — after the manifest and the
+        # chart series — so its S3 ObjectCreated event triggers the renderer only
+        # once the charts it references already exist. Fail-open.
+        self._write_page_model(
+            alert_context=alert_context, results=results, analysis=analysis,
+        )
 
         # --- Phase 8: record the incident outcome for similar-incident lookup ---
         # Embeds the alert + stores a compact record (issue #30) so a future,
@@ -906,6 +928,24 @@ class InvestigationOrchestrator:
                     chart_id=chart_id,
                     payload=payload,
                 )
+
+    def _write_page_model(
+        self,
+        *,
+        alert_context: AlertContext,
+        results: dict[str, AgentResult | AgentFailure],
+        analysis: AnalysisSection | None,
+    ) -> None:
+        """Build + persist the #33 page model (render trigger). Fail-open."""
+        if self._trace_store is None:
+            return
+        model = self.report_formatter.build_page_model(
+            alert_context, results, analysis=analysis,
+        )
+        self._trace_store.put_page_model(
+            investigation_id=alert_context.investigation_id,
+            payload=model.to_json_dict(),
+        )
 
     def _record_incident_outcome(
         self,
