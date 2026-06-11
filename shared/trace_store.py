@@ -153,6 +153,10 @@ EVENT_DEDUP_OUTCOME = "dedup_outcome"
 EVENT_A2A_REQUEST = "a2a_request"
 EVENT_A2A_RESPONSE = "a2a_response"
 EVENT_INVESTIGATION_TERMINATED = "investigation_terminated"
+# Issue #28 — the master's pre-dispatch routing decision (selected agents +
+# per-agent hints + skipped agents/reasons) and the Stage 2 follow-up decision.
+EVENT_ROUTING_DECISION = "routing_decision"
+EVENT_FOLLOWUP_DECISION = "followup_decision"
 
 
 # ---------------------------------------------------------------------------
@@ -186,10 +190,14 @@ class TraceManifest:
     status: str  # "completed" | "partial" | "failed"
     error_count: int
     schema_version: int = SCHEMA_VERSION
+    # Issue #28 — the router's decision for this investigation:
+    # {"selected": {id: hint}, "skipped": {id: reason}, "rationale": str}.
+    # None when routing was disabled or fell open (dispatched all agents).
+    routing: dict | None = None
 
     def to_json_dict(self) -> dict:
         """Serialise to a JSON-safe dict (e.g. for ``s3:PutObject``)."""
-        return {
+        d = {
             "schema_version": self.schema_version,
             "investigation_id": self.investigation_id,
             "alert_context": self.alert_context,
@@ -203,6 +211,9 @@ class TraceManifest:
             "status": self.status,
             "error_count": self.error_count,
         }
+        if self.routing is not None:
+            d["routing"] = self.routing
+        return d
 
 
 # ---------------------------------------------------------------------------

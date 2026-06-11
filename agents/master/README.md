@@ -18,6 +18,27 @@ It is **fail-open**: any error or timeout posts the report exactly as it would w
 - `SYNTHESIS_MODEL_ID` — model for the synthesis call; falls back to `MODEL_ID`. Point at a Sonnet-class model for stronger reasoning while dispatch stays cheap.
 - `SYNTHESIS_TIMEOUT_SECONDS` — time budget (default 10s), reserved out of the 60s initial-report deadline.
 
+### Pre-dispatch routing (Phase 0.5)
+
+Before fanning out, the master makes one LLM call (`agents/master/routing.py`) that maps the alert onto (a) which of the active agents are worth dispatching and (b) a focused per-agent investigation hint (suspected pods, candidate log groups, time-window emphasis), injected onto each dispatch's `AlertContext.investigation_hints`. Agents the router skips render as a distinct **➖ "not investigated"** state in the Incident Report — never a failure. The decision (selected + hints + skip reasons + rationale) is written to the trace archive (`routing_decision` event + the manifest's `routing` block).
+
+It is **fail-open**: routing disabled, any error, or a decision that would skip *every* agent dispatches the full active roster — exactly today's behavior. Routing runs before the kick-off notice so it lists only the agents actually queried; its latency is spent out of the 60s window. Controlled by env vars:
+
+- `ALERT_ROUTING_ENABLED` — `true` to enable (Terraform `enable_alert_routing`, default on).
+- `ROUTING_MODEL_ID` — model for the routing call; falls back to `MODEL_ID`. Point at a Sonnet-class model for better triage judgment while dispatch stays cheap.
+- `ROUTING_TIMEOUT_SECONDS` — time budget (default 8s).
+
+### Bounded follow-up round (Stage 2)
+
+After the initial harvest and report, the master optionally makes one LLM call (`agents/master/followup.py`) asking whether a single additional targeted dispatch is worth it. If so it re-dispatches **at most N** agents (default 2) with refined hints; the results land through the existing late-result enrichment path. The round is **hard-capped** and only runs when the remaining cutoff budget can absorb it — and the dispatched tasks are bounded by the same Phase 4 cutoff loop — so the 5-minute deadline always holds.
+
+It is **fail-open**: disabled or any error means no follow-up. Controlled by env vars:
+
+- `FOLLOWUP_ROUND_ENABLED` — `true` to enable (Terraform `enable_followup_round`, default **off** until validated).
+- `FOLLOWUP_MODEL_ID` — model for the follow-up planning call; falls back to `MODEL_ID`.
+- `FOLLOWUP_TIMEOUT_SECONDS` — planning-call budget (default 6s).
+- `FOLLOWUP_MAX_AGENTS` — hard cap on the round (default 2, Terraform `followup_max_agents`).
+
 ## Skills
 
 | Name | Description |

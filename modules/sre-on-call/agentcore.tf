@@ -44,6 +44,36 @@ variable "synthesis_model_id" {
   default     = ""
 }
 
+variable "enable_alert_routing" {
+  description = "Enable the master's pre-dispatch LLM routing (issue #28): pick which active agents to query per alert and attach per-agent investigation hints. Fail-open: any routing error dispatches every active agent (today's behavior). Router-skipped agents render as a distinct 'not investigated' state in the report."
+  type        = bool
+  default     = true
+}
+
+variable "routing_model_id" {
+  description = "Bedrock model ID for the master's routing call. Empty string falls back to the master's MODEL_ID. Set to a Sonnet-class model for better triage judgment while dispatch stays cheap."
+  type        = string
+  default     = ""
+}
+
+variable "enable_followup_round" {
+  description = "Enable the master's Stage 2 bounded follow-up round (issue #28): after the initial harvest, optionally run one additional targeted dispatch to a few agents with refined hints. Fail-open and hard-capped so the 5-minute cutoff always holds. Defaults off until validated in dev."
+  type        = bool
+  default     = false
+}
+
+variable "followup_model_id" {
+  description = "Bedrock model ID for the master's follow-up planning call. Empty string falls back to the master's MODEL_ID."
+  type        = string
+  default     = ""
+}
+
+variable "followup_max_agents" {
+  description = "Hard cap on the number of agents dispatched in the single Stage 2 follow-up round."
+  type        = number
+  default     = 2
+}
+
 variable "embedding_model_id" {
   description = "Bedrock model ID for alert-text embeddings used by the incident_history similar-incident lookup (issue #30). Titan Text Embeddings V2 by default."
   type        = string
@@ -335,9 +365,21 @@ resource "aws_bedrockagentcore_agent_runtime" "master" {
       TRACES_BUCKET_NAME = aws_s3_bucket.traces.bucket
       TRACES_TABLE_NAME  = aws_dynamodb_table.traces.name
       SYNTHESIS_ENABLED  = var.enable_analysis_synthesis ? "true" : "false"
+      # Issue #28 — pre-dispatch routing + Stage 2 follow-up round. Both are
+      # independently fail-open in the orchestrator; these env vars only gate
+      # whether the call site is attempted at all.
+      ALERT_ROUTING_ENABLED  = var.enable_alert_routing ? "true" : "false"
+      FOLLOWUP_ROUND_ENABLED = var.enable_followup_round ? "true" : "false"
+      FOLLOWUP_MAX_AGENTS    = tostring(var.followup_max_agents)
     },
     var.synthesis_model_id != "" ? {
       SYNTHESIS_MODEL_ID = var.synthesis_model_id
+    } : {},
+    var.routing_model_id != "" ? {
+      ROUTING_MODEL_ID = var.routing_model_id
+    } : {},
+    var.followup_model_id != "" ? {
+      FOLLOWUP_MODEL_ID = var.followup_model_id
     } : {},
     local.agent_enabled["slack_scanner"] ? {
       SLACK_SCANNER_AGENT_RUNTIME_ARN = aws_bedrockagentcore_agent_runtime.slack_scanner[0].agent_runtime_arn
