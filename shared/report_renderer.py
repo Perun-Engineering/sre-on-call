@@ -39,6 +39,20 @@ class InvestigationStartedSections:
 
 
 @dataclass
+class FailureNoticeSections:
+    """Platform-agnostic "investigation died" notice.
+
+    Posted by the master's background done-callback when the investigation
+    task raises before (or instead of) posting its Incident Report, so the
+    channel doesn't see "Investigation Started" followed by silence. The
+    ``investigation_id`` is surfaced so the trace archive can be consulted.
+    """
+
+    investigation_id: str
+    detail: str  # short, human-readable reason
+
+
+@dataclass
 class ReportSections:
     """Platform-agnostic structured report data."""
 
@@ -132,6 +146,7 @@ DeliverPayload = Union[
     ReportSections,
     EnrichmentSections,
     InvestigationStartedSections,
+    FailureNoticeSections,
     PIRSections,
     SnapshotSections,
 ]
@@ -155,6 +170,7 @@ class ReportRenderer(Protocol):
     def render_investigation_started(
         self, sections: InvestigationStartedSections
     ) -> str: ...
+    def render_failure_notice(self, sections: FailureNoticeSections) -> str: ...
     def render_snapshot(self, sections: SnapshotSections) -> str: ...
     def normalize(self, text: str) -> str:
         """Translate agent-produced CommonMark into this platform's markup.
@@ -310,6 +326,8 @@ class MarkupReportRenderer:
             return self.render_enrichment(payload)
         if isinstance(payload, InvestigationStartedSections):
             return self.render_investigation_started(payload)
+        if isinstance(payload, FailureNoticeSections):
+            return self.render_failure_notice(payload)
         if isinstance(payload, PIRSections):
             return self.render_pir(payload)
         if isinstance(payload, SnapshotSections):
@@ -421,6 +439,18 @@ class MarkupReportRenderer:
             "_Initial report in up to 60s; late results until the 5-minute cutoff._"
         )
         return "\n".join(parts)
+
+    def render_failure_notice(self, sections: FailureNoticeSections) -> str:
+        d = self._d
+        return "\n".join(
+            [
+                f"⚠️ {d.bold('Investigation Failed')}",
+                d.separator,
+                f"{d.bold('Investigation ID:')} {sections.investigation_id}",
+                "",
+                d.escape_untrusted(sections.detail),
+            ]
+        )
 
     def render_pir(self, sections: PIRSections) -> str:
         d = self._d
