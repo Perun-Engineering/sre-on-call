@@ -231,6 +231,89 @@ async def test_executor_appends_structured_tool_result_footer():
     assert any("<<<AGENT_RESULT " in text for text in text_blocks)
 
 
+async def test_executor_emits_structured_datapart_artifact():
+    """Issue #24: the executor attaches AGENT_RESULT + AGENT_METADATA as DataParts.
+
+    Round-trips the emitted ``agent_data`` artifact back through the reader
+    (``extract_response_data``) to prove the structured payloads survive the
+    A2A wire without depending on text-footer parsing.
+    """
+    from shared.a2a_protocol import extract_response_data
+    from shared.agent_telemetry import AGENT_METADATA
+
+    structured = AgentResult(
+        agent_name="eks",
+        status="success",
+        findings=[
+            Finding(
+                source="pod/api-123",
+                timestamp="2025-01-15T14:32:00Z",
+                content="Pod api-123: phase=Failed",
+                severity="critical",
+                metadata={"kind": "pod_status"},
+            )
+        ],
+        summary="Inspected 1 item(s). Found 1 finding(s).",
+    )
+
+    agent = MagicMock()
+    agent.messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "toolResult": {
+                        "content": [
+                            {"text": "Tool text\n\n" + AGENT_RESULT.encode(structured)}
+                        ]
+                    }
+                }
+            ],
+        }
+    ]
+    model_id = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+    executor = TelemetryCapturingA2AExecutor(agent=agent, model_id=model_id)
+
+    class FakeMetrics:
+        accumulated_usage = {"inputTokens": 100, "outputTokens": 50, "totalTokens": 150}
+
+    class FakeResult:
+        def __init__(self) -> None:
+            self.message = {"content": [{"text": "Concise final analysis."}]}
+            self.metrics = FakeMetrics()
+
+        def __str__(self) -> str:
+            return "\n".join(
+                item.get("text", "") for item in self.message.get("content", [])
+            )
+
+    updater = AsyncMock()
+    await executor._handle_agent_result(FakeResult(), updater)
+
+    data_calls = [
+        call for call in updater.add_artifact.call_args_list
+        if call.kwargs.get("name") == "agent_data"
+    ]
+    assert len(data_calls) == 1
+    parts = data_calls[0].args[0]
+    fake_result = {
+        "artifacts": [
+            {
+                "name": "agent_data",
+                "parts": [p.model_dump(by_alias=True, exclude_none=True) for p in parts],
+            }
+        ]
+    }
+
+    data = extract_response_data(fake_result)
+    assert AGENT_RESULT.decode_data(data["AGENT_RESULT"]) == structured
+    metadata = AGENT_METADATA.decode_data(data["AGENT_METADATA"])
+    assert metadata is not None
+    assert metadata.model_id == model_id
+    assert metadata.input_tokens == 100
+    assert metadata.cost_usd is not None  # priced model + token counts
+
+
 class TestComposeSystemPrompt:
     """The composed prompt = base + each skill's markdown body."""
 

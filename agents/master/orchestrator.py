@@ -110,7 +110,16 @@ def _result_from_reply(
             metadata=base_metadata,
         )
 
-    clean_summary, footer_metadata = AGENT_METADATA.extract(reply.text)
+    # Prefer the structured DataPart metadata (issue #24); fall back to the
+    # legacy text footer for agents still on the pre-#24 image. The text footer
+    # is always stripped from the summary regardless of which source wins.
+    clean_summary, text_footer_metadata = AGENT_METADATA.extract(reply.text)
+    data_metadata = reply.data.get(AGENT_METADATA.kind)
+    footer_metadata = (
+        AGENT_METADATA.decode_data(data_metadata)
+        if data_metadata is not None
+        else text_footer_metadata
+    )
     structured = reply.payload
     merged = _merge_metadata(base_metadata, structured.metadata if structured else None)
     merged = _merge_metadata(merged, footer_metadata)

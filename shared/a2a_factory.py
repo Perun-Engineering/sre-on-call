@@ -24,7 +24,7 @@ import uvicorn
 
 from a2a.server.agent_execution import RequestContext
 from a2a.server.events import EventQueue
-from a2a.types import AgentSkill, Part, TextPart
+from a2a.types import AgentSkill, DataPart, Part, TextPart
 from strands import Agent
 from strands.models.bedrock import BedrockModel
 from strands.multiagent.a2a import A2AServer
@@ -32,7 +32,7 @@ from strands.multiagent.a2a.executor import StrandsA2AExecutor
 
 from shared import busy_state
 from shared.agent_telemetry import AGENT_METADATA, compute_cost_usd
-from shared.models import AgentMetadata
+from shared.models import AgentMetadata, AgentResult
 from shared.time_utils import now_iso
 from shared.tool_result import AGENT_RESULT
 
@@ -90,6 +90,26 @@ class TelemetryCapturingA2AExecutor(StrandsA2AExecutor):
                     content.append({"text": "\n" + structured_footer})
 
             metadata = self._build_metadata(result)
+
+            # Issue #24 — structured transport. Attach the same payloads as A2A
+            # DataParts on their own ``agent_data`` artifact: a typed channel
+            # that can't be silently lost to text-marker parsing. Standalone
+            # (its own artifact_id) so it is mode-independent — it never has to
+            # interleave with the streamed ``agent_response`` append/last_chunk
+            # chain. Dual-write: the legacy text footers below stay until all
+            # runtimes read DataParts (Phase 2). Readers prefer the DataPart.
+            structured_result = _latest_agent_result(
+                getattr(self.agent, "messages", None)
+            )
+            data_parts = [
+                Part(root=DataPart(data=AGENT_METADATA.encode_data(metadata)))
+            ]
+            if structured_result is not None:
+                data_parts.insert(
+                    0, Part(root=DataPart(data=AGENT_RESULT.encode_data(structured_result)))
+                )
+            await updater.add_artifact(data_parts, name="agent_data")
+
             footer = AGENT_METADATA.encode(metadata)
             if streamed:
                 # In A2A-compliant streaming, the parent has already flushed
@@ -125,6 +145,20 @@ class TelemetryCapturingA2AExecutor(StrandsA2AExecutor):
             total_tokens=total_tokens,
             cost_usd=compute_cost_usd(self._model_id, input_tokens, output_tokens),
         )
+
+
+def _latest_agent_result(messages) -> AgentResult | None:
+    """Decode the newest structured AgentResult from recorded tool output.
+
+    The DataPart counterpart to :func:`_latest_agent_result_footer` (which
+    returns the raw text block): finds the same footer and parses it into an
+    :class:`AgentResult` for re-emission on the ``agent_data`` artifact.
+    """
+    block = _latest_agent_result_footer(messages)
+    if not block:
+        return None
+    _, payload = AGENT_RESULT.extract(block)
+    return payload
 
 
 def _latest_agent_result_footer(messages) -> str | None:

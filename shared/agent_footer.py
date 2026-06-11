@@ -101,6 +101,31 @@ class AgentFooter(Generic[T]):
         body = neutralize_markers(body)
         return f"{self._prefix}{body}{self._suffix}"
 
+    def encode_data(self, payload: T) -> dict:
+        """Serialise *payload* into a self-describing A2A DataPart envelope.
+
+        Returns ``{"kind": <KIND>, "payload": <dataclass-as-dict>}`` — the
+        structured-transport counterpart to :meth:`encode`. Unlike the text
+        footer, a DataPart rides its own typed channel rather than being
+        embedded in (and parsed back out of) an untrusted text stream, so no
+        marker neutralisation is needed: there are no delimiters to spoof.
+        """
+        return {"kind": self._kind, "payload": asdict(payload)}  # type: ignore[arg-type]
+
+    def decode_data(self, payload: object) -> T | None:
+        """Reconstruct a payload from a DataPart envelope's ``payload`` dict.
+
+        The inverse of :meth:`encode_data` (caller passes the inner ``payload``
+        after matching ``kind``). Preserves the silent-drop contract: a
+        non-dict, malformed body, or parser exception yields ``None``.
+        """
+        if not isinstance(payload, dict):
+            return None
+        try:
+            return self._parse(payload)
+        except Exception:  # noqa: BLE001 — parser may raise anything; silent-drop contract
+            return None
+
     def extract(self, text: str) -> tuple[str, T | None]:
         """Strip and decode the footer if present.
 
