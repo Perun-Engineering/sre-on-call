@@ -332,6 +332,45 @@ class TestPutManifest:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# put_chart_series
+# ---------------------------------------------------------------------------
+
+
+class TestPutChartSeries:
+    def test_writes_chart_object(self, aws_resources):
+        s3, dynamodb = aws_resources
+        store = _make_store(s3, dynamodb)
+
+        store.put_chart_series(
+            investigation_id="inv-c1",
+            chart_id="abc123",
+            payload={"chart_id": "abc123", "points": [{"a": 1}]},
+        )
+
+        objs = s3.list_objects_v2(Bucket=BUCKET)
+        keys = [o["Key"] for o in objs.get("Contents", [])]
+        chart_keys = [k for k in keys if "/investigation_id=inv-c1/charts/abc123.json" in k]
+        assert chart_keys, keys
+        body = json.loads(
+            s3.get_object(Bucket=BUCKET, Key=chart_keys[0])["Body"].read()
+        )
+        assert body["points"] == [{"a": 1}]
+
+    def test_fail_open_on_s3_error(self):
+        broken_s3 = MagicMock()
+        broken_s3.put_object.side_effect = RuntimeError("network down")
+        store = TraceStore(
+            bucket=BUCKET,
+            table_name=TABLE,
+            s3_client=broken_s3,
+            dynamodb_resource=MagicMock(),
+            region_name="us-east-1",
+        )
+        # Must not raise.
+        store.put_chart_series(investigation_id="i", chart_id="c", payload={})
+
+
 class TestConstructorInjection:
     def test_constructor_accepts_explicit_clients(self, aws_resources) -> None:
         s3, dynamodb = aws_resources

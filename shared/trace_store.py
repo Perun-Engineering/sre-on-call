@@ -325,6 +325,13 @@ class TraceStore:
         """Build the canonical manifest key for *investigation_id*."""
         return f"{cls.investigation_prefix(investigation_id, dt=dt)}manifest.json"
 
+    @classmethod
+    def _charts_key(
+        cls, investigation_id: str, chart_id: str, *, dt: str | None = None
+    ) -> str:
+        """Build the S3 key for a chart series under the investigation prefix."""
+        return f"{cls.investigation_prefix(investigation_id, dt=dt)}charts/{chart_id}.json"
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -361,6 +368,36 @@ class TraceStore:
             logger.exception(
                 "TraceStore.put_event failed (investigation_id=%s, type=%s)",
                 investigation_id, event_type,
+            )
+
+    def put_chart_series(
+        self,
+        *,
+        investigation_id: str,
+        chart_id: str,
+        payload: dict,
+        dt: str | None = None,
+    ) -> None:
+        """Write a chart series JSON object under ``charts/<chart_id>.json``.
+
+        Fail-open: logs and swallows any S3 error. Used by the master in
+        Phase 7 to snapshot the data behind descriptor-carrying findings so
+        the interactive incident page (#33) can draw graphs from an immutable
+        record that outlives CloudWatch retention.
+        """
+        key = self._charts_key(investigation_id, chart_id, dt=dt)
+        try:
+            self._s3.put_object(
+                Bucket=self._bucket,
+                Key=key,
+                Body=json.dumps(payload, default=_json_default).encode("utf-8"),
+                ContentType="application/json",
+            )
+        except Exception:
+            logger.exception(
+                "TraceStore.put_chart_series failed "
+                "(investigation_id=%s, chart_id=%s)",
+                investigation_id, chart_id,
             )
 
     def put_manifest(self, manifest: TraceManifest) -> None:
