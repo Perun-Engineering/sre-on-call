@@ -40,6 +40,7 @@ def test_handler_reads_model_and_writes_page(monkeypatch):
     put = s3.put_object.call_args.kwargs
     assert put["Key"] == "pages/inv-1.html"
     assert put["ContentType"] == "text/html; charset=utf-8"
+    assert put["ServerSideEncryption"] == "AES256"
     assert b"<!DOCTYPE html>" in put["Body"]
 
 

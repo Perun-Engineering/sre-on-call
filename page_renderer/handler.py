@@ -68,6 +68,9 @@ def lambda_handler(event: dict, _context) -> None:
                 Key=f"pages/{inv_id}.html",
                 Body=html.encode("utf-8"),
                 ContentType="text/html; charset=utf-8",
+                # AES256 (SSE-S3) not the trace CMK, so CloudFront's OAC can read
+                # the rendered page without any KMS grant. See modules/sre-on-call/pages.tf.
+                ServerSideEncryption="AES256",
             )
             logger.info("page_renderer: wrote pages/%s.html", inv_id)
         except Exception:

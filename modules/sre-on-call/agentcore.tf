@@ -409,6 +409,16 @@ resource "aws_bedrockagentcore_agent_runtime" "master" {
       INCIDENT_HISTORY_ENABLED           = "true"
       EMBEDDING_MODEL_ID                 = var.embedding_model_id
     } : {},
+    # Issue #33 — interactive incident page. When provisioned, the master signs
+    # CloudFront URLs (private key in Secrets Manager) and links them in reports.
+    # All of this infra lives in pages.tf, gated by var.enable_incident_page.
+    var.enable_incident_page ? {
+      INCIDENT_PAGE_ENABLED             = "true"
+      INCIDENT_PAGE_BASE_URL            = "https://${aws_cloudfront_distribution.incident_page[0].domain_name}"
+      CLOUDFRONT_KEY_PAIR_ID            = aws_cloudfront_public_key.incident_page[0].id
+      CLOUDFRONT_PRIVATE_KEY_SECRET_ARN = aws_secretsmanager_secret.incident_page_private_key[0].arn
+      INCIDENT_PAGE_URL_TTL_SECONDS     = tostring(var.incident_page_url_ttl_seconds)
+    } : {},
   )
 
   tags = {
