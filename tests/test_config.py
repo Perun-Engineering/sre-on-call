@@ -33,6 +33,19 @@ def test_minimal_valid_config_parses():
     assert cfg.agents["eks"].network_mode == "VPC"
 
 
+def test_agent_model_id_defaults_to_none():
+    """Configs without a per-agent model_id still validate; field defaults None."""
+    cfg = ProjectConfig(**_base())
+    assert cfg.agents["master"].model_id is None
+
+
+def test_agent_model_id_accepted_when_set():
+    data = _base()
+    data["agents"]["master"]["model_id"] = "us.anthropic.claude-sonnet-4-6-20250929-v1:0"
+    cfg = ProjectConfig(**data)
+    assert cfg.agents["master"].model_id == "us.anthropic.claude-sonnet-4-6-20250929-v1:0"
+
+
 def test_unknown_agent_name_rejected():
     data = _base()
     data["agents"]["typo"] = {"skills": [], "mcps": []}

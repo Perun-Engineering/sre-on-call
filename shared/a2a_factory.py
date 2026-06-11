@@ -225,6 +225,21 @@ def _resolve_model(
     )
 
 
+def _resolve_agent_model(project_config, agent_name: str) -> BedrockModel:
+    """Build the :class:`BedrockModel` for *agent_name*.
+
+    Threads the agent's optional per-agent config ``model_id`` into
+    :func:`_resolve_model` as ``model_id_override`` so it wins over the
+    deploy-wide ``MODEL_ID`` env (master → Sonnet while scanners stay on the
+    default Haiku). Absent ``model_id`` → today's behaviour unchanged.
+    """
+    agent_cfg = project_config.agents.get(agent_name)
+    return _resolve_model(
+        default_model_id=project_config.defaults.model_id,
+        model_id_override=agent_cfg.model_id if agent_cfg else None,
+    )
+
+
 def _load_card(agent_dir: pathlib.Path) -> dict:
     """Load and return the agent_card.json from *agent_dir*."""
     card_path = agent_dir / "agent_card.json"
@@ -311,7 +326,7 @@ def agent_main(agent_dir: str | pathlib.Path) -> None:
 
         system_prompt = _compose_system_prompt(card["system_prompt"], skills_resolved)
 
-        model = _resolve_model(default_model_id=project_config.defaults.model_id)
+        model = _resolve_agent_model(project_config, agent_name)
         agent = Agent(
             model=model,
             system_prompt=system_prompt,

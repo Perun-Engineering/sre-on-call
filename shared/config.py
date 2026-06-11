@@ -40,6 +40,11 @@ class AgentConfig(pydantic.BaseModel):
     skills: list[str] = pydantic.Field(default_factory=list)
     mcps: list[MCPConfig] = pydantic.Field(default_factory=list)
     network_mode: NetworkMode | None = None
+    # Optional per-agent Bedrock model. When set, this agent resolves to it
+    # (winning over the deploy-wide ``MODEL_ID`` env); when absent, the agent
+    # falls back to ``MODEL_ID`` env / ``defaults.model_id``. Lets the master
+    # run a Sonnet-class model while scanners stay on Haiku.
+    model_id: str | None = None
 
 
 class Defaults(pydantic.BaseModel):
