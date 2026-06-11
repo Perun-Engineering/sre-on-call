@@ -7,6 +7,9 @@ defaults:
 
 agents:
   master:
+    # Orchestrator runs a Sonnet-class model (routing + synthesis judgment);
+    # scanners stay on the default Haiku. See issue #46.
+    model_id: us.anthropic.claude-sonnet-4-6-20250929-v1:0
     skills:
       - investigate_alert
       - capture_status_snapshot

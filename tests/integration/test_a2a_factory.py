@@ -12,6 +12,7 @@ from shared.a2a_factory import (
     DEFAULT_MODEL_ID,
     TelemetryCapturingA2AExecutor,
     _ping_status,
+    _resolve_agent_model,
     _resolve_model,
 )
 from shared.models import AgentResult, Finding
@@ -122,6 +123,72 @@ def test_resolve_model_guardrail_version_defaults_to_draft(monkeypatch: pytest.M
     cfg = _resolve_model().get_config()
     assert cfg["guardrail_id"] == "gr-abc123"  # type: ignore[typeddict-item]
     assert cfg["guardrail_version"] == "DRAFT"  # type: ignore[typeddict-item]
+
+
+_SONNET_ID = "us.anthropic.claude-sonnet-4-6-20250929-v1:0"
+
+
+def _project_config(*, master_model_id: str | None):
+    """Minimal valid ProjectConfig: master (optionally carrying a per-agent
+    model_id) + one scanner without one."""
+    from shared.config import ProjectConfig
+
+    return ProjectConfig(
+        **{
+            "project": "test",
+            "environment": "dev",
+            "defaults": {"model_id": DEFAULT_MODEL_ID, "network_mode": "PUBLIC"},
+            "agents": {
+                "master": {"model_id": master_model_id, "skills": [], "mcps": []},
+                "slack_scanner": {"enabled": True, "skills": [], "mcps": []},
+            },
+        }
+    )
+
+
+def test_resolve_model_override_wins_over_env(monkeypatch: pytest.MonkeyPatch):
+    """The per-call override (e.g. SYNTHESIS_MODEL_ID) beats the MODEL_ID env."""
+    monkeypatch.setenv("MODEL_ID", "us.anthropic.claude-haiku-4-5-20251001-v1:0")
+    resolved = _resolve_model(model_id_override=_SONNET_ID).get_config()
+    assert resolved["model_id"] == _SONNET_ID  # type: ignore[typeddict-item]
+
+
+def test_resolve_agent_model_uses_per_agent_config_when_env_unset(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.delenv("MODEL_ID", raising=False)
+    cfg = _project_config(master_model_id=_SONNET_ID)
+    assert _resolve_agent_model(cfg, "master").get_config()["model_id"] == _SONNET_ID  # type: ignore[typeddict-item]
+    assert (
+        _resolve_agent_model(cfg, "slack_scanner").get_config()["model_id"]  # type: ignore[typeddict-item]
+        == DEFAULT_MODEL_ID
+    )
+
+
+def test_resolve_agent_model_per_agent_config_wins_over_env(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Deploy path: MODEL_ID env set to Haiku — the master's per-agent config
+    still resolves Sonnet, while an agent without one takes the env value."""
+    env_haiku = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+    monkeypatch.setenv("MODEL_ID", env_haiku)
+    cfg = _project_config(master_model_id=_SONNET_ID)
+    assert _resolve_agent_model(cfg, "master").get_config()["model_id"] == _SONNET_ID  # type: ignore[typeddict-item]
+    assert (
+        _resolve_agent_model(cfg, "slack_scanner").get_config()["model_id"]  # type: ignore[typeddict-item]
+        == env_haiku
+    )
+
+
+def test_resolve_agent_model_unknown_agent_falls_back_to_default(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.delenv("MODEL_ID", raising=False)
+    cfg = _project_config(master_model_id=_SONNET_ID)
+    assert (
+        _resolve_agent_model(cfg, "not_in_config").get_config()["model_id"]  # type: ignore[typeddict-item]
+        == DEFAULT_MODEL_ID
+    )
 
 
 @pytest.mark.asyncio
