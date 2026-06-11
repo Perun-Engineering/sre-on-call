@@ -272,6 +272,70 @@ class TestChartModels:
         assert s.truncated is False
 
 
+class TestChartRoundTrip:
+    def test_chart_round_trips_through_agent_result_footer(self):
+        from shared.models import (
+            AgentResult,
+            ChartDescriptor,
+            ChartSeries,
+            Finding,
+        )
+        from shared.tool_result import AGENT_RESULT
+
+        desc = ChartDescriptor.create(
+            source="cloudwatch_logs_insights",
+            log_groups=["/aws/lambda/x"],
+            query="fields @message",
+            start_epoch=1,
+            end_epoch=2,
+        )
+        finding = Finding(
+            source="lg", timestamp="t", content="c", severity="info", chart=desc,
+        )
+        result = AgentResult(
+            agent_name="cloudwatch_logs",
+            status="success",
+            findings=[finding],
+            summary="s",
+            chart_series={desc.chart_id: ChartSeries(points=[{"@message": "x"}])},
+        )
+
+        _, decoded = AGENT_RESULT.extract(AGENT_RESULT.encode(result))
+
+        assert decoded is not None
+        assert decoded.findings[0].chart is not None
+        assert decoded.findings[0].chart.chart_id == desc.chart_id
+        assert decoded.chart_series[desc.chart_id].points == [{"@message": "x"}]
+
+    def test_descriptorless_finding_decodes_to_none(self):
+        from shared.models import AgentResult, Finding
+        from shared.tool_result import AGENT_RESULT
+
+        result = AgentResult(
+            agent_name="eks",
+            status="success",
+            findings=[Finding(source="s", timestamp="t", content="c", severity="info")],
+            summary="s",
+        )
+        _, decoded = AGENT_RESULT.extract(AGENT_RESULT.encode(result))
+
+        assert decoded is not None
+        assert decoded.findings[0].chart is None
+        assert decoded.chart_series == {}
+
+    def test_build_agent_result_carries_chart_series(self):
+        from shared.models import ChartSeries
+        from shared.tool_result import ToolResult, build_agent_result
+
+        res = ToolResult(
+            scanned_items=["lg"],
+            chart_series={"abc": ChartSeries(points=[{"a": 1}])},
+        )
+        agent_result = build_agent_result("cloudwatch_logs", res)
+
+        assert agent_result.chart_series == {"abc": ChartSeries(points=[{"a": 1}])}
+
+
 def test_dangling_marker_prefix_in_content_does_not_suppress_real_footer():
     """A finding content with an unclosed AGENT_RESULT prefix must not swallow
     the legitimate footer (denial / suppression of the structured result)."""
