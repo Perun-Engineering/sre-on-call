@@ -332,6 +332,13 @@ class TraceStore:
         """Build the S3 key for a chart series under the investigation prefix."""
         return f"{cls.investigation_prefix(investigation_id, dt=dt)}charts/{chart_id}.json"
 
+    @classmethod
+    def _page_model_key(
+        cls, investigation_id: str, *, dt: str | None = None
+    ) -> str:
+        """Build the S3 key for the #33 page model under the investigation prefix."""
+        return f"{cls.investigation_prefix(investigation_id, dt=dt)}page_model.json"
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -398,6 +405,34 @@ class TraceStore:
                 "TraceStore.put_chart_series failed "
                 "(investigation_id=%s, chart_id=%s)",
                 investigation_id, chart_id,
+            )
+
+    def put_page_model(
+        self,
+        *,
+        investigation_id: str,
+        payload: dict,
+        dt: str | None = None,
+    ) -> None:
+        """Write ``page_model.json`` — the render trigger + input for the #33 page.
+
+        Written by the master in Phase 7 *after* the manifest and chart series,
+        so the S3 ObjectCreated notification on this key guarantees the
+        referenced ``charts/<id>.json`` already exist. Fail-open: logs and
+        swallows any S3 error.
+        """
+        key = self._page_model_key(investigation_id, dt=dt)
+        try:
+            self._s3.put_object(
+                Bucket=self._bucket,
+                Key=key,
+                Body=json.dumps(payload, default=_json_default).encode("utf-8"),
+                ContentType="application/json",
+            )
+        except Exception:
+            logger.exception(
+                "TraceStore.put_page_model failed (investigation_id=%s)",
+                investigation_id,
             )
 
     def put_manifest(self, manifest: TraceManifest) -> None:
