@@ -41,9 +41,9 @@ def test_agent_model_id_defaults_to_none():
 
 def test_agent_model_id_accepted_when_set():
     data = _base()
-    data["agents"]["master"]["model_id"] = "us.anthropic.claude-sonnet-4-6-20250929-v1:0"
+    data["agents"]["master"]["model_id"] = "us.anthropic.claude-sonnet-4-6"
     cfg = ProjectConfig(**data)
-    assert cfg.agents["master"].model_id == "us.anthropic.claude-sonnet-4-6-20250929-v1:0"
+    assert cfg.agents["master"].model_id == "us.anthropic.claude-sonnet-4-6"
 
 
 def test_unknown_agent_name_rejected():
