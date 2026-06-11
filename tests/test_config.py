@@ -85,3 +85,66 @@ def test_load_reads_repo_config_yaml():
     cfg = load()
     assert cfg.project == "sre-on-call"
     assert "master" in cfg.agents
+
+
+_SSM_YAML = """
+project: from-ssm
+environment: dev
+defaults:
+  model_id: anthropic.claude-haiku-4-5
+  network_mode: PUBLIC
+agents:
+  master:
+    skills: [investigate_alert]
+    mcps: []
+"""
+
+
+def test_load_fetches_from_ssm_when_env_set(monkeypatch):
+    """With CONFIG_SSM_PARAMETER set, load() reads the parameter, not the file."""
+    import shared.config as config
+
+    captured: dict[str, str] = {}
+
+    def _fake_fetch(name: str) -> str:
+        captured["name"] = name
+        return _SSM_YAML
+
+    monkeypatch.setattr(config, "_fetch_ssm_parameter", _fake_fetch)
+    monkeypatch.setenv(config.CONFIG_SSM_ENV, "/sre-on-call/dev/config")
+
+    cfg = config.load()
+    assert cfg.project == "from-ssm"
+    assert captured["name"] == "/sre-on-call/dev/config"
+
+
+def test_load_falls_back_to_file_when_env_unset(monkeypatch):
+    """Without CONFIG_SSM_PARAMETER, load() reads the repo file and never calls SSM."""
+    import shared.config as config
+
+    def _boom(name: str) -> str:
+        raise AssertionError("SSM must not be consulted when the env var is unset")
+
+    monkeypatch.setattr(config, "_fetch_ssm_parameter", _boom)
+    monkeypatch.delenv(config.CONFIG_SSM_ENV, raising=False)
+
+    cfg = config.load()
+    assert cfg.project == "sre-on-call"
+
+
+def test_fetch_ssm_parameter_reads_value(monkeypatch):
+    """_fetch_ssm_parameter returns the parameter's Value via a boto3 ssm client."""
+    import shared.config as config
+
+    class _FakeClient:
+        def get_parameter(self, Name: str) -> dict:
+            assert Name == "/sre-on-call/dev/config"
+            return {"Parameter": {"Value": _SSM_YAML}}
+
+    class _FakeBoto3:
+        def client(self, service: str, **kwargs):
+            assert service == "ssm"
+            return _FakeClient()
+
+    monkeypatch.setitem(__import__("sys").modules, "boto3", _FakeBoto3())
+    assert "from-ssm" in config._fetch_ssm_parameter("/sre-on-call/dev/config")

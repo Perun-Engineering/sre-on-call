@@ -179,12 +179,20 @@ operational meaning:
   in `config.yaml`. An agent listed there is built, pushed to ECR, and has
   its terraform resources created. An agent absent from the block is
   treated as not-deployed (no ECR repo, no runtime, no IAM role).
-- **Toggle an agent active without re-running terraform** — set
-  `enabled: false` on the agent's entry in `config.yaml`. The runtime is
-  still built and deployed; the orchestrator skips it on fan-out and
-  surfaces a 🚫 disabled evidence block in the Incident Report. Flip the
-  flag back to `true` and re-run terraform to re-activate without a
-  rebuild.
+- **Toggle an agent active** — set `enabled: false` on the agent's entry
+  in `config.yaml`. The runtime is still built and deployed; the
+  orchestrator skips it on fan-out and surfaces a 🚫 disabled evidence
+  block in the Incident Report. Flip the flag back to `true` to
+  re-activate. Either way, run `terraform apply` (no image rebuild) — see
+  below.
+
+At runtime the agents do **not** read a baked-in `config.yaml`; they fetch
+it from SSM Parameter Store (`/<project>/<environment>/config`, set via the
+`CONFIG_SSM_PARAMETER` env var). `terraform apply` re-publishes the current
+`config.yaml` to that parameter, so an `enabled`/skills/MCP edit takes
+effect on the next runtime cold-start without rebuilding or pushing images.
+Local dev and tests are unchanged — with `CONFIG_SSM_PARAMETER` unset,
+`shared.config` reads the repo's `config.yaml` directly.
 
 Examples:
 

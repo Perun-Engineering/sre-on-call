@@ -1,6 +1,10 @@
 """Pydantic schema for config.yaml — the project's single source of truth.
 
-Loaded once at agent startup (cached). Validates:
+Loaded once at agent startup (cached). The raw YAML comes from SSM Parameter
+Store when ``CONFIG_SSM_PARAMETER`` is set (AWS runtimes — Terraform publishes
+config.yaml's content there, so toggling an agent's ``enabled`` takes effect on
+the next cold-start with no image rebuild) and from the working-tree
+``config.yaml`` otherwise (local dev and tests, unchanged). Validates:
 - Only known agents are listed (delegated to :func:`shared.agents.catalogue_ids`).
 - Master agent is always enabled.
 - EKS agent must use VPC network mode (its cluster API is private).
@@ -8,6 +12,7 @@ Loaded once at agent startup (cached). Validates:
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Literal
@@ -17,6 +22,10 @@ import yaml
 
 NetworkMode = Literal["PUBLIC", "VPC"]
 Transport = Literal["streamable_http", "sse", "stdio"]
+
+# Env var naming the SSM parameter that holds config.yaml's content. Set by
+# Terraform on every AgentCore runtime; unset for local dev and tests.
+CONFIG_SSM_ENV = "CONFIG_SSM_PARAMETER"
 
 
 class MCPConfig(pydantic.BaseModel):
@@ -75,13 +84,18 @@ _CACHED: ProjectConfig | None = None
 
 
 def load(path: str | Path | None = None) -> ProjectConfig:
-    """Load and validate config.yaml. Cached after first call."""
+    """Load and validate config.yaml. Cached after first call.
+
+    With an explicit ``path``, reads that file directly. Otherwise the raw YAML
+    is resolved by :func:`_load_raw_yaml` (SSM in AWS, repo file locally).
+    """
     global _CACHED
     if _CACHED is None:
-        target = Path(path) if path is not None else _find_config_yaml()
-        with open(target) as fh:
-            data = yaml.safe_load(fh)
-        _CACHED = ProjectConfig(**data)
+        if path is not None:
+            raw = Path(path).read_text()
+        else:
+            raw = _load_raw_yaml()
+        _CACHED = ProjectConfig(**yaml.safe_load(raw))
     return _CACHED
 
 
@@ -96,6 +110,31 @@ def reset_cache() -> None:
     _CACHED = None
     from shared import agents as _agents_module
     _agents_module.reset_cache()
+
+
+def _load_raw_yaml() -> str:
+    """Return the raw config YAML text from SSM (AWS) or the repo file (local).
+
+    SSM wins when ``CONFIG_SSM_PARAMETER`` is set so a config change applied by
+    Terraform is picked up on the next cold-start without rebuilding images.
+    Fails closed (no baked fallback) when SSM is configured but unreachable —
+    an agent cannot run without its config.
+    """
+    parameter = os.environ.get(CONFIG_SSM_ENV)
+    if parameter:
+        return _fetch_ssm_parameter(parameter)
+    return _find_config_yaml().read_text()
+
+
+def _fetch_ssm_parameter(name: str) -> str:
+    """Fetch an SSM parameter's value. boto3 is imported lazily so local dev and
+    tests that never touch SSM don't pay the client-construction cost."""
+    import boto3
+
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    client = boto3.client("ssm", region_name=region) if region else boto3.client("ssm")
+    response = client.get_parameter(Name=name)
+    return response["Parameter"]["Value"]
 
 
 def _find_config_yaml() -> Path:
