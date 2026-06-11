@@ -125,7 +125,7 @@ def test_resolve_model_guardrail_version_defaults_to_draft(monkeypatch: pytest.M
     assert cfg["guardrail_version"] == "DRAFT"  # type: ignore[typeddict-item]
 
 
-_SONNET_ID = "us.anthropic.claude-sonnet-4-6-20250929-v1:0"
+_SONNET_ID = "us.anthropic.claude-sonnet-4-6"
 
 
 def _project_config(*, master_model_id: str | None):
