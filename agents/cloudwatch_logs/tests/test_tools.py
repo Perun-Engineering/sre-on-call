@@ -943,7 +943,9 @@ class TestChartEmission:
 
         charted = [f for f in result.findings if f.chart is not None]
         assert charted, "row findings should carry a chart descriptor"
-        chart_id = charted[0].chart.chart_id
+        chart = charted[0].chart
+        assert chart is not None
+        chart_id = chart.chart_id
         assert chart_id in result.chart_series
         assert result.chart_series[chart_id].points[0]["@message"] == "boom"
 

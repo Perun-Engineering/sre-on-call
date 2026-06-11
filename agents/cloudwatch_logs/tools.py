@@ -111,7 +111,7 @@ def _chart_snapshots_enabled() -> bool:
 
 
 def _series_kind(query: str) -> str:
-    """Best-effort: a ``stats … by bin(…)`` query yields a binned series."""
+    """Best-effort: a query containing both ``stats`` and ``bin(`` yields a binned series."""
     lowered = query.lower()
     return "binned" if "stats" in lowered and "bin(" in lowered else "log_rows"
 
