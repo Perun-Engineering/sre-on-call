@@ -8,6 +8,16 @@ When a webhook arrives, the master agent's only job is to call its `investigate_
 
 The set of downstream agents is configured at deploy time via the `ENABLED_AGENTS` environment variable, so the master never assumes which specialized agents will run.
 
+### Analysis synthesis
+
+After harvesting agent results and before building the deterministic report, the master makes one LLM call (`agents/master/synthesis.py`) that reasons over the alert plus every agent's findings, summaries, and failures to produce a structured root-cause **Analysis** — hypothesis, cross-source correlation, confidence, and suggested next action — rendered above the verbatim Evidence blocks. Late results re-synthesize over everything gathered so far and carry an updated Analysis in their enrichment post.
+
+It is **fail-open**: any error or timeout posts the report exactly as it would without synthesis. Controlled by env vars:
+
+- `SYNTHESIS_ENABLED` — `true` to enable (Terraform `enable_analysis_synthesis`, default on).
+- `SYNTHESIS_MODEL_ID` — model for the synthesis call; falls back to `MODEL_ID`. Point at a Sonnet-class model for stronger reasoning while dispatch stays cheap.
+- `SYNTHESIS_TIMEOUT_SECONDS` — time budget (default 10s), reserved out of the 60s initial-report deadline.
+
 ## Skills
 
 | Name | Description |

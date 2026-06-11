@@ -155,10 +155,15 @@ def _latest_agent_result_footer(messages) -> str | None:
     return None
 
 
-def _resolve_model(default_model_id: str | None = None) -> BedrockModel:
+def _resolve_model(
+    default_model_id: str | None = None, model_id_override: str | None = None
+) -> BedrockModel:
     """Build a BedrockModel.
 
     Resolution order for the model ID:
+    0. ``model_id_override`` arg — a caller-specific model that wins over the
+       deploy-time ``MODEL_ID`` (e.g. the master's synthesis call selecting a
+       Sonnet-class model via ``SYNTHESIS_MODEL_ID`` while dispatch stays cheap).
     1. ``MODEL_ID`` env var (deploy-time override).
     2. ``default_model_id`` arg (typically ``ProjectConfig.defaults.model_id``).
     3. ``DEFAULT_MODEL_ID`` module constant (last-resort fallback).
@@ -168,7 +173,12 @@ def _resolve_model(default_model_id: str | None = None) -> BedrockModel:
     every invocation). ``BEDROCK_GUARDRAIL_VERSION`` selects the version,
     defaulting to ``DRAFT``. Unset → no guardrail (unchanged behaviour).
     """
-    model_id = os.environ.get("MODEL_ID") or default_model_id or DEFAULT_MODEL_ID
+    model_id = (
+        model_id_override
+        or os.environ.get("MODEL_ID")
+        or default_model_id
+        or DEFAULT_MODEL_ID
+    )
 
     guardrail_id = os.environ.get("BEDROCK_GUARDRAIL_ID") or None
     if guardrail_id is None:

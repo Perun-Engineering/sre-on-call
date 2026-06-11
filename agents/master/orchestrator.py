@@ -46,8 +46,26 @@ from shared.trace_store import (
     TraceStore,
 )
 from agents.master.report_formatter import ReportFormatter
+from agents.master.synthesis import AnalysisSynthesizer, IncidentAnalysis
+from shared.report_renderer import AnalysisSection
 
 logger = logging.getLogger(__name__)
+
+
+def _to_analysis_section(analysis: IncidentAnalysis | None) -> AnalysisSection | None:
+    """Map the synthesizer's structured output onto the renderer's section.
+
+    Keeps the pydantic ``IncidentAnalysis`` (the structured-output vehicle)
+    out of the platform-agnostic rendering layer.
+    """
+    if analysis is None:
+        return None
+    return AnalysisSection(
+        root_cause_hypothesis=analysis.root_cause_hypothesis,
+        correlation=analysis.correlation,
+        confidence=analysis.confidence,
+        suggested_next_action=analysis.suggested_next_action,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -157,10 +175,18 @@ class InvestigationOrchestrator:
         registry: AgentRegistry | None = None,
         results_store: ExperimentResultsStore | None = None,
         trace_store: TraceStore | None = None,
+        synthesizer: AnalysisSynthesizer | None = None,
     ) -> None:
         self._chat_platform: ChatPlatform | None = chat_platform
         self._registry: AgentRegistry = registry or get_registry()
         self.report_formatter = report_formatter or ReportFormatter(self._registry)
+
+        # LLM synthesis is opt-in via env (SYNTHESIS_ENABLED); from_env()
+        # returns None when disabled, so the report stays the deterministic
+        # concatenation it has always been. Tests inject a fake or None.
+        self._synthesizer = (
+            synthesizer if synthesizer is not None else AnalysisSynthesizer.from_env()
+        )
 
         self.disabled_agents: set[str] = {
             a.id for a in self._registry.disabled_in_config(kind="specialized")
@@ -224,8 +250,15 @@ class InvestigationOrchestrator:
         )
 
         # --- Phase 2: wait up to INITIAL_DEADLINE_SECONDS --------------------
+        # When synthesis is active, reserve its time budget out of the initial
+        # window so the LLM call still lands the report inside the 60s deadline.
+        synthesis_budget = (
+            self._synthesizer.timeout_seconds if self._synthesizer is not None else 0.0
+        )
         elapsed = asyncio.get_event_loop().time() - start_time
-        initial_timeout = max(0, self.INITIAL_DEADLINE_SECONDS - elapsed)
+        initial_timeout = max(
+            0, self.INITIAL_DEADLINE_SECONDS - elapsed - synthesis_budget
+        )
         settled, pending = await self._fanout.harvest(pending, initial_timeout)
         self._merge(settled, results)
 
@@ -234,11 +267,14 @@ class InvestigationOrchestrator:
         # their late results trigger an enrichment update in Phase 4.
         pending_ids = set(pending)
 
+        analysis = await self._synthesize_analysis(alert_context, results)
+
         report_sections = self.report_formatter.build_incident_sections(
             alert_context,
             results,
             pending_agents=pending_ids,
             disabled_agents=self.disabled_agents,
+            analysis=analysis,
         )
 
         try:
@@ -265,13 +301,17 @@ class InvestigationOrchestrator:
 
             for agent_id, result in late_results.items():
                 # Late results post regardless of status — a failure that
-                # crossed the 60s mark is still surfaced.
+                # crossed the 60s mark is still surfaced. Re-synthesize over
+                # everything gathered so far so the enrichment carries an
+                # updated analysis (fail-open: None → no Analysis block).
+                analysis = await self._synthesize_analysis(alert_context, results)
                 try:
                     enrichment_sections = self.report_formatter.build_enrichment_sections(
                         source_agent=agent_id,
                         new_findings=result,
                         initial_report_summary=initial_report_summary,
                         variant_label=alert_context.variant_label,
+                        analysis=analysis,
                     )
                     await deliver_with_retry(
                         platform, target, enrichment_sections,
@@ -339,6 +379,21 @@ class InvestigationOrchestrator:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    async def _synthesize_analysis(
+        self,
+        alert_context: AlertContext,
+        results: dict[str, AgentResult | AgentFailure],
+    ) -> AnalysisSection | None:
+        """Run the LLM synthesis over the results so far, or ``None``.
+
+        Returns ``None`` when synthesis is disabled or the call fails — the
+        synthesizer is itself fail-open, so this never raises.
+        """
+        if self._synthesizer is None:
+            return None
+        analysis = await self._synthesizer.synthesize(alert_context, results)
+        return _to_analysis_section(analysis)
 
     async def _post_started_notice(
         self,

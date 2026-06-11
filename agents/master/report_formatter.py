@@ -18,6 +18,7 @@ from datetime import datetime
 from shared.agents import AgentRegistry, get_registry
 from shared.models import AgentMetadata, AgentResult, AgentFailure, AlertContext
 from shared.report_renderer import (
+    AnalysisSection,
     EnrichmentSections,
     EvidenceBlock,
     EvidenceLine,
@@ -146,6 +147,7 @@ class ReportFormatter:
         agent_results: dict[str, AgentResult | AgentFailure],
         pending_agents: set[str] | None = None,
         disabled_agents: set[str] | None = None,
+        analysis: AnalysisSection | None = None,
     ) -> ReportSections:
         """Build the structured Incident Report sections.
 
@@ -170,6 +172,7 @@ class ReportFormatter:
             disabled_agents or set(),
         )
         sections.variant_label = alert_context.variant_label
+        sections.analysis = analysis
         return sections
 
     def build_started_sections(
@@ -196,6 +199,7 @@ class ReportFormatter:
         new_findings: AgentResult | AgentFailure,
         initial_report_summary: str,
         variant_label: str | None = None,
+        analysis: AnalysisSection | None = None,
     ) -> EnrichmentSections:
         """Build sections for a late-arriving result (success or failure)."""
         emoji, display_name = self._display(source_agent)
@@ -229,6 +233,7 @@ class ReportFormatter:
             variant_label=variant_label,
             metadata_line=_format_metadata_line(new_findings.metadata),
             status=status,
+            analysis=analysis,
         )
 
     def build_pir_sections(
