@@ -29,5 +29,5 @@ dev = [
 include = ["agents*", "shared*", "lambda_adapter*"]
 
 [tool.pytest.ini_options]
-testpaths = ["agents", "tests"]
+testpaths = ["agents", "tests", "page_renderer"]
 asyncio_mode = "auto"
