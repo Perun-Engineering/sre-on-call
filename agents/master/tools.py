@@ -40,7 +40,8 @@ from shared import busy_state
 from shared.models import AlertContext
 from shared.platforms import DeliveryTarget, deliver_with_retry, for_platform
 from shared.report_renderer import FailureNoticeSections
-from shared.trace_store import TraceStore
+from shared.time_utils import now_iso
+from shared.trace_store import InvestigationRef, TraceStore
 
 logger = logging.getLogger(__name__)
 
@@ -254,13 +255,43 @@ def _post_pir_notice(
         )
 
 
+def _finalize_incident_page(
+    *, store: TraceStore, ref: InvestigationRef, command_text: str
+) -> None:
+    """Close out the interactive incident page in place (#55).
+
+    Reads the page model archived in the original investigation's Phase 7,
+    flips its status to ``resolved`` and appends the resolution chapter, then
+    rewrites it at the same stable key — the renderer regenerates the page at
+    the same URL. A no-op when no page was archived (interactive pages are
+    opt-in). Fail-open in its own block so a page error never affects the PIR
+    that already posted to the thread.
+    """
+    try:
+        page = store.get_page_model(ref.investigation_id, dt=ref.dt)
+        if page is None:
+            return
+        resolved = ReportFormatter().resolve_page_model(
+            page, resolved_at=now_iso(), narrative=command_text,
+        )
+        store.put_page_model(
+            investigation_id=ref.investigation_id, payload=resolved, dt=ref.dt,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to finalize incident page for investigation %s",
+            ref.investigation_id,
+        )
+
+
 async def _run_postmortem(
-    *, platform: str, channel_id: str, thread_ts: str
+    *, platform: str, channel_id: str, thread_ts: str, command_text: str = ""
 ) -> None:
     """Recover the investigation, build the PIR, and post it to the thread.
 
     Fail-open at every recovery miss — the thread gets one short notice,
-    never silence.
+    never silence. After the PIR posts, finalizes the interactive incident
+    page in place (#55) in a separate fail-open step.
     """
     try:
         store = TraceStore.from_env()
@@ -299,6 +330,10 @@ async def _run_postmortem(
             platform=platform, channel_id=channel_id, thread_anchor=thread_ts,
         )
         await deliver_with_retry(chat, target, sections)
+
+        # #55 — finalize the interactive incident page in place (own fail-open
+        # block; never affects the PIR that just posted).
+        _finalize_incident_page(store=store, ref=ref, command_text=command_text)
     except Exception:
         logger.exception(
             "Postmortem assembly failed for thread %s/%s",
@@ -341,10 +376,12 @@ async def finalize_postmortem(pir_request_json: str) -> str:
     platform = str(payload.get("platform", ""))
     channel_id = str(payload.get("channel_id", ""))
     thread_ts = str(payload.get("thread_ts", ""))
+    command_text = str(payload.get("command_text", ""))
 
     bg_task = asyncio.create_task(
         _run_postmortem(
             platform=platform, channel_id=channel_id, thread_ts=thread_ts,
+            command_text=command_text,
         ),
         name=f"pir-{channel_id}-{thread_ts}",
     )

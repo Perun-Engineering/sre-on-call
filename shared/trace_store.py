@@ -458,6 +458,29 @@ class TraceStore:
                 investigation_id,
             )
 
+    def get_page_model(
+        self, investigation_id: str, *, dt: str | None = None
+    ) -> dict | None:
+        """Read ``page_model.json`` written by :meth:`put_page_model`.
+
+        Used by the PIR flow (#55) to finalize an existing incident page in
+        place — flip its status to ``resolved`` and append the resolution
+        chapter — rather than rebuilding it from scratch (which would lose the
+        synthesized Analysis block). Returns ``None`` on any miss/error
+        (fail-open): no archived page means there is simply nothing to
+        finalize.
+        """
+        key = self._page_model_key(investigation_id, dt=dt)
+        try:
+            obj = self._s3.get_object(Bucket=self._bucket, Key=key)
+            return json.loads(obj["Body"].read())
+        except Exception:
+            logger.exception(
+                "TraceStore.get_page_model failed (investigation_id=%s)",
+                investigation_id,
+            )
+            return None
+
     def put_results(
         self,
         *,

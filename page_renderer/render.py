@@ -57,7 +57,16 @@ def _analysis_html(analysis: dict | None) -> str:
     )
 
 
-_TIMELINE_KIND_EMOJI = {"alert": "🚨", "finding": "🔎", "action": "✅"}
+_TIMELINE_KIND_EMOJI = {
+    "alert": "🚨", "finding": "🔎", "action": "✅", "resolution": "🏁",
+}
+
+
+def _status_html(status: str) -> str:
+    """Render the page status, highlighting ``resolved`` in green (#55)."""
+    if status == "resolved":
+        return f'<span class="status-resolved">{_esc(status)}</span>'
+    return _esc(status)
 
 
 def _timeline_html(timeline: list[dict] | None) -> str:
@@ -167,8 +176,9 @@ def render_page(page_model: dict, charts: dict[str, dict], echarts_js: str) -> s
       var tlEl = document.getElementById('incident-timeline');
       var events = model.timeline || [];
       if (window.echarts && tlEl && tlEl.clientWidth && events.length) {
-        var LANES = ['finding', 'action', 'alert'];
-        var COLOR = { alert: '#d73a4a', finding: '#fb8c00', action: '#1976d2' };
+        var LANES = ['finding', 'action', 'resolution', 'alert'];
+        var COLOR = { alert: '#d73a4a', finding: '#fb8c00', action: '#1976d2',
+                      resolution: '#2da44e' };
         var allTimed = events.every(function (e) { return parseTs(e.timestamp) != null; });
         var points = events.map(function (e, i) {
           var lane = LANES.indexOf(e.kind); if (lane < 0) { lane = 0; }
@@ -213,6 +223,8 @@ def render_page(page_model: dict, charts: dict[str, dict], echarts_js: str) -> s
         ".timeline-list .tl-alert{border-left-color:#d73a4a}"
         ".timeline-list .tl-finding{border-left-color:#fb8c00}"
         ".timeline-list .tl-action{border-left-color:#1976d2}"
+        ".timeline-list .tl-resolution{border-left-color:#2da44e}"
+        ".status-resolved{color:#2da44e;font-weight:600}"
         ".timeline-list .tl-time{color:#666;font-variant-numeric:tabular-nums;"
         "font-size:.85em;margin-right:.4rem}"
         "section{border-top:1px solid #eee;padding-top:1rem;margin-top:1rem}"
@@ -222,7 +234,7 @@ def render_page(page_model: dict, charts: dict[str, dict], echarts_js: str) -> s
         f"<p><strong>Severity:</strong> {_esc(page_model.get('severity',''))} · "
         f"<strong>Services:</strong> {_esc(page_model.get('affected_services',''))} · "
         f"<strong>Detected:</strong> {_esc(page_model.get('time_of_detection',''))} · "
-        f"<strong>Status:</strong> {_esc(page_model.get('status',''))}</p>"
+        f"<strong>Status:</strong> {_status_html(page_model.get('status',''))}</p>"
         f"<section><h2>Alert</h2><p>{_esc(page_model.get('alert_text',''))}</p></section>"
         f"<section><h2>Summary</h2><p>{_esc(page_model.get('summary',''))}</p></section>"
         f"<section><h2>Root Cause Hypothesis</h2><p>{_esc(page_model.get('root_cause',''))}</p></section>"

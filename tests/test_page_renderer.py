@@ -106,3 +106,30 @@ def test_render_without_timeline():
     html = render_page(m, {}, ECHARTS)
     assert "🕑 Timeline" not in html
     assert 'id="incident-timeline"' not in html
+
+
+# --- PIR resolution (#55) -------------------------------------------------
+
+def test_render_resolution_event():
+    m = _model()
+    m["status"] = "resolved"
+    m["timeline"] = _timeline() + [
+        {"timestamp": "2025-01-15T15:00:00Z", "source": "postmortem",
+         "kind": "resolution", "label": "db failover completed",
+         "severity": None, "chart_id": None},
+    ]
+    html = render_page(m, {"abc123": {"points": []}}, ECHARTS)
+    # resolution event renders on its own lane with its emoji + text
+    assert 'class="tl-event tl-resolution"' in html
+    assert "db failover completed" in html
+    assert "🏁" in html
+    # the resolution lane is wired into the scrubber strip
+    assert "resolution" in html
+
+
+def test_render_resolved_status_badge():
+    m = _model()
+    m["status"] = "resolved"
+    html = render_page(m, {}, ECHARTS)
+    assert "Status:" in html
+    assert "resolved" in html

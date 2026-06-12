@@ -372,6 +372,46 @@ class ReportFormatter:
             ],
         )
 
+    def resolve_page_model(
+        self,
+        page: dict,
+        *,
+        resolved_at: str,
+        narrative: str | None = None,
+    ) -> dict:
+        """Finalize an archived page model into its ``resolved`` form (#55).
+
+        Returns a new dict — the input is never mutated. The status flips to
+        ``"resolved"`` and a single ``resolution``-kind event is appended to the
+        timeline, carrying ``resolved_at`` and the operator's ``/postmortem``
+        narrative (the leading slash-command word is stripped; a bare or empty
+        command falls back to "Incident resolved"). Everything else — the
+        synthesized Analysis block, evidence, and chart references — is
+        preserved verbatim, which is why the PIR path finalizes the existing
+        page rather than rebuilding it. ``generated_at`` is refreshed to the
+        resolution time so the page footer reflects when it was closed out.
+        """
+        label = (narrative or "").strip()
+        if label.startswith("/"):
+            parts = label.split(None, 1)
+            label = parts[1].strip() if len(parts) > 1 else ""
+        resolution_event = {
+            "timestamp": resolved_at,
+            "source": "postmortem",
+            "kind": "resolution",
+            "label": label or "Incident resolved",
+            "severity": None,
+            "chart_id": None,
+        }
+        timeline = list(page.get("timeline") or [])
+        timeline.append(resolution_event)
+        return {
+            **page,
+            "status": "resolved",
+            "generated_at": resolved_at,
+            "timeline": timeline,
+        }
+
     def build_timeline(
         self,
         alert_context: AlertContext,
