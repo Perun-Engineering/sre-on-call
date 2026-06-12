@@ -1681,3 +1681,38 @@ class TestOrchestratorPageModel:
         _, kwargs = trace_store.put_page_model.call_args
         assert kwargs["investigation_id"]
         assert "chart_ids" in kwargs["payload"]
+
+
+# ---------------------------------------------------------------------------
+# Tests: Phase 7 — persist results map for PIR recovery (#56)
+# ---------------------------------------------------------------------------
+
+
+class TestPersistResults:
+    """Orchestrator calls put_results in Phase 7 so the PIR flow can rebuild
+    the report. Reuses the MagicMock trace-store pattern from TestSnapshotCharts
+    and TestOrchestratorPageModel."""
+
+    @pytest.mark.asyncio
+    async def test_put_results_called_with_correct_args(self, alert_context):
+        from unittest.mock import MagicMock
+
+        trace_store = MagicMock()
+        orch = _make_orchestrator(trace_store=trace_store)
+
+        await orch.investigate(alert_context)
+
+        trace_store.put_results.assert_called_once()
+        kwargs = trace_store.put_results.call_args.kwargs
+        assert kwargs["investigation_id"] == alert_context.investigation_id
+        # At least one stubbed agent result should appear in the map.
+        assert len(kwargs["results"]) > 0
+        # dt must be a Hive-style partition string.
+        assert kwargs["dt"].startswith("dt=")
+
+    @pytest.mark.asyncio
+    async def test_put_results_noop_without_trace_store(self, alert_context):
+        """No trace store configured → put_results is never called (no crash)."""
+        orch = _make_orchestrator(trace_store=None)
+        # Must not raise; the method is fail-open.
+        await orch.investigate(alert_context)
