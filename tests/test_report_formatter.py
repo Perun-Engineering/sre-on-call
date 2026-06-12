@@ -284,7 +284,10 @@ class TestFormatIncidentReport:
         report = _render_report(
             formatter, alert_context, results, renderer=DiscordReportRenderer(),
         )
-        assert f"- OOMKilled [🔗 view]({url})" in report
+        # The CloudWatch URL carries literal `)`; Discord's masked-link parser
+        # would truncate `[label](url)` at the first `)`. The `<...>` wrapper
+        # bounds the URL so the full deep link survives (#40).
+        assert f"- OOMKilled [🔗 view](<{url}>)" in report
 
     def test_finding_without_link_renders_no_link_markup(self, formatter, alert_context):
         results = {

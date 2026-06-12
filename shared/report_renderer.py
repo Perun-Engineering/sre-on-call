@@ -321,6 +321,15 @@ class DiscordDialect(MarkupDialect):
         super().__init__(bold_open="**", bold_close="**", separator="───────────────────")
 
     def format_link(self, url: str, label: str) -> str:
+        # Discord's masked-link parser stops the URL at the first literal `)`,
+        # which truncates CloudWatch Logs Insights console deep links (their
+        # `#logsV2:...~(...)` hash fragment carries un-encodable `(`/`)` —
+        # AWS parses location.hash client-side). Wrapping the URL in `<...>`
+        # bounds it explicitly so `)` no longer terminates it (and suppresses
+        # the embed unfurl). Only do so when needed, to keep plain links
+        # embed-capable. Refs #40.
+        if "(" in url or ")" in url:
+            return f"[{label}](<{url}>)"
         return f"[{label}]({url})"
 
     def escape_untrusted(self, text: str) -> str:
