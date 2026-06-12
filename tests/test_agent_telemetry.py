@@ -66,3 +66,27 @@ class TestMetadataFooterRoundTrip:
         _clean, meta = AGENT_METADATA.extract(text)
         assert meta is not None
         assert meta.model_id == "x"
+
+
+class TestSummarizerMetadata:
+    """Issue #49 — the Haiku summarizer's own token cost rides the footer."""
+
+    def test_round_trip_summarizer_fields(self):
+        original = AgentMetadata(
+            summarizer_input_tokens=120,
+            summarizer_output_tokens=30,
+            summarizer_cost_usd=0.00027,
+        )
+        block = AGENT_METADATA.encode(original)
+        _, decoded = AGENT_METADATA.extract(block)
+        assert decoded.summarizer_input_tokens == 120
+        assert decoded.summarizer_output_tokens == 30
+        assert decoded.summarizer_cost_usd == 0.00027
+
+    def test_old_footer_without_summarizer_fields_decodes_to_none(self):
+        from shared.agent_telemetry import _metadata_from_dict
+
+        md = _metadata_from_dict({"model_id": "x", "input_tokens": 5})
+        assert md.summarizer_input_tokens is None
+        assert md.summarizer_output_tokens is None
+        assert md.summarizer_cost_usd is None

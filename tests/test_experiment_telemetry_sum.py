@@ -56,3 +56,37 @@ def test_includes_failures_with_metadata():
     cost, tokens = _sum_agent_telemetry(results)
     assert cost == 0.015
     assert tokens == 1500
+
+
+def test_folds_in_summarizer_cost_and_tokens():
+    """Issue #49 — the summarizer's own cost/tokens reach the #26 scorecard total."""
+    result = AgentResult(
+        agent_name="cloudwatch",
+        status="success",
+        findings=[],
+        summary="",
+        metadata=AgentMetadata(
+            cost_usd=0.02,
+            total_tokens=2500,
+            summarizer_cost_usd=0.005,
+            summarizer_input_tokens=800,
+            summarizer_output_tokens=200,
+        ),
+    )
+    cost, tokens = _sum_agent_telemetry({"cloudwatch": result})
+    assert cost == 0.025                 # planner 0.02 + summarizer 0.005
+    assert tokens == 2500 + 800 + 200    # planner total + summarizer in/out
+
+
+def test_summarizer_only_cost_still_counts():
+    """An agent that reported only summarizer cost still contributes to the total."""
+    result = AgentResult(
+        agent_name="eks",
+        status="success",
+        findings=[],
+        summary="",
+        metadata=AgentMetadata(summarizer_cost_usd=0.003, summarizer_input_tokens=300),
+    )
+    cost, tokens = _sum_agent_telemetry({"eks": result})
+    assert cost == 0.003
+    assert tokens == 300

@@ -182,11 +182,23 @@ def _sum_agent_telemetry(
     cost_seen = tokens_seen = False
     for r in results.values():
         meta = r.metadata
+        # Planner (Strands loop) cost/tokens plus the issue-#49 Haiku summarizer
+        # cost/tokens — both belong in the #26 scorecard so the keep/revert call
+        # weighs the digest tier's savings against its own model cost.
         if meta.cost_usd is not None:
             total_cost += meta.cost_usd
             cost_seen = True
+        if meta.summarizer_cost_usd is not None:
+            total_cost += meta.summarizer_cost_usd
+            cost_seen = True
         if meta.total_tokens is not None:
             total_tokens += meta.total_tokens
+            tokens_seen = True
+        if meta.summarizer_input_tokens is not None:
+            total_tokens += meta.summarizer_input_tokens
+            tokens_seen = True
+        if meta.summarizer_output_tokens is not None:
+            total_tokens += meta.summarizer_output_tokens
             tokens_seen = True
     return (total_cost if cost_seen else None, total_tokens if tokens_seen else None)
 

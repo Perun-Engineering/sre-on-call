@@ -994,3 +994,127 @@ class TestChartEmission:
 
         chart_id = next(iter(result.chart_series))
         assert result.chart_series[chart_id].series_kind == "binned"
+
+
+# ---------------------------------------------------------------------------
+# _execute_query — Haiku map-reduce digest tier (issue #49)
+# ---------------------------------------------------------------------------
+
+from shared.log_summarizer import Digest, SummarizeChunk  # noqa: E402
+
+
+class _FakeSummarizer:
+    """Records the chunks it was handed; digests every key except ``fail_keys``."""
+
+    def __init__(self, fail_keys=()):
+        self.fail_keys = set(fail_keys)
+        self.seen: list[SummarizeChunk] = []
+
+    def summarize(self, chunks: list[SummarizeChunk]) -> list[Digest]:
+        self.seen.extend(chunks)
+        return [
+            Digest(c.key, None if c.key in self.fail_keys else f"DIGEST::{c.key}")
+            for c in chunks
+        ]
+
+
+class TestExecuteQuerySummarizer:
+    """The summarizer collapses bulk rows into digests, keeping exemplars."""
+
+    GROUPS = ["/aws/lambda/x"]
+    QUERY = "fields @timestamp, @message | filter @message like /ERROR/"
+
+    def _client_with_rows(self, rows, status="Complete"):
+        client = MagicMock()
+        client.meta.region_name = "us-east-1"
+        client.describe_log_groups.return_value = _make_describe_response(self.GROUPS)
+        client.start_query.return_value = {"queryId": "qid"}
+        client.get_query_results.return_value = {"status": status, "results": rows}
+        return client
+
+    def _bulk_rows(self, n: int):
+        rows = [
+            {"@timestamp": f"2025-01-15T14:{i % 60:02d}:00", "@message": f"ERROR line {i}"}
+            for i in range(n)
+        ]
+        rows[0]["@message"] = "CRITICAL: disk full on node-7"  # a stand-out exemplar
+        return _make_query_results(rows)
+
+    def test_above_threshold_replaces_raw_with_digests(self):
+        client = self._client_with_rows(self._bulk_rows(60))
+        summarizer = _FakeSummarizer()
+
+        result = _execute_query(
+            client, self.GROUPS, self.QUERY, 1000, 2000, summarizer=summarizer,
+        )
+
+        digests = [f for f in result.findings if f.metadata.get("kind") == "log_digest"]
+        assert digests, "expected at least one digest finding"
+        # 60 rows / chunk-size 50 → 2 chunks → 2 digests, far fewer than 60 raw lines.
+        assert len(result.findings) < 60
+        assert summarizer.seen, "summarizer should have been invoked"
+
+    def test_digest_findings_carry_link_and_chart(self, monkeypatch):
+        monkeypatch.setenv("CHART_SNAPSHOTS_ENABLED", "true")
+        client = self._client_with_rows(self._bulk_rows(60))
+
+        result = _execute_query(
+            client, self.GROUPS, self.QUERY, 1000, 2000, summarizer=_FakeSummarizer(),
+        )
+
+        digests = [f for f in result.findings if f.metadata.get("kind") == "log_digest"]
+        assert all(d.link for d in digests)        # deep link preserved on digests
+        assert all(d.chart is not None for d in digests)
+        # The chart series keeps every raw point regardless of digesting.
+        chart_id = next(iter(result.chart_series))
+        assert len(result.chart_series[chart_id].points) == 60
+
+    def test_exemplars_retain_top_severity_raw_lines(self):
+        client = self._client_with_rows(self._bulk_rows(60))
+
+        result = _execute_query(
+            client, self.GROUPS, self.QUERY, 1000, 2000, summarizer=_FakeSummarizer(),
+        )
+
+        raw = [f for f in result.findings if f.metadata.get("kind") != "log_digest"]
+        assert any("disk full" in f.content for f in raw), "top-severity exemplar dropped"
+
+    def test_failed_chunk_falls_back_to_raw(self):
+        client = self._client_with_rows(self._bulk_rows(60))
+        # 60 rows, chunk size 50 → chunk-0 (50 rows) fails, chunk-1 (10) digests.
+        summarizer = _FakeSummarizer(fail_keys={"chunk-0"})
+
+        result = _execute_query(
+            client, self.GROUPS, self.QUERY, 1000, 2000, summarizer=summarizer,
+        )
+
+        digests = [f for f in result.findings if f.metadata.get("kind") == "log_digest"]
+        raw = [f for f in result.findings if f.metadata.get("kind") != "log_digest"]
+        assert len(digests) == 1                    # only chunk-1 digested
+        # chunk-0's 50 raw lines fall back into the result rather than vanishing.
+        assert len(raw) >= 50
+
+    def test_below_threshold_passes_raw_through(self):
+        rows = self._bulk_rows(5)  # under SUMMARIZER_MIN_LINES
+        client = self._client_with_rows(rows)
+        summarizer = _FakeSummarizer()
+
+        result = _execute_query(
+            client, self.GROUPS, self.QUERY, 1000, 2000, summarizer=summarizer,
+        )
+
+        assert not summarizer.seen, "tiny payloads must not be summarized"
+        assert not any(f.metadata.get("kind") == "log_digest" for f in result.findings)
+        assert len(result.findings) == 5
+
+    def test_no_summarizer_is_byte_identical(self):
+        rows = self._bulk_rows(60)
+        baseline = _execute_query(
+            self._client_with_rows(rows), self.GROUPS, self.QUERY, 1000, 2000,
+        )
+        with_none = _execute_query(
+            self._client_with_rows(rows), self.GROUPS, self.QUERY, 1000, 2000,
+            summarizer=None,
+        )
+        assert [f.content for f in baseline.findings] == [f.content for f in with_none.findings]
+        assert len(baseline.findings) == 60

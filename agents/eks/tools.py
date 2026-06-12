@@ -14,6 +14,12 @@ from datetime import datetime, timedelta, timezone
 from kubernetes.client.exceptions import ApiException
 from strands import tool
 
+from shared.log_summarizer import (
+    SUMMARIZER_MIN_LINES,
+    BedrockLogSummarizer,
+    SummarizeChunk,
+    Summarizer,
+)
 from shared.models import Finding, SnapshotReport, SnapshotSection
 from shared.tool_result import (
     ToolResult,
@@ -25,6 +31,10 @@ from shared.tool_result import (
 logger = logging.getLogger(__name__)
 
 _LOG_TAIL_LINES: int = 50
+
+# How many top-severity raw events survive a pod digest as exemplars (issue #49).
+_SUMMARIZER_POD_EXEMPLARS: int = 1
+_SEVERITY_RANK: dict[str, int] = {"critical": 0, "warning": 1, "info": 2}
 
 
 def _get_eks_bearer_token(cluster_name: str, region: str) -> str:
@@ -348,6 +358,87 @@ def _gather_node_conditions(core_v1, node_names: set[str], result: ToolResult) -
             )
 
 
+def _pod_bulk_volume(findings: list[Finding]) -> int:
+    """Approximate line volume of a pod's bulk findings (events + log tail)."""
+    total = 0
+    for f in findings:
+        if f.metadata.get("kind") == "event":
+            total += 1
+        else:  # a log-tail blob — count its lines
+            total += f.content.count("\n") + 1
+    return total
+
+
+def _max_finding_severity(findings: list[Finding]) -> str:
+    """Highest severity (critical > warning > info) across a set of findings."""
+    best = "info"
+    for f in findings:
+        if _SEVERITY_RANK.get(f.severity, 2) < _SEVERITY_RANK.get(best, 2):
+            best = f.severity
+    return best
+
+
+def _pod_event_exemplars(findings: list[Finding], n: int = _SUMMARIZER_POD_EXEMPLARS) -> list[Finding]:
+    """Keep the top-``n`` events by severity as raw exemplars beside the digest."""
+    events = [f for f in findings if f.metadata.get("kind") == "event"]
+    events.sort(key=lambda f: _SEVERITY_RANK.get(f.severity, 2))
+    picked = events[:n]
+    for f in picked:
+        f.metadata["exemplar"] = True
+    return picked
+
+
+def _gather_pod_bulk(
+    core_v1,
+    namespace: str,
+    pod_name: str,
+    summarizer: Summarizer | None,
+    result: ToolResult,
+) -> None:
+    """Gather a pod's events + log tail, digesting them when volume warrants it.
+
+    With a summarizer present and the pod's combined event/log volume over the
+    min-volume gate, the raw event + log findings are replaced by a single
+    per-pod digest finding (issue #49), keeping the top-severity event as an
+    exemplar. A failed digest, sub-gate volume, or no summarizer leaves the raw
+    findings in place — byte-identical to the pre-#49 path.
+    """
+    bulk = ToolResult()
+    _gather_pod_events(core_v1, namespace, pod_name, bulk)
+    _gather_pod_logs(core_v1, namespace, pod_name, bulk)
+    result.errors.extend(bulk.errors)
+
+    if summarizer is None or _pod_bulk_volume(bulk.findings) < SUMMARIZER_MIN_LINES:
+        result.findings.extend(bulk.findings)
+        return
+
+    chunk = SummarizeChunk(
+        key=f"pod/{pod_name}",
+        text="\n".join(f.content for f in bulk.findings),
+        severity=_max_finding_severity(bulk.findings),
+    )
+    digests = summarizer.summarize([chunk])
+    digest = digests[0] if digests else None
+    if digest is None or not digest.text:
+        result.findings.extend(bulk.findings)  # fail-open: raw
+        return
+
+    result.findings.append(
+        Finding(
+            source=f"pod/{pod_name}",
+            timestamp=_iso_now(),
+            content=digest.text,
+            severity=chunk.severity,
+            metadata={
+                "kind": "pod_digest",
+                "pod": pod_name,
+                "covered": len(bulk.findings),
+            },
+        )
+    )
+    result.findings.extend(_pod_event_exemplars(bulk.findings))
+
+
 @tool
 def gather_eks_state(
     namespace: str,
@@ -366,7 +457,10 @@ def gather_eks_state(
     from kubernetes import client as k8s_client
     core_v1 = k8s_client.CoreV1Api()
     apps_v1 = k8s_client.AppsV1Api()
-    result = _execute_gather(core_v1, apps_v1, namespace, resource_selectors)
+    result = _execute_gather(
+        core_v1, apps_v1, namespace, resource_selectors,
+        summarizer=BedrockLogSummarizer.from_env(),
+    )
     return format_result(build_agent_result("eks", result))
 
 
@@ -375,6 +469,8 @@ def _execute_gather(
     apps_v1,
     namespace: str,
     resource_selectors: list[str],
+    *,
+    summarizer: Summarizer | None = None,
 ) -> ToolResult:
     """Core gathering logic — all I/O goes through *core_v1* and *apps_v1*.
 
@@ -383,6 +479,9 @@ def _execute_gather(
         apps_v1: A Kubernetes AppsV1Api client.
         namespace: Kubernetes namespace to inspect.
         resource_selectors: Deployment names or label selectors.
+        summarizer: Optional Haiku map-reduce summarizer (issue #49). When
+            supplied, each pod's bulky events + log tail are digested into a
+            single finding; ``None`` keeps the raw findings (test default).
     """
     result = ToolResult()
 
@@ -408,8 +507,7 @@ def _execute_gather(
     for pod in pods:
         pod_name = pod.metadata.name
         _gather_pod_status(pod, result)
-        _gather_pod_events(core_v1, namespace, pod_name, result)
-        _gather_pod_logs(core_v1, namespace, pod_name, result)
+        _gather_pod_bulk(core_v1, namespace, pod_name, summarizer, result)
         if pod.spec.node_name:
             node_names.add(pod.spec.node_name)
 

@@ -15,6 +15,13 @@ from botocore.exceptions import ClientError
 from strands import tool
 
 from shared.deep_links import cloudwatch_logs_insights_url
+from shared.log_summarizer import (
+    SUMMARIZER_CHUNK_SIZE,
+    SUMMARIZER_MIN_LINES,
+    BedrockLogSummarizer,
+    SummarizeChunk,
+    Summarizer,
+)
 from shared.models import ChartDescriptor, ChartSeries, Finding, SnapshotReport, SnapshotSection
 from shared.tool_result import (
     ToolResult,
@@ -35,6 +42,11 @@ _TERMINAL_STATUSES: frozenset[str] = frozenset({
     "Timeout",
 })
 _CHART_MAX_POINTS: int = 1000
+
+# How many top-severity raw log lines survive digesting as exemplars, so the
+# report still shows literal lines alongside the per-chunk digests (issue #49).
+_SUMMARIZER_EXEMPLARS: int = 3
+_SEVERITY_RANK: dict[str, int] = {"critical": 0, "warning": 1, "info": 2}
 
 
 def _get_existing_log_groups(
@@ -165,6 +177,119 @@ def _results_to_findings(
     return findings
 
 
+def _row_message(row: list[dict]) -> str:
+    """Extract the ``@message`` text from one Logs Insights result row."""
+    return {item["field"]: item["value"] for item in row}.get("@message", "")
+
+
+def _batch_severity(batch: list[list[dict]]) -> str:
+    """Highest severity (critical > warning > info) across a chunk's rows."""
+    best = "info"
+    for row in batch:
+        sev = severity_from_text(_row_message(row))
+        if _SEVERITY_RANK.get(sev, 2) < _SEVERITY_RANK.get(best, 2):
+            best = sev
+    return best
+
+
+def _select_exemplars(
+    rows: list[list[dict]],
+    log_group_names: list[str],
+    link: str | None,
+    chart: ChartDescriptor | None,
+    exclude: set[int],
+    n: int = _SUMMARIZER_EXEMPLARS,
+) -> list[Finding]:
+    """Pick the top-``n`` rows by severity (not already kept raw) as exemplars.
+
+    Exemplars keep literal log lines in the report alongside the digests; they
+    are ordinary findings tagged ``exemplar`` for downstream clarity.
+    """
+    candidates = [i for i in range(len(rows)) if i not in exclude]
+    candidates.sort(key=lambda i: _SEVERITY_RANK.get(severity_from_text(_row_message(rows[i])), 2))
+    picked = sorted(candidates[:n])  # restore original row order
+    findings = _results_to_findings(
+        [rows[i] for i in picked], log_group_names, link=link, chart=chart,
+    )
+    for f in findings:
+        f.metadata["exemplar"] = True
+    return findings
+
+
+def _build_log_findings(
+    rows: list[list[dict]],
+    log_group_names: list[str],
+    link: str | None,
+    chart: ChartDescriptor | None,
+    summarizer: Summarizer | None,
+) -> list[Finding]:
+    """Build findings from query rows, digesting bulk volume when worthwhile.
+
+    With a summarizer present and the row count over the min-volume gate, the
+    rows are size-chunked and each chunk is replaced by a parallel-Haiku digest
+    finding (issue #49); the top-severity raw lines survive as exemplars. A
+    chunk whose digest fails falls back to its raw lines, and below the gate (or
+    with no summarizer) the behaviour is byte-identical to the raw path.
+    """
+    if summarizer is None or len(rows) < SUMMARIZER_MIN_LINES:
+        return _results_to_findings(rows, log_group_names, link=link, chart=chart)
+
+    batches = [
+        rows[i : i + SUMMARIZER_CHUNK_SIZE]
+        for i in range(0, len(rows), SUMMARIZER_CHUNK_SIZE)
+    ]
+    chunks = [
+        SummarizeChunk(
+            key=f"chunk-{i}",
+            text="\n".join(_row_message(r) for r in batch),
+            severity=_batch_severity(batch),
+        )
+        for i, batch in enumerate(batches)
+    ]
+    digests = {d.key: d for d in summarizer.summarize(chunks)}
+
+    source_label = ", ".join(log_group_names)
+    findings: list[Finding] = []
+    raw_kept: set[int] = set()
+    for i, batch in enumerate(batches):
+        digest = digests.get(f"chunk-{i}")
+        if digest is not None and digest.text:
+            findings.append(
+                Finding(
+                    source=source_label,
+                    timestamp=_row_message_timestamp(batch),
+                    content=digest.text,
+                    severity=chunks[i].severity,
+                    metadata={
+                        "kind": "log_digest",
+                        "log_groups": log_group_names,
+                        "covered": len(batch),
+                        "chunk": f"chunk-{i}",
+                    },
+                    link=link,
+                    chart=chart,
+                )
+            )
+        else:
+            findings.extend(
+                _results_to_findings(batch, log_group_names, link=link, chart=chart)
+            )
+            base = i * SUMMARIZER_CHUNK_SIZE
+            raw_kept.update(range(base, base + len(batch)))
+
+    findings.extend(
+        _select_exemplars(rows, log_group_names, link, chart, exclude=raw_kept)
+    )
+    return findings
+
+
+def _row_message_timestamp(batch: list[list[dict]]) -> str:
+    """Timestamp to anchor a digest finding — the chunk's first row's ``@timestamp``."""
+    if not batch:
+        return ""
+    return {item["field"]: item["value"] for item in batch[0]}.get("@timestamp", "")
+
+
 def _logs_insights_link(
     client,
     log_group_names: list[str],
@@ -212,7 +337,10 @@ def query_cloudwatch_logs(
         A human-readable summary string for the LLM to consume.
     """
     client = boto3.client("logs")
-    result = _execute_query(client, log_group_names, query_string, start_time, end_time)
+    result = _execute_query(
+        client, log_group_names, query_string, start_time, end_time,
+        summarizer=BedrockLogSummarizer.from_env(),
+    )
     return format_result(build_agent_result("cloudwatch_logs", result))
 
 
@@ -222,6 +350,8 @@ def _execute_query(
     query_string: str,
     start_time: int,
     end_time: int,
+    *,
+    summarizer: Summarizer | None = None,
 ) -> ToolResult:
     """Core query logic — all I/O goes through *client*.
 
@@ -231,6 +361,10 @@ def _execute_query(
         query_string: CloudWatch Logs Insights query string.
         start_time: Start of the query window (epoch seconds).
         end_time: End of the query window (epoch seconds).
+        summarizer: Optional Haiku map-reduce summarizer (issue #49). When
+            supplied and the result volume clears the min-volume gate, bulk rows
+            are digested into per-chunk findings plus exemplars; ``None`` keeps
+            the raw per-line findings (the mock-friendly default for tests).
     """
     result = ToolResult()
 
@@ -322,7 +456,7 @@ def _execute_query(
         )
 
     result.findings.extend(
-        _results_to_findings(rows, existing, link=deep_link, chart=chart)
+        _build_log_findings(rows, existing, deep_link, chart, summarizer)
     )
 
     return result
@@ -526,7 +660,7 @@ def _list_log_groups(client, *, max_groups: int) -> list[str]:
     names: list[str] = []
     next_token: str | None = None
     while True:
-        kwargs = {"limit": 50}
+        kwargs: dict[str, object] = {"limit": 50}
         if next_token:
             kwargs["nextToken"] = next_token
         response = client.describe_log_groups(**kwargs)
