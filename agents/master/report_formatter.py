@@ -13,8 +13,9 @@ Display info (emoji, name, render order) is sourced from the
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
+from agents.master.synthesis import IncidentTimeline, TimelineEvent
 from shared.agents import AgentRegistry, get_registry
 from shared.models import AgentMetadata, AgentResult, AgentFailure, AlertContext
 from shared.page_model import (
@@ -52,6 +53,36 @@ def _enrichment_error(result: AgentResult | AgentFailure) -> str | None:
     if isinstance(result, AgentResult) and result.status in ("error", "unhealthy"):
         return result.error_message or "unknown error"
     return None
+
+
+def _timeline_sort_epoch(raw: str | None) -> float | None:
+    """Parse a timeline timestamp to a UTC epoch for ordering, tolerant of forms.
+
+    Handles ISO 8601 (``…Z`` / ``+00:00`` / naive) and the alert's human
+    ``"YYYY-MM-DD HH:MM:SS UTC"`` form. Returns ``None`` for anything
+    unparseable so the caller can keep such events in stable insertion order
+    rather than misordering them with a naive string compare.
+    """
+    if not raw:
+        return None
+    text = raw.strip()
+    if text.endswith(" UTC"):
+        text = text[:-4].strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def _first_line(text: str, limit: int = 160) -> str:
+    """Return a single compact line for an event label (first line, trimmed)."""
+    line = (text or "").strip().splitlines()[0] if (text or "").strip() else ""
+    return line if len(line) <= limit else line[: limit - 1].rstrip() + "…"
 
 
 def _format_analysis_time(started_at: str | None, completed_at: str | None) -> str | None:
@@ -336,7 +367,74 @@ class ReportFormatter:
             ),
             evidence=evidence,
             chart_ids=chart_ids,
+            timeline=self.build_timeline(alert_context, agent_results).to_json_dict()[
+                "events"
+            ],
         )
+
+    def build_timeline(
+        self,
+        alert_context: AlertContext,
+        agent_results: dict[str, AgentResult | AgentFailure],
+    ) -> IncidentTimeline:
+        """Assemble the ordered incident timeline (#34), deterministically.
+
+        Events come purely from timestamps already on the evidence — the alert
+        time, each successful agent's finding timestamps, and each agent's
+        completion (the enrichment arrival). Nothing is LLM-synthesized, so a
+        time is never invented. A finding event carries ``chart_id`` only when
+        its descriptor's series was harvested, so the page can focus the linked
+        graph window on click. Events are sorted by parsed wall-clock; any
+        unparseable timestamp keeps stable insertion order rather than
+        misordering the narrative.
+        """
+        events: list[TimelineEvent] = [
+            TimelineEvent(
+                timestamp=alert_context.alert_timestamp,
+                source="alert",
+                kind="alert",
+                label=_first_line(alert_context.alert_text),
+            )
+        ]
+        for agent_key in self._ordered_specialized_ids():
+            result = agent_results.get(agent_key)
+            if not isinstance(result, AgentResult) or result.status != "success":
+                continue
+            _, display_name = self._display(agent_key)
+            for f in result.findings:
+                chart_id = (
+                    f.chart.chart_id
+                    if f.chart is not None and f.chart.chart_id in result.chart_series
+                    else None
+                )
+                events.append(
+                    TimelineEvent(
+                        timestamp=f.timestamp,
+                        source=f.source or display_name,
+                        kind="finding",
+                        label=_first_line(f.content),
+                        severity=f.severity,
+                        chart_id=chart_id,
+                    )
+                )
+            completed_at = result.metadata.completed_at if result.metadata else None
+            if completed_at:
+                events.append(
+                    TimelineEvent(
+                        timestamp=completed_at,
+                        source=display_name,
+                        kind="action",
+                        label=f"{display_name} reported",
+                    )
+                )
+
+        events.sort(
+            key=lambda e: (
+                _timeline_sort_epoch(e.timestamp) is None,
+                _timeline_sort_epoch(e.timestamp) or 0.0,
+            )
+        )
+        return IncidentTimeline(events=events)
 
     # --- Registry helpers ---
 

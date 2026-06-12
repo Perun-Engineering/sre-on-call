@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
 from pydantic import BaseModel, Field
@@ -59,6 +60,51 @@ class IncidentAnalysis(BaseModel):
     suggested_next_action: str = Field(
         description="The single most useful next step for the responder."
     )
+
+
+@dataclass
+class TimelineEvent:
+    """One event on the incident timeline.
+
+    Deterministically derived from a real timestamp on the alert, a finding,
+    or an agent's completion — never LLM-synthesized, so a time is never
+    fabricated. ``chart_id`` is set only when the event ties to a chart whose
+    series was actually harvested, which lets the interactive page focus the
+    corresponding graph window when the event is clicked (#34).
+    """
+
+    timestamp: str  # ISO 8601 (or the alert's human "… UTC" form)
+    source: str  # "alert", or the finding source / agent display name
+    kind: str  # "alert" | "finding" | "action"
+    label: str  # short human-readable description
+    severity: str | None = None  # finding severity, when applicable
+    chart_id: str | None = None  # set when the event links to a chart region
+
+    def to_json_dict(self) -> dict:
+        return {
+            "timestamp": self.timestamp,
+            "source": self.source,
+            "kind": self.kind,
+            "label": self.label,
+            "severity": self.severity,
+            "chart_id": self.chart_id,
+        }
+
+
+@dataclass
+class IncidentTimeline:
+    """The ordered incident narrative: alert → findings → agent enrichments.
+
+    Purely deterministic — assembled by :meth:`ReportFormatter.build_timeline`
+    from timestamps already present on the evidence. Stored in the trace
+    manifest and carried into the #33 page model for rendering. ``resolution``
+    events are appended later by the PIR flow (#55).
+    """
+
+    events: list[TimelineEvent] = field(default_factory=list)
+
+    def to_json_dict(self) -> dict:
+        return {"events": [e.to_json_dict() for e in self.events]}
 
 
 def _summarize_result(agent_id: str, result: AgentResult | AgentFailure) -> str:

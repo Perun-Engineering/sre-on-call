@@ -57,6 +57,40 @@ def _analysis_html(analysis: dict | None) -> str:
     )
 
 
+_TIMELINE_KIND_EMOJI = {"alert": "🚨", "finding": "🔎", "action": "✅"}
+
+
+def _timeline_html(timeline: list[dict] | None) -> str:
+    """Render the incident timeline (#34) as an accessible ordered list.
+
+    The interactive scrubbable strip is drawn over this by ECharts at runtime;
+    the list is the no-JS fallback and the source of truth for the events. An
+    event tied to a chart carries ``data-chart-id`` so its list item, like its
+    plotted point, focuses the linked graph window on click.
+    """
+    if not timeline:
+        return ""
+    items: list[str] = []
+    for e in timeline:
+        kind = e.get("kind", "")
+        emoji = _TIMELINE_KIND_EMOJI.get(kind, "•")
+        severity = e.get("severity")
+        sev_html = f' <em>[{_esc(severity)}]</em>' if severity else ""
+        chart_id = e.get("chart_id")
+        chart_attr = f' data-chart-id="{_esc(chart_id)}"' if chart_id else ""
+        items.append(
+            f'<li class="tl-event tl-{_esc(kind)}"{chart_attr}>'
+            f'<span class="tl-time">{_esc(e.get("timestamp", ""))}</span> '
+            f'{emoji} <strong>{_esc(e.get("source", ""))}</strong>: '
+            f'{_esc(e.get("label", ""))}{sev_html}</li>'
+        )
+    return (
+        '<section class="timeline"><h2>🕑 Timeline</h2>'
+        '<div class="timeline-chart" id="incident-timeline"></div>'
+        f'<ol class="timeline-list">{"".join(items)}</ol></section>'
+    )
+
+
 def render_page(page_model: dict, charts: dict[str, dict], echarts_js: str) -> str:
     """Return the full HTML document for one investigation."""
     inv_id = _esc(page_model.get("investigation_id", ""))
@@ -66,7 +100,15 @@ def render_page(page_model: dict, charts: dict[str, dict], echarts_js: str) -> s
     init_js = """
     (function () {
       var data = JSON.parse(document.getElementById('investigation-data').textContent);
+      var model = data.model || {};
       var charts = data.charts || {};
+      function parseTs(s) {
+        var t = Date.parse(String(s == null ? '' : s).replace(' UTC', 'Z').replace(' ', 'T'));
+        return isNaN(t) ? null : t;
+      }
+      // Registry of evidence-chart instances, keyed by chart_id, so a timeline
+      // event can focus the graph window it points at.
+      var registry = {};
       document.querySelectorAll('.chart').forEach(function (el) {
         var id = el.getAttribute('data-chart-id');
         var series = (charts[id] && charts[id].points) || [];
@@ -85,7 +127,74 @@ def render_page(page_model: dict, charts: dict[str, dict], echarts_js: str) -> s
           yAxis: { type: 'value' },
           series: [{ type: 'line', data: ys, areaStyle: {} }]
         });
+        registry[id] = { chart: chart, el: el, xs: xs, xsParsed: xs.map(parseTs) };
       });
+
+      // Focus the linked graph: scroll it into view and drop a marker at the
+      // chart category nearest the event's timestamp.
+      function focusChart(chartId, ts) {
+        var entry = registry[chartId];
+        if (!entry) { return; }
+        if (entry.el.scrollIntoView) {
+          entry.el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+        var target = parseTs(ts), idx = 0, best = Infinity;
+        entry.xsParsed.forEach(function (xt, i) {
+          if (xt != null && target != null) {
+            var d = Math.abs(xt - target);
+            if (d < best) { best = d; idx = i; }
+          }
+        });
+        entry.chart.setOption({ series: [{ markLine: {
+          symbol: 'none', label: { formatter: '' },
+          lineStyle: { color: '#d73a4a' },
+          data: [{ xAxis: entry.xs[idx] }]
+        } }] });
+      }
+
+      // Clicking a timeline list item also focuses its chart (no-JS-graph
+      // fallback path; works even if ECharts didn't lay out the strip).
+      document.querySelectorAll('.timeline-list li[data-chart-id]').forEach(function (li) {
+        li.style.cursor = 'pointer';
+        li.addEventListener('click', function () {
+          focusChart(li.getAttribute('data-chart-id'),
+                     (li.querySelector('.tl-time') || {}).textContent);
+        });
+      });
+
+      // The scrubbable timeline strip: events on lanes by kind over a time
+      // axis, with a slider (the scrubber). Clicking a point focuses its graph.
+      var tlEl = document.getElementById('incident-timeline');
+      var events = model.timeline || [];
+      if (window.echarts && tlEl && tlEl.clientWidth && events.length) {
+        var LANES = ['finding', 'action', 'alert'];
+        var COLOR = { alert: '#d73a4a', finding: '#fb8c00', action: '#1976d2' };
+        var allTimed = events.every(function (e) { return parseTs(e.timestamp) != null; });
+        var points = events.map(function (e, i) {
+          var lane = LANES.indexOf(e.kind); if (lane < 0) { lane = 0; }
+          var t = parseTs(e.timestamp);
+          return {
+            value: [allTimed ? t : i, lane], evt: e,
+            itemStyle: { color: COLOR[e.kind] || '#888' }
+          };
+        });
+        var tlChart = window.echarts.init(tlEl);
+        tlChart.setOption({
+          tooltip: { formatter: function (p) {
+            var e = p.data.evt;
+            return '<strong>' + e.kind + '</strong><br/>' + e.source + '<br/>' + e.label;
+          } },
+          grid: { left: 80, right: 20, top: 12, bottom: 64 },
+          xAxis: { type: allTimed ? 'time' : 'value', name: 'time' },
+          yAxis: { type: 'category', data: LANES },
+          dataZoom: [{ type: 'slider', xAxisIndex: 0 }, { type: 'inside', xAxisIndex: 0 }],
+          series: [{ type: 'scatter', symbolSize: 16, data: points }]
+        });
+        tlChart.on('click', function (p) {
+          var e = p.data && p.data.evt;
+          if (e && e.chart_id) { focusChart(e.chart_id, e.timestamp); }
+        });
+      }
     })();
     """
     return (
@@ -97,6 +206,15 @@ def render_page(page_model: dict, charts: dict[str, dict], echarts_js: str) -> s
         "body{font-family:system-ui,sans-serif;max-width:960px;margin:2rem auto;"
         "padding:0 1rem;color:#1a1a1a}"
         ".chart{width:100%;height:320px;margin:1rem 0}"
+        ".timeline-chart{width:100%;height:220px;margin:.5rem 0}"
+        ".timeline-list{list-style:none;padding-left:0}"
+        ".timeline-list .tl-event{padding:.25rem 0;border-left:3px solid #eee;"
+        "padding-left:.6rem;margin:.15rem 0}"
+        ".timeline-list .tl-alert{border-left-color:#d73a4a}"
+        ".timeline-list .tl-finding{border-left-color:#fb8c00}"
+        ".timeline-list .tl-action{border-left-color:#1976d2}"
+        ".timeline-list .tl-time{color:#666;font-variant-numeric:tabular-nums;"
+        "font-size:.85em;margin-right:.4rem}"
         "section{border-top:1px solid #eee;padding-top:1rem;margin-top:1rem}"
         "code,pre{background:#f5f5f5;padding:.1rem .3rem;border-radius:3px}"
         "</style></head><body>"
@@ -109,6 +227,7 @@ def render_page(page_model: dict, charts: dict[str, dict], echarts_js: str) -> s
         f"<section><h2>Summary</h2><p>{_esc(page_model.get('summary',''))}</p></section>"
         f"<section><h2>Root Cause Hypothesis</h2><p>{_esc(page_model.get('root_cause',''))}</p></section>"
         f"{_analysis_html(page_model.get('analysis'))}"
+        f"{_timeline_html(page_model.get('timeline'))}"
         f"<h2>Evidence</h2>{_evidence_html(page_model.get('evidence', []))}"
         f'<script type="application/json" id="investigation-data">{data_json}</script>'
         f"<script>{echarts_js}</script>"

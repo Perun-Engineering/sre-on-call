@@ -194,6 +194,10 @@ class TraceManifest:
     # {"selected": {id: hint}, "skipped": {id: reason}, "rationale": str}.
     # None when routing was disabled or fell open (dispatched all agents).
     routing: dict | None = None
+    # Issue #34 — the ordered incident timeline (list of TimelineEvent json
+    # dicts). None when no timeline was built. Archived alongside the manifest
+    # so a closed investigation can be replayed without the page model.
+    timeline: list[dict] | None = None
 
     def to_json_dict(self) -> dict:
         """Serialise to a JSON-safe dict (e.g. for ``s3:PutObject``)."""
@@ -213,6 +217,8 @@ class TraceManifest:
         }
         if self.routing is not None:
             d["routing"] = self.routing
+        if self.timeline is not None:
+            d["timeline"] = self.timeline
         return d
 
 

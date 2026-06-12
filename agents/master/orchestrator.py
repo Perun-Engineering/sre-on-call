@@ -871,6 +871,9 @@ class InvestigationOrchestrator:
             status=status,
             error_count=error_count,
             routing=routing,
+            timeline=self.report_formatter.build_timeline(
+                alert_context, results
+            ).to_json_dict()["events"],
         )
         self._trace_store.put_manifest(manifest)
 
