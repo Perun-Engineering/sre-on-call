@@ -111,6 +111,9 @@ class ReportSections:
     # for callers that haven't been updated.
     summary_parts: list[str] = field(default_factory=list)
     root_cause_parts: list[tuple[str, str]] = field(default_factory=list)
+    # #33 — signed URL to the interactive incident page. None → no link line
+    # (fail-open: the signer returns None when disabled/unconfigured/on error).
+    interactive_page_url: str | None = None
 
 
 @dataclass
@@ -387,6 +390,10 @@ class MarkupReportRenderer:
         ]
         if sections.totals_line:
             parts.append(f"{d.bold('Investigation Cost:')} {sections.totals_line}")
+        if sections.interactive_page_url:
+            parts.append(
+                d.format_link(sections.interactive_page_url, "📊 Interactive report")
+            )
         parts += [
             "",
             d.bold("Summary"),

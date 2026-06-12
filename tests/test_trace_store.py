@@ -371,6 +371,33 @@ class TestPutChartSeries:
         store.put_chart_series(investigation_id="i", chart_id="c", payload={})
 
 
+# ---------------------------------------------------------------------------
+# put_page_model
+# ---------------------------------------------------------------------------
+
+
+class TestPutPageModel:
+    def test_put_page_model_writes_under_prefix(self, aws_resources):
+        s3, dynamodb = aws_resources
+        store = TraceStore(bucket=BUCKET, table_name=TABLE,
+                           s3_client=s3, dynamodb_resource=dynamodb)
+        store.put_page_model(
+            investigation_id="inv-9",
+            payload={"schema_version": 1, "investigation_id": "inv-9"},
+            dt="dt=2026-06-12",
+        )
+        key = "dt=2026-06-12/investigation_id=inv-9/page_model.json"
+        body = s3.get_object(Bucket=BUCKET, Key=key)["Body"].read()
+        assert json.loads(body)["investigation_id"] == "inv-9"
+
+    def test_put_page_model_is_fail_open_on_s3_error(self):
+        bad_s3 = MagicMock()
+        bad_s3.put_object.side_effect = RuntimeError("boom")
+        store = TraceStore(bucket=BUCKET, table_name=TABLE,
+                           s3_client=bad_s3, dynamodb_resource=MagicMock())
+        store.put_page_model(investigation_id="inv-9", payload={})  # must not raise
+
+
 class TestConstructorInjection:
     def test_constructor_accepts_explicit_clients(self, aws_resources) -> None:
         s3, dynamodb = aws_resources

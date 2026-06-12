@@ -15,6 +15,7 @@ from shared.report_renderer import (
     EvidenceLine,
     FailureNoticeSections,
     InvestigationStartedSections,
+    MarkupReportRenderer,
     ReportSections,
     SlackDialect,
     SlackReportRenderer,
@@ -132,3 +133,38 @@ class TestDiscordEscapeUntrusted:
             _report_with_evidence_line("alert @everyone")
         )
         assert "@everyone" not in out
+
+
+# ---------------------------------------------------------------------------
+# Interactive page link (#33)
+# ---------------------------------------------------------------------------
+
+
+def _minimal_sections(**overrides) -> ReportSections:
+    base = dict(
+        severity="🔴 Critical", affected_services="rds",
+        time_of_detection="t", summary="s", root_cause="rc",
+        evidence_blocks=[], impact_assessment="i",
+        recommended_actions="a", links=[],
+    )
+    base.update(overrides)
+    return ReportSections(**base)
+
+
+def test_slack_renders_interactive_page_link_when_set():
+    out = MarkupReportRenderer(SlackDialect()).render_report(
+        _minimal_sections(interactive_page_url="https://d/pages/inv.html?Signature=x")
+    )
+    assert "<https://d/pages/inv.html?Signature=x|📊 Interactive report>" in out
+
+
+def test_discord_renders_interactive_page_link_when_set():
+    out = MarkupReportRenderer(DiscordDialect()).render_report(
+        _minimal_sections(interactive_page_url="https://d/pages/inv.html?Signature=x")
+    )
+    assert "[📊 Interactive report](https://d/pages/inv.html?Signature=x)" in out
+
+
+def test_no_interactive_link_when_unset():
+    out = MarkupReportRenderer(SlackDialect()).render_report(_minimal_sections())
+    assert "Interactive report" not in out
