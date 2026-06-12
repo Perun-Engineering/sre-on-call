@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from shared.skill_loader import (
+    _find_repo_root,
     import_tool,
     parse_skill_md,
     resolve,
@@ -91,3 +92,17 @@ def test_import_tool_resolves_module_and_attr():
 def test_import_tool_rejects_invalid_format():
     with pytest.raises(ValueError, match="module:name"):
         import_tool("no_colon_here")
+
+
+def test_find_repo_root_prefers_config_yaml_on_disk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    (tmp_path / "config.yaml").write_text("project: test\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    assert _find_repo_root() == tmp_path
+
+
+def test_find_repo_root_falls_back_to_source_layout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # No config.yaml anywhere up the cwd chain (the #23 SSM runtime image case):
+    # the loader must anchor on its own package location, not raise.
+    monkeypatch.chdir(tmp_path)
+    root = _find_repo_root()
+    assert (root / "shared" / "skill_loader.py").exists()
