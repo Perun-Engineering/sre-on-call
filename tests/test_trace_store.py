@@ -398,6 +398,31 @@ class TestPutPageModel:
                            s3_client=bad_s3, dynamodb_resource=MagicMock())
         store.put_page_model(investigation_id="inv-9", payload={})  # must not raise
 
+    def test_put_then_get_page_model_round_trips(self, aws_resources):
+        s3, dynamodb = aws_resources
+        store = TraceStore(bucket=BUCKET, table_name=TABLE,
+                           s3_client=s3, dynamodb_resource=dynamodb)
+        payload = {"schema_version": 1, "investigation_id": "inv-9",
+                   "status": "completed", "timeline": []}
+        store.put_page_model(
+            investigation_id="inv-9", payload=payload, dt="dt=2026-06-12",
+        )
+        restored = store.get_page_model("inv-9", dt="dt=2026-06-12")
+        assert restored == payload
+
+    def test_get_page_model_missing_object_returns_none(self, aws_resources):
+        s3, dynamodb = aws_resources
+        store = TraceStore(bucket=BUCKET, table_name=TABLE,
+                           s3_client=s3, dynamodb_resource=dynamodb)
+        assert store.get_page_model("nope", dt="dt=2026-06-12") is None
+
+    def test_get_page_model_is_fail_open_on_s3_error(self):
+        bad_s3 = MagicMock()
+        bad_s3.get_object.side_effect = RuntimeError("boom")
+        store = TraceStore(bucket=BUCKET, table_name=TABLE,
+                           s3_client=bad_s3, dynamodb_resource=MagicMock())
+        assert store.get_page_model("inv-9") is None  # must not raise
+
 
 def test_put_then_get_results_round_trips(aws_resources):
     from shared.models import AgentResult, AgentFailure, AgentMetadata, Finding

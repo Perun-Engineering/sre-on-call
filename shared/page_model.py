@@ -55,7 +55,7 @@ class PageModel:
     severity: str  # e.g. "🔴 Critical"
     affected_services: str
     time_of_detection: str
-    status: str  # manifest status: completed|partial|failed
+    status: str  # manifest status: completed|partial|failed; resolved after PIR (#55)
     summary: str
     root_cause: str
     analysis: dict | None  # AnalysisSection fields, or None

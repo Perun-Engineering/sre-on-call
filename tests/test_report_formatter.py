@@ -721,3 +721,71 @@ def test_build_incident_sections_carries_interactive_page_url(formatter, alert_c
         alert_context, {}, interactive_page_url="https://d/pages/inv.html?x=1"
     )
     assert sections.interactive_page_url == "https://d/pages/inv.html?x=1"
+
+
+# ---------------------------------------------------------------------------
+# resolve_page_model tests (issue #55)
+# ---------------------------------------------------------------------------
+
+
+class TestResolvePageModel:
+    def _base_page(self) -> dict:
+        return {
+            "schema_version": 1,
+            "investigation_id": "inv-1",
+            "generated_at": "2026-06-12T14:00:00Z",
+            "status": "completed",
+            "analysis": {"root_cause_hypothesis": "rc"},
+            "evidence": [{"emoji": "🟢", "display_name": "EKS",
+                          "status": "ok", "lines": [], "chart_id": None}],
+            "chart_ids": ["abc"],
+            "timeline": [{"timestamp": "2026-06-12T14:00:00Z", "source": "alert",
+                          "kind": "alert", "label": "High CPU",
+                          "severity": None, "chart_id": None}],
+        }
+
+    def test_flips_status_to_resolved(self, formatter):
+        out = formatter.resolve_page_model(
+            self._base_page(), resolved_at="2026-06-12T15:00:00Z",
+        )
+        assert out["status"] == "resolved"
+
+    def test_appends_resolution_event(self, formatter):
+        out = formatter.resolve_page_model(
+            self._base_page(), resolved_at="2026-06-12T15:00:00Z",
+            narrative="/postmortem db failover completed",
+        )
+        assert len(out["timeline"]) == 2
+        event = out["timeline"][-1]
+        assert event["kind"] == "resolution"
+        assert event["timestamp"] == "2026-06-12T15:00:00Z"
+        assert event["label"] == "db failover completed"
+
+    def test_bare_command_uses_default_label(self, formatter):
+        out = formatter.resolve_page_model(
+            self._base_page(), resolved_at="t", narrative="/postmortem",
+        )
+        assert out["timeline"][-1]["label"] == "Incident resolved"
+
+    def test_empty_narrative_uses_default_label(self, formatter):
+        out = formatter.resolve_page_model(self._base_page(), resolved_at="t")
+        assert out["timeline"][-1]["label"] == "Incident resolved"
+
+    def test_preserves_analysis_evidence_and_charts(self, formatter):
+        page = self._base_page()
+        out = formatter.resolve_page_model(page, resolved_at="t")
+        assert out["analysis"] == {"root_cause_hypothesis": "rc"}
+        assert out["evidence"] == page["evidence"]
+        assert out["chart_ids"] == ["abc"]
+
+    def test_does_not_mutate_input(self, formatter):
+        page = self._base_page()
+        formatter.resolve_page_model(page, resolved_at="t")
+        assert page["status"] == "completed"
+        assert len(page["timeline"]) == 1
+
+    def test_tolerates_missing_timeline(self, formatter):
+        page = self._base_page()
+        del page["timeline"]
+        out = formatter.resolve_page_model(page, resolved_at="t")
+        assert out["timeline"][-1]["kind"] == "resolution"

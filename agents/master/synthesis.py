@@ -75,7 +75,7 @@ class TimelineEvent:
 
     timestamp: str  # ISO 8601 (or the alert's human "… UTC" form)
     source: str  # "alert", or the finding source / agent display name
-    kind: str  # "alert" | "finding" | "action"
+    kind: str  # "alert" | "finding" | "action" | "resolution" (PIR, #55)
     label: str  # short human-readable description
     severity: str | None = None  # finding severity, when applicable
     chart_id: str | None = None  # set when the event links to a chart region
