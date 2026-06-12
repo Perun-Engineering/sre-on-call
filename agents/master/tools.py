@@ -1,12 +1,16 @@
 """Master Agent tools — bridge the LLM to the deterministic orchestrators.
 
-Two async tools wrap the master's two orchestration paths:
+Three async tools wrap the master's orchestration paths:
 
 * :func:`investigate_alert` — full incident investigation lifecycle, fanning
   out to active specialized agents and posting an Incident Report.
 * :func:`capture_status_snapshot` — read-only ``/sre-snapshot`` snapshot, fanning
   out a snapshot request and posting a :class:`SnapshotSections` payload at
   top-level.
+* :func:`finalize_postmortem` — handles the ``/postmortem`` ``task: "pir"``
+  dispatch: recovers the original investigation from the trace archive,
+  rebuilds the PIR via :meth:`ReportFormatter.build_pir_sections`, and posts
+  it threaded.
 
 Both tools kick off their orchestration as background asyncio tasks and
 return immediately so the upstream Lambda invoker isn't held open for the
@@ -30,11 +34,13 @@ import logging
 from strands import tool
 
 from agents.master.orchestrator import InvestigationOrchestrator
+from agents.master.report_formatter import ReportFormatter
 from agents.master.snapshot_orchestrator import StatusSnapshotOrchestrator
 from shared import busy_state
 from shared.models import AlertContext
 from shared.platforms import DeliveryTarget, deliver_with_retry, for_platform
 from shared.report_renderer import FailureNoticeSections
+from shared.trace_store import TraceStore
 
 logger = logging.getLogger(__name__)
 
@@ -227,4 +233,125 @@ async def capture_status_snapshot(snapshot_request_json: str) -> str:
         f"Status snapshot started "
         f"(fan-out: {', '.join(enabled_agents) or 'no active specialized agents'}). "
         f"Result will be posted to chat once collected."
+    )
+
+
+def _post_pir_notice(
+    platform: str, channel_id: str, thread_ts: str, text: str
+) -> None:
+    """Post a short fail-open notice into the incident thread (#56).
+
+    Uses the sync ``ChatPlatform.notice`` seam; swallows delivery errors.
+    """
+    try:
+        target = DeliveryTarget(
+            platform=platform, channel_id=channel_id, thread_anchor=thread_ts,
+        )
+        for_platform(platform).notice(target, text)
+    except Exception:
+        logger.exception(
+            "Failed to post PIR notice to %s/%s", channel_id, thread_ts,
+        )
+
+
+async def _run_postmortem(
+    *, platform: str, channel_id: str, thread_ts: str
+) -> None:
+    """Recover the investigation, build the PIR, and post it to the thread.
+
+    Fail-open at every recovery miss — the thread gets one short notice,
+    never silence.
+    """
+    try:
+        store = TraceStore.from_env()
+        if store is None:
+            _post_pir_notice(
+                platform, channel_id, thread_ts,
+                "Post-incident review is unavailable: the trace archive is "
+                "disabled in this deployment.",
+            )
+            return
+
+        ref = store.find_investigation(channel_id, thread_ts)
+        if ref is None:
+            _post_pir_notice(
+                platform, channel_id, thread_ts,
+                "Couldn't locate the original investigation for this thread "
+                "— it may have aged out of the trace archive.",
+            )
+            return
+
+        manifest = store.get_manifest(ref.investigation_id, dt=ref.dt)
+        results = store.get_results(ref.investigation_id, dt=ref.dt)
+        if not manifest or results is None or "alert_context" not in manifest:
+            _post_pir_notice(
+                platform, channel_id, thread_ts,
+                "The original investigation's records are incomplete; cannot "
+                "assemble a post-incident review.",
+            )
+            return
+
+        alert_context = _alert_context_from_payload(manifest["alert_context"])
+        sections = ReportFormatter().build_pir_sections(alert_context, results)
+
+        chat = for_platform(platform)
+        target = DeliveryTarget(
+            platform=platform, channel_id=channel_id, thread_anchor=thread_ts,
+        )
+        await deliver_with_retry(chat, target, sections)
+    except Exception:
+        logger.exception(
+            "Postmortem assembly failed for thread %s/%s",
+            channel_id, thread_ts,
+        )
+        _post_pir_notice(
+            platform, channel_id, thread_ts,
+            "The post-incident review failed to assemble. Consult the trace "
+            "archive directly using the investigation reference.",
+        )
+
+
+@tool
+async def finalize_postmortem(pir_request_json: str) -> str:
+    """Build and post a Post-Incident Report for an incident thread.
+
+    Handles the ``task: "pir"`` master dispatch fired by ``/postmortem``.
+    Recovers the original investigation from the trace archive (by
+    channel + thread), rebuilds the report, and posts it as a thread reply.
+    Kicks off in the background and returns a status line (not user-visible).
+
+    Args:
+        pir_request_json: The verbatim A2A text payload — a JSON object with
+            ``task = "pir"`` plus ``platform``, ``channel_id``, ``thread_ts``,
+            ``user_id``, ``command_text``.
+
+    Returns:
+        A short status string describing how the PIR was dispatched.
+    """
+    payload = json.loads(pir_request_json)
+    task_kind = payload.get("task")
+    if task_kind != "pir":
+        msg = (
+            f"finalize_postmortem received unexpected task={task_kind!r}; "
+            f"expected 'pir'."
+        )
+        logger.error(msg)
+        return msg
+
+    platform = str(payload.get("platform", ""))
+    channel_id = str(payload.get("channel_id", ""))
+    thread_ts = str(payload.get("thread_ts", ""))
+
+    bg_task = asyncio.create_task(
+        _run_postmortem(
+            platform=platform, channel_id=channel_id, thread_ts=thread_ts,
+        ),
+        name=f"pir-{channel_id}-{thread_ts}",
+    )
+    # Hold a strong ref + flip /ping to HealthyBusy while the PIR assembles.
+    busy_state.track(bg_task)
+
+    return (
+        f"Post-incident review started for thread {thread_ts} in "
+        f"{channel_id}. The report will be posted to the thread once assembled."
     )
