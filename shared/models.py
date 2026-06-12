@@ -23,6 +23,11 @@ class AgentMetadata:
     output_tokens: int | None = None
     total_tokens: int | None = None
     cost_usd: float | None = None
+    # Issue #49 — the Haiku map-reduce summarizer runs inside data-heavy tools,
+    # outside the planner loop, so its token cost is tracked separately here.
+    summarizer_input_tokens: int | None = None
+    summarizer_output_tokens: int | None = None
+    summarizer_cost_usd: float | None = None
 
 
 @dataclass

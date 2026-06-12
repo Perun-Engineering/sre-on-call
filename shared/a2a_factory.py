@@ -30,7 +30,7 @@ from strands.models.bedrock import BedrockModel
 from strands.multiagent.a2a import A2AServer
 from strands.multiagent.a2a.executor import StrandsA2AExecutor
 
-from shared import busy_state
+from shared import busy_state, log_summarizer
 from shared.agent_telemetry import AGENT_METADATA, compute_cost_usd
 from shared.bounded_loop import BoundedLoopHook
 from shared.models import AgentMetadata, AgentResult
@@ -98,6 +98,10 @@ class TelemetryCapturingA2AExecutor(StrandsA2AExecutor):
         self, context: RequestContext, event_queue: EventQueue
     ) -> None:
         async with self._invocation_lock:
+            # Zero the summarizer token accumulator for this request. Safe on the
+            # loop thread under the lock — no summarizer fan-out threads are live
+            # yet (issue #49).
+            log_summarizer.reset_usage()
             # Arm the bounded loop with this request's budget before invoking.
             # Safe under the lock: one invocation runs at a time, so a single
             # shared hook instance carries per-request deadline + cycle state.
@@ -174,6 +178,10 @@ class TelemetryCapturingA2AExecutor(StrandsA2AExecutor):
         input_tokens = usage.get("inputTokens") if usage else None
         output_tokens = usage.get("outputTokens") if usage else None
         total_tokens = usage.get("totalTokens") if usage else None
+        # Fold in the Haiku map-reduce summarizer's own cost (issue #49). It runs
+        # inside the data-heavy tools, outside the planner loop, so its tokens
+        # are accumulated separately and drained here for honest cost reporting.
+        sum_in, sum_out = log_summarizer.drain_usage()
         return AgentMetadata(
             model_id=self._model_id,
             completed_at=now_iso(),
@@ -181,6 +189,11 @@ class TelemetryCapturingA2AExecutor(StrandsA2AExecutor):
             output_tokens=output_tokens,
             total_tokens=total_tokens,
             cost_usd=compute_cost_usd(self._model_id, input_tokens, output_tokens),
+            summarizer_input_tokens=sum_in,
+            summarizer_output_tokens=sum_out,
+            summarizer_cost_usd=compute_cost_usd(
+                log_summarizer.summarizer_model_id(), sum_in, sum_out
+            ),
         )
 
 

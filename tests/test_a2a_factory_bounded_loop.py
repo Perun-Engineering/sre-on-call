@@ -92,3 +92,51 @@ async def test_executor_arms_hook_before_invoking(monkeypatch) -> None:
     await executor.execute(ctx, event_queue=object())  # type: ignore[arg-type]
 
     assert armed == [12.0]
+
+
+# ---------------------------------------------------------------------------
+# Summarizer telemetry wiring (issue #49)
+# ---------------------------------------------------------------------------
+
+from types import SimpleNamespace  # noqa: E402
+
+
+@pytest.mark.asyncio
+async def test_execute_resets_summarizer_usage_per_request(monkeypatch) -> None:
+    """execute() zeroes the summarizer accumulator before the agent runs."""
+    from shared import log_summarizer
+
+    log_summarizer.record_usage(50, 50)  # leftover state from a prior request
+
+    async def _noop(self, context, event_queue):  # noqa: ANN001
+        return None
+
+    monkeypatch.setattr(
+        "strands.multiagent.a2a.executor.StrandsA2AExecutor.execute", _noop
+    )
+    executor = TelemetryCapturingA2AExecutor(agent=object(), model_id="m")
+    await executor.execute(_FakeContext("{}"), event_queue=object())  # type: ignore[arg-type]
+
+    assert log_summarizer.drain_usage() == (None, None)
+
+
+def test_build_metadata_folds_in_summarizer_cost() -> None:
+    """_build_metadata surfaces the summarizer's tokens + Haiku-priced cost."""
+    from shared import log_summarizer
+
+    log_summarizer.reset_usage()
+    log_summarizer.record_usage(1_000_000, 1_000_000)  # $1/M in + $5/M out = $6
+
+    executor = TelemetryCapturingA2AExecutor(agent=object(), model_id="m")
+    result = SimpleNamespace(
+        metrics=SimpleNamespace(
+            accumulated_usage={"inputTokens": 5, "outputTokens": 2, "totalTokens": 7}
+        )
+    )
+    metadata = executor._build_metadata(result)
+
+    assert metadata.summarizer_input_tokens == 1_000_000
+    assert metadata.summarizer_output_tokens == 1_000_000
+    assert metadata.summarizer_cost_usd == 6.0
+    # planner-side telemetry is untouched by the summarizer fold-in
+    assert metadata.input_tokens == 5

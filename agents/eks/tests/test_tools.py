@@ -1060,3 +1060,99 @@ class TestCaptureSnapshotErrorPaths:
         )
         assert "rbac denied" in joined
         assert report.anomaly is False
+
+
+# ---------------------------------------------------------------------------
+# _execute_gather — Haiku map-reduce digest tier (issue #49)
+# ---------------------------------------------------------------------------
+
+from shared.log_summarizer import Digest, SummarizeChunk  # noqa: E402
+
+
+class _FakeSummarizer:
+    """Digests every chunk key except ``fail_keys`` (which return ``text=None``)."""
+
+    def __init__(self, fail_keys=()):
+        self.fail_keys = set(fail_keys)
+        self.seen: list = []
+
+    def summarize(self, chunks):
+        self.seen.extend(chunks)
+        return [
+            Digest(c.key, None if c.key in self.fail_keys else f"DIGEST::{c.key}")
+            for c in chunks
+        ]
+
+
+def _gather_clients_for_pod(log_lines: int, events: list):
+    core_v1 = MagicMock()
+    apps_v1 = MagicMock()
+    pod = _make_pod(name="web-abc", phase="Running", node_name="node-1")
+    apps_v1.read_namespaced_deployment.return_value = _make_deployment({"app": "web"})
+    core_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[pod])
+    core_v1.list_namespaced_event.return_value = SimpleNamespace(items=events)
+    core_v1.read_namespaced_pod_log.return_value = "\n".join(
+        f"ERROR line {i}" for i in range(log_lines)
+    )
+    core_v1.read_node.return_value = _make_node("node-1")
+    return core_v1, apps_v1
+
+
+class TestExecuteGatherSummarizer:
+    """Per-pod logs + events collapse into a digest; status/nodes stay raw."""
+
+    def _kinds(self, result):
+        return [f.metadata.get("kind") for f in result.findings]
+
+    def test_bulky_pod_is_digested_status_and_nodes_kept_raw(self):
+        warnings = [_make_event("web-abc", "Warning", "BackOff", "crashloop")]
+        core_v1, apps_v1 = _gather_clients_for_pod(60, warnings)
+        summarizer = _FakeSummarizer()
+
+        result = _execute_gather(
+            core_v1, apps_v1, "default", ["web-deploy"], summarizer=summarizer,
+        )
+
+        kinds = self._kinds(result)
+        assert "pod_digest" in kinds          # the bulk was digested
+        assert "pod_logs" not in kinds        # raw 60-line log blob replaced
+        assert "pod_status" in kinds          # structured status stays raw
+        assert "node_condition" in kinds      # node conditions stay raw
+        assert summarizer.seen and summarizer.seen[0].key == "pod/web-abc"
+
+    def test_failed_pod_digest_falls_back_to_raw(self):
+        warnings = [_make_event("web-abc", "Warning", "BackOff", "crashloop")]
+        core_v1, apps_v1 = _gather_clients_for_pod(60, warnings)
+        summarizer = _FakeSummarizer(fail_keys={"pod/web-abc"})
+
+        result = _execute_gather(
+            core_v1, apps_v1, "default", ["web-deploy"], summarizer=summarizer,
+        )
+
+        kinds = self._kinds(result)
+        assert "pod_digest" not in kinds
+        assert "pod_logs" in kinds            # raw logs survive the digest failure
+        assert "event" in kinds               # raw events survive too
+
+    def test_small_pod_not_digested(self):
+        core_v1, apps_v1 = _gather_clients_for_pod(2, [])  # under the gate
+        summarizer = _FakeSummarizer()
+
+        result = _execute_gather(
+            core_v1, apps_v1, "default", ["web-deploy"], summarizer=summarizer,
+        )
+
+        assert not summarizer.seen
+        assert "pod_digest" not in self._kinds(result)
+        assert "pod_logs" in self._kinds(result)
+
+    def test_no_summarizer_is_unchanged(self):
+        warnings = [_make_event("web-abc", "Warning", "BackOff", "crashloop")]
+        core_v1, apps_v1 = _gather_clients_for_pod(60, warnings)
+
+        result = _execute_gather(core_v1, apps_v1, "default", ["web-deploy"])
+
+        kinds = self._kinds(result)
+        assert "pod_digest" not in kinds
+        assert "pod_logs" in kinds
+        assert "event" in kinds
