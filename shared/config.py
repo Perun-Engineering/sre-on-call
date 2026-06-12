@@ -45,6 +45,20 @@ class AgentConfig(pydantic.BaseModel):
     # falls back to ``MODEL_ID`` env / ``defaults.model_id``. Lets the master
     # run a Sonnet-class model while scanners stay on Haiku.
     model_id: str | None = None
+    # When set, this agent runs as a bounded iterative investigator (issue
+    # #58): the A2A factory registers a :class:`shared.bounded_loop.BoundedLoopHook`
+    # that caps the agent at this many tool-use cycles and enforces the
+    # master-granted ``deadline_seconds``. Absent → single-pass (today's
+    # behaviour). Set for eks + cloudwatch_logs, which drill on what each pass
+    # surfaces; scanners/prometheus/incident_history stay single-pass.
+    max_tool_cycles: int | None = None
+
+    @pydantic.field_validator("max_tool_cycles")
+    @classmethod
+    def _positive_cycles(cls, value: int | None) -> int | None:
+        if value is not None and value < 1:
+            raise ValueError("max_tool_cycles must be >= 1 when set")
+        return value
 
 
 class Defaults(pydantic.BaseModel):

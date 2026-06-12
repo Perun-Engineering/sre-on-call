@@ -32,6 +32,7 @@ from strands.multiagent.a2a.executor import StrandsA2AExecutor
 
 from shared import busy_state
 from shared.agent_telemetry import AGENT_METADATA, compute_cost_usd
+from shared.bounded_loop import BoundedLoopHook
 from shared.models import AgentMetadata, AgentResult
 from shared.time_utils import now_iso
 from shared.tool_result import AGENT_RESULT
@@ -39,6 +40,29 @@ from shared.tool_result import AGENT_RESULT
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+# Appended to an iterative agent's system prompt (issue #58). Frames the
+# bounded drill-down loop in prose; the hard ceiling + deadline are enforced
+# structurally by :class:`shared.bounded_loop.BoundedLoopHook`, so this is a
+# nudge toward good use of the passes, not the guarantee.
+ITERATIVE_INVESTIGATION_PROMPT = """# Iterative investigation
+
+You are a bounded iterative investigator. Take a few purposeful tool-use
+passes, drilling on what the previous pass surfaced rather than reporting
+first results as-is:
+
+1. First pass — gather broad state with one tool call.
+2. If a result is suspicious (a crashlooping pod, a spike of errors, a failed
+   dependency), follow up with a focused pass that drills into it — fetch that
+   pod's logs and events, or refine the query around the suspicious window —
+   instead of stopping at the surface.
+3. Stop as soon as you can explain the alert, or when a tool result tells you
+   the pass budget or deadline is reached.
+
+If a tool call returns saying the budget or pass limit is reached, do not call
+more tools — write your findings summary from what you already have. Solid
+iteration-1 findings delivered on time beat a deeper answer that arrives too
+late to be used."""
 
 
 class TelemetryCapturingA2AExecutor(StrandsA2AExecutor):
@@ -57,15 +81,28 @@ class TelemetryCapturingA2AExecutor(StrandsA2AExecutor):
     cleanly behind the in-flight invoke instead of crashing.
     """
 
-    def __init__(self, agent, *, model_id: str | None = None, **kwargs):
+    def __init__(
+        self,
+        agent,
+        *,
+        model_id: str | None = None,
+        bounded_loop: BoundedLoopHook | None = None,
+        **kwargs,
+    ):
         super().__init__(agent, **kwargs)
         self._model_id = model_id
+        self._bounded_loop = bounded_loop
         self._invocation_lock = asyncio.Lock()
 
     async def execute(  # type: ignore[override]
         self, context: RequestContext, event_queue: EventQueue
     ) -> None:
         async with self._invocation_lock:
+            # Arm the bounded loop with this request's budget before invoking.
+            # Safe under the lock: one invocation runs at a time, so a single
+            # shared hook instance carries per-request deadline + cycle state.
+            if self._bounded_loop is not None:
+                self._bounded_loop.arm(_extract_deadline_seconds(context))
             await super().execute(context, event_queue)
 
     async def _handle_agent_result(self, result, updater):  # type: ignore[override]
@@ -145,6 +182,27 @@ class TelemetryCapturingA2AExecutor(StrandsA2AExecutor):
             total_tokens=total_tokens,
             cost_usd=compute_cost_usd(self._model_id, input_tokens, output_tokens),
         )
+
+
+def _extract_deadline_seconds(context: RequestContext) -> float | None:
+    """Read the master-granted budget off the inbound A2A request, or ``None``.
+
+    The specialist receives the serialized :class:`~shared.models.AlertContext`
+    as its user input; iterative agents need its ``deadline_seconds`` to arm the
+    bounded loop. Parsing is defensive — a non-JSON prompt, a missing field, or
+    a bad type all yield ``None`` (cap-only, no deadline gate) rather than
+    raising into the invoke path.
+    """
+    try:
+        payload = json.loads(context.get_user_input())
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get("deadline_seconds")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
 
 
 def _latest_agent_result(messages) -> AgentResult | None:
@@ -326,6 +384,18 @@ def agent_main(agent_dir: str | pathlib.Path) -> None:
 
         system_prompt = _compose_system_prompt(card["system_prompt"], skills_resolved)
 
+        # Issue #58 — iterative agents (eks, cloudwatch_logs) opt in via
+        # ``max_tool_cycles`` in config.yaml. They get a bounded-loop hook (hard
+        # tool-cycle ceiling + deadline gate) and an iterative-investigation
+        # prompt addendum. Absent → single-pass, unchanged.
+        agent_cfg = project_config.agents.get(agent_name)
+        max_tool_cycles = agent_cfg.max_tool_cycles if agent_cfg else None
+        bounded_loop = (
+            BoundedLoopHook(max_tool_cycles) if max_tool_cycles else None
+        )
+        if bounded_loop is not None:
+            system_prompt = system_prompt.rstrip() + "\n\n" + ITERATIVE_INVESTIGATION_PROMPT + "\n"
+
         model = _resolve_agent_model(project_config, agent_name)
         agent = Agent(
             model=model,
@@ -333,6 +403,7 @@ def agent_main(agent_dir: str | pathlib.Path) -> None:
             tools=tools,
             name=card["name"],
             description=card["description"],
+            hooks=[bounded_loop] if bounded_loop is not None else None,
         )
 
         host = os.environ.get("A2A_HOST", "0.0.0.0")
@@ -348,6 +419,7 @@ def agent_main(agent_dir: str | pathlib.Path) -> None:
         server.request_handler.agent_executor = TelemetryCapturingA2AExecutor(
             agent,
             model_id=model.config.get("model_id"),
+            bounded_loop=bounded_loop,
             enable_a2a_compliant_streaming=True,
         )
 

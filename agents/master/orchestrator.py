@@ -354,9 +354,17 @@ class InvestigationOrchestrator:
         # --- Phase 1: fan-out ------------------------------------------------
         # Each selected agent receives the alert with its router-supplied hint
         # injected onto the payload; the rest of the active roster is skipped.
+        # Iterative agents (issue #58) also receive the wall-clock budget until
+        # the master's initial harvest, so they stop starting new passes in time
+        # to emit rather than be cancelled. Mirrors the Phase 2 timeout math.
+        specialist_deadline = self._specialist_deadline_seconds(start_time)
         pending = self._fanout.dispatch(
             lambda agent_id: self._invoke_agent_safe(
-                agent_id, self._with_hint(alert_context, routing.hints.get(agent_id))
+                agent_id,
+                self._with_deadline(
+                    self._with_hint(alert_context, routing.hints.get(agent_id)),
+                    specialist_deadline,
+                ),
             ),
             agent_ids=dispatched_agents,
         )
@@ -592,6 +600,29 @@ class InvestigationOrchestrator:
         if not hint:
             return alert_context
         return replace(alert_context, investigation_hints=hint)
+
+    @staticmethod
+    def _with_deadline(
+        alert_context: AlertContext, deadline_seconds: float | None
+    ) -> AlertContext:
+        """Return the alert carrying the specialist's wall-clock budget (issue #58)."""
+        if deadline_seconds is None:
+            return alert_context
+        return replace(alert_context, deadline_seconds=deadline_seconds)
+
+    def _specialist_deadline_seconds(self, start_time: float) -> float:
+        """Budget (seconds) a dispatched specialist has before the initial harvest.
+
+        Mirrors the Phase 2 ``initial_timeout`` math so an iterative agent's
+        bounded loop targets the same instant the master stops waiting: the
+        60s initial deadline, less the time already spent (routing/announce),
+        less the synthesis reserve. Never negative.
+        """
+        synthesis_budget = (
+            self._synthesizer.timeout_seconds if self._synthesizer is not None else 0.0
+        )
+        elapsed = asyncio.get_event_loop().time() - start_time
+        return max(0.0, self.INITIAL_DEADLINE_SECONDS - elapsed - synthesis_budget)
 
     async def _maybe_followup(
         self,
