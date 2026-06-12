@@ -136,6 +136,44 @@ class TestDiscordEscapeUntrusted:
 
 
 # ---------------------------------------------------------------------------
+# Discord masked-link truncation on paren-bearing URLs (#40)
+#
+# CloudWatch Logs Insights console URLs carry literal `(`, `)`, `~`, `'`, `*`
+# in the `#logsV2:...~(...)` hash fragment — they can't be percent-encoded
+# (AWS parses location.hash client-side). Discord's `[label](url)` parser
+# stops the URL at the first literal `)`, truncating the deep link. Wrapping
+# the URL in `<...>` bounds it explicitly so `)` no longer terminates it
+# (and suppresses the embed unfurl as a bonus).
+# ---------------------------------------------------------------------------
+
+_CW_DEEPLINK = (
+    "https://us-east-1.console.aws.amazon.com/cloudwatch/home?region=us-east-1"
+    "#logsV2:logs-insights$3FqueryDetail$3D~(end~0~start~-3600~source~(~'/aws/eks/cluster))"
+)
+
+
+class TestDiscordParenLinks:
+    def test_paren_url_wrapped_in_angle_brackets(self):
+        d = DiscordDialect()
+        out = d.format_link(_CW_DEEPLINK, "View logs")
+        # Full URL survives, bounded by <...> so the literal `)` can't truncate.
+        assert out == f"[View logs](<{_CW_DEEPLINK}>)"
+        assert _CW_DEEPLINK in out
+
+    def test_plain_url_unchanged(self):
+        d = DiscordDialect()
+        out = d.format_link("https://d/pages/inv.html?Signature=x", "📊 Interactive report")
+        # No parens → keep the bare masked-link form (embed allowed).
+        assert out == "[📊 Interactive report](https://d/pages/inv.html?Signature=x)"
+
+    def test_slack_paren_url_unchanged(self):
+        # Slack's <url|label> carries paren-bearing URLs faithfully — no change.
+        d = SlackDialect()
+        out = d.format_link(_CW_DEEPLINK, "View logs")
+        assert out == f"<{_CW_DEEPLINK}|View logs>"
+
+
+# ---------------------------------------------------------------------------
 # Interactive page link (#33)
 # ---------------------------------------------------------------------------
 
