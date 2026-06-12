@@ -180,3 +180,10 @@ def test_fetch_ssm_parameter_reads_value(monkeypatch):
 
     monkeypatch.setitem(__import__("sys").modules, "boto3", _FakeBoto3())
     assert "from-ssm" in config._fetch_ssm_parameter("/sre-on-call/dev/config")
+
+
+def test_master_lists_finalize_postmortem_skill():
+    """config.yaml's master agent must declare the finalize_postmortem skill."""
+    from shared.config import load
+    cfg = load()
+    assert "finalize_postmortem" in cfg.agents["master"].skills

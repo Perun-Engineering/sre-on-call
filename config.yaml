@@ -13,6 +13,7 @@ agents:
     skills:
       - investigate_alert
       - capture_status_snapshot
+      - finalize_postmortem
     mcps: []
 
   slack_scanner:
