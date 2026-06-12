@@ -10,6 +10,7 @@ from pathlib import Path
 import boto3
 import pytest
 from moto import mock_aws
+from typing import Any
 
 from shared.experiment import (
     AgentVariantConfig,
@@ -31,7 +32,7 @@ _spec.loader.exec_module(cli)
 @pytest.fixture()
 def results_store():
     with mock_aws():
-        dynamodb = boto3.resource("dynamodb", region_name="us-east-1")
+        dynamodb: Any = boto3.resource("dynamodb", region_name="us-east-1")
         dynamodb.create_table(
             TableName=DEFAULT_TABLE_NAME,
             KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],

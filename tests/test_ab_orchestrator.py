@@ -91,9 +91,12 @@ class FakeChatPlatform:
     def ack(self, command, text):
         raise NotImplementedError
 
-    async def deliver(self, alert_context, payload) -> str:
+    def notice(self, target, text) -> None:
+        raise NotImplementedError
+
+    async def deliver(self, target, payload) -> str:
         text = self._renderer.render(payload)
-        self.deliveries.append((alert_context, payload, text))
+        self.deliveries.append((target, payload, text))
         return text
 
     @property
@@ -168,8 +171,9 @@ class TestReportFormatterVariantLabel:
 
 @pytest.fixture()
 def results_table():
+    from typing import Any
     with mock_aws():
-        dynamodb = boto3.resource("dynamodb", region_name="us-east-1")
+        dynamodb: Any = boto3.resource("dynamodb", region_name="us-east-1")
         dynamodb.create_table(
             TableName=RESULTS_TABLE,
             KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],

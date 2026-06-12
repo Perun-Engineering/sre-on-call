@@ -673,6 +673,7 @@ def _chart_finding() -> Finding:
 class TestBuildPageModel:
     def test_threads_chart_id_when_series_present(self, formatter, alert_context):
         finding = _chart_finding()
+        assert finding.chart is not None
         cid = finding.chart.chart_id
         results = {
             "cloudwatch_logs": AgentResult(

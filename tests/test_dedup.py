@@ -8,6 +8,7 @@ import uuid
 import boto3
 import pytest
 from moto import mock_aws
+from typing import Any
 
 from lambda_adapter.dedup import DeduplicationStore, DEFAULT_TABLE_NAME, _TTL_SECONDS
 
@@ -16,7 +17,7 @@ from lambda_adapter.dedup import DeduplicationStore, DEFAULT_TABLE_NAME, _TTL_SE
 def dynamodb_table():
     """Create a mocked DynamoDB table for the dedup store."""
     with mock_aws():
-        dynamodb = boto3.resource("dynamodb", region_name="us-east-1")
+        dynamodb: Any = boto3.resource("dynamodb", region_name="us-east-1")
         table = dynamodb.create_table(
             TableName=DEFAULT_TABLE_NAME,
             KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],

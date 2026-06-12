@@ -79,6 +79,7 @@ class TestSummarizerMetadata:
         )
         block = AGENT_METADATA.encode(original)
         _, decoded = AGENT_METADATA.extract(block)
+        assert decoded is not None
         assert decoded.summarizer_input_tokens == 120
         assert decoded.summarizer_output_tokens == 30
         assert decoded.summarizer_cost_usd == 0.00027

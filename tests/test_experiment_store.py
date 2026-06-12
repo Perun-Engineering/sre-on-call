@@ -5,6 +5,7 @@ from __future__ import annotations
 import boto3
 import pytest
 from moto import mock_aws
+from typing import Any
 
 from shared.experiment import (
     AgentVariantConfig,
@@ -39,7 +40,7 @@ def _make_experiment(experiment_id: str = "exp-001", status: str = "active") -> 
 @pytest.fixture()
 def dynamodb_table():
     with mock_aws():
-        dynamodb = boto3.resource("dynamodb", region_name="us-east-1")
+        dynamodb: Any = boto3.resource("dynamodb", region_name="us-east-1")
         dynamodb.create_table(
             TableName=DEFAULT_TABLE_NAME,
             KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],

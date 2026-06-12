@@ -5,6 +5,7 @@ from __future__ import annotations
 import boto3
 import pytest
 from moto import mock_aws
+from typing import Any
 
 from shared.incident_history_store import (
     HISTORY_PK_PREFIX,
@@ -20,7 +21,7 @@ TABLE = "sre-on-call-test-traces"
 def dynamodb():
     """moto-mocked DDB table mirroring the real traces table key schema."""
     with mock_aws():
-        ddb = boto3.resource("dynamodb", region_name="us-east-1")
+        ddb: Any = boto3.resource("dynamodb", region_name="us-east-1")
         ddb.create_table(
             TableName=TABLE,
             KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],

@@ -47,7 +47,7 @@ def _get_eks_bearer_token(cluster_name: str, region: str) -> str:
     import boto3
     from botocore.signers import RequestSigner
 
-    session = boto3.session.Session()
+    session = boto3.Session()
     creds = session.get_credentials()
     if creds is None:
         raise RuntimeError("No AWS credentials available for EKS token generation.")
@@ -73,6 +73,8 @@ def _get_eks_bearer_token(cluster_name: str, region: str) -> str:
         expires_in=60,
         operation_name="",
     )
+    if signed_url is None:
+        raise RuntimeError("Failed to presign STS URL for EKS token generation.")
     encoded = base64.urlsafe_b64encode(signed_url.encode("utf-8")).decode("utf-8")
     return "k8s-aws-v1." + encoded.rstrip("=")
 

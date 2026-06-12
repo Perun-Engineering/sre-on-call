@@ -24,7 +24,7 @@ class ExperimentStore:
         table_name: str = DEFAULT_TABLE_NAME,
         dynamodb_resource: Any = None,
     ) -> None:
-        resource = dynamodb_resource or boto3.resource("dynamodb")
+        resource: Any = dynamodb_resource or boto3.resource("dynamodb")
         self._table = resource.Table(table_name)
 
     def get_active_experiment(self) -> ExperimentConfig | None:

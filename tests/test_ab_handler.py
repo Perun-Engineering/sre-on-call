@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import time
+from typing import Any
 
 import boto3
 import pytest
@@ -75,7 +76,7 @@ def _make_experiment() -> ExperimentConfig:
 
 
 def _create_tables(create_experiments: bool = False):
-    ddb = boto3.resource("dynamodb", region_name="us-east-1")
+    ddb: Any = boto3.resource("dynamodb", region_name="us-east-1")
     ddb.create_table(
         TableName=DEDUP_TABLE,
         KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],
@@ -151,6 +152,7 @@ class TestWithExperiment:
 
         for task in dispatch.tasks:
             ctx = task.alert_context
+            assert ctx is not None
             assert ctx.experiment_id == "exp-001"
             assert ctx.variant_id in ("a", "b")
             assert ctx.variant_label in ("Claude Sonnet", "Nova Pro")
@@ -167,7 +169,12 @@ class TestWithExperiment:
 
         # Two distinct variants — the per-variant session-id suffix is
         # verified in test_master_dispatch.
-        assert {t.alert_context.variant_id for t in dispatch.tasks} == {"a", "b"}
+        variant_ids = set()
+        for t in dispatch.tasks:
+            ctx = t.alert_context
+            assert ctx is not None
+            variant_ids.add(ctx.variant_id)
+        assert variant_ids == {"a", "b"}
 
     @mock_aws
     def test_no_fork_when_experiment_paused(self, monkeypatch) -> None:

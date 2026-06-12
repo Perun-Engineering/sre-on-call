@@ -686,7 +686,7 @@ class TestEksIamAuth:
         with pytest.MonkeyPatch.context() as mp:
             import boto3 as _boto3
 
-            mp.setattr(_boto3, "client", lambda service, **kw: fake_eks if service == "eks" else _boto3.session.Session().client(service, **kw))
+            mp.setattr(_boto3, "client", lambda service, **kw: fake_eks if service == "eks" else _boto3.Session().client(service, **kw))
 
             _load_kube_config_from_eks("eks-uat", "us-east-1")
 

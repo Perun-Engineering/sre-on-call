@@ -60,4 +60,6 @@ def test_from_env_builds_signer_and_loads_key_from_secrets(monkeypatch):
     fake_sm.get_secret_value.return_value = {"SecretString": _private_pem()}
     signer = CloudFrontUrlSigner.from_env(secrets_client=fake_sm)
     assert signer is not None
-    assert signer.sign("inv-1").startswith("https://d111.cloudfront.net/pages/inv-1.html?")
+    signed_url = signer.sign("inv-1")
+    assert signed_url is not None
+    assert signed_url.startswith("https://d111.cloudfront.net/pages/inv-1.html?")

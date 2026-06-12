@@ -16,6 +16,7 @@ import time
 import boto3
 import pytest
 from moto import mock_aws
+from typing import Any
 
 from lambda_adapter.intake import process_webhook
 from lambda_adapter.master_dispatch import RecordingMasterDispatch
@@ -75,7 +76,7 @@ def _env(monkeypatch):
 
 
 def _create_dedup_table():
-    ddb = boto3.resource("dynamodb", region_name="us-east-1")
+    ddb: Any = boto3.resource("dynamodb", region_name="us-east-1")
     ddb.create_table(
         TableName=DEDUP_TABLE,
         KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],

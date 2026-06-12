@@ -14,7 +14,7 @@ from agents.master.followup import (
     FollowupPlanner,
     build_followup_prompt,
 )
-from shared.models import AgentResult, AlertContext, Finding
+from shared.models import AgentFailure, AgentResult, AlertContext, Finding
 
 
 def _alert() -> AlertContext:
@@ -54,7 +54,7 @@ def _candidates() -> list[FollowupCandidate]:
 
 class TestBuildFollowupPrompt:
     def test_prompt_includes_alert_and_current_results(self):
-        results = {"cloudwatch_logs": _result("cloudwatch_logs", "saw OOM restarts")}
+        results: dict[str, AgentResult | AgentFailure] = {"cloudwatch_logs": _result("cloudwatch_logs", "saw OOM restarts")}
         prompt = build_followup_prompt(_alert(), results, _candidates())
         assert "PaymentService 5xx rate spiked to 40%" in prompt
         assert "saw OOM restarts" in prompt

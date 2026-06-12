@@ -35,7 +35,7 @@ and the ``ENABLED_AGENTS`` env var.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
 AgentKind = Literal["orchestrator", "specialized"]
@@ -64,7 +64,7 @@ class Agent:
     # Deployment fields (None when not in config.yaml).
     enabled: bool | None = None
     skills: list[str] | None = None
-    mcps: list = field(default_factory=lambda: None)  # list[MCPConfig] | None
+    mcps: list | None = None  # list[MCPConfig] | None
     network_mode: str | None = None  # NetworkMode = "PUBLIC" | "VPC" | None
 
     @property

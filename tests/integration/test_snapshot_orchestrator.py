@@ -186,6 +186,9 @@ class FakeChatPlatform:
     def ack(self, command, text):  # not exercised
         raise NotImplementedError
 
+    def notice(self, target, text) -> None:  # not exercised
+        raise NotImplementedError
+
     async def deliver(self, target, payload) -> str:
         text = self._renderer.render(payload)
         self.deliveries.append((target, payload, text))
