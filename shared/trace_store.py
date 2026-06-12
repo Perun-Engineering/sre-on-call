@@ -134,6 +134,8 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
+from shared.tool_result import results_from_dict, results_to_dict
+
 logger = logging.getLogger(__name__)
 
 
@@ -345,6 +347,13 @@ class TraceStore:
         """Build the S3 key for the #33 page model under the investigation prefix."""
         return f"{cls.investigation_prefix(investigation_id, dt=dt)}page_model.json"
 
+    @classmethod
+    def _results_key(
+        cls, investigation_id: str, *, dt: str | None = None
+    ) -> str:
+        """S3 key for the full per-agent results map (#56 PIR recovery)."""
+        return f"{cls.investigation_prefix(investigation_id, dt=dt)}results.json"
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -440,6 +449,53 @@ class TraceStore:
                 "TraceStore.put_page_model failed (investigation_id=%s)",
                 investigation_id,
             )
+
+    def put_results(
+        self,
+        *,
+        investigation_id: str,
+        results: dict,
+        dt: str | None = None,
+    ) -> None:
+        """Archive the full per-agent results map as ``results.json``.
+
+        Enables the PIR flow (#56) to rebuild the incident report from the
+        original findings — events/manifest only keep summaries. Fail-open.
+        """
+        key = self._results_key(investigation_id, dt=dt)
+        try:
+            self._s3.put_object(
+                Bucket=self._bucket,
+                Key=key,
+                Body=json.dumps(
+                    results_to_dict(results), default=_json_default,
+                ).encode("utf-8"),
+                ContentType="application/json",
+            )
+        except Exception:
+            logger.exception(
+                "TraceStore.put_results failed (investigation_id=%s)",
+                investigation_id,
+            )
+
+    def get_results(
+        self, investigation_id: str, *, dt: str | None = None
+    ) -> dict | None:
+        """Read + rebuild the results map written by :meth:`put_results`.
+
+        Returns ``None`` on any miss/error (fail-open).
+        """
+        key = self._results_key(investigation_id, dt=dt)
+        try:
+            obj = self._s3.get_object(Bucket=self._bucket, Key=key)
+            payload = json.loads(obj["Body"].read())
+        except Exception:
+            logger.exception(
+                "TraceStore.get_results failed (investigation_id=%s)",
+                investigation_id,
+            )
+            return None
+        return results_from_dict(payload)
 
     def put_manifest(self, manifest: TraceManifest) -> None:
         """Write the manifest to S3 and index entry to DynamoDB.

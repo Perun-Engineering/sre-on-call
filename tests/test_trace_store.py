@@ -398,6 +398,40 @@ class TestPutPageModel:
         store.put_page_model(investigation_id="inv-9", payload={})  # must not raise
 
 
+def test_put_then_get_results_round_trips(aws_resources):
+    from shared.models import AgentResult, AgentFailure, AgentMetadata, Finding
+
+    s3, dynamodb = aws_resources
+    store = _make_store(s3, dynamodb)
+    results = {
+        "eks": AgentResult(
+            agent_name="eks", status="success",
+            findings=[Finding(source="pod", timestamp="t",
+                              content="CrashLoop", severity="critical")],
+            summary="bad", duration_seconds=1.0, metadata=AgentMetadata(),
+        ),
+        "slack_scanner": AgentFailure(
+            agent_name="slack_scanner", error_message="timeout",
+            timestamp="t", metadata=AgentMetadata(),
+        ),
+    }
+
+    store.put_results(
+        investigation_id="inv-1", results=results, dt="dt=2025-01-15",
+    )
+    restored = store.get_results("inv-1", dt="dt=2025-01-15")
+
+    assert isinstance(restored["eks"], AgentResult)
+    assert restored["eks"].findings[0].content == "CrashLoop"
+    assert isinstance(restored["slack_scanner"], AgentFailure)
+
+
+def test_get_results_missing_object_returns_none(aws_resources):
+    s3, dynamodb = aws_resources
+    store = _make_store(s3, dynamodb)
+    assert store.get_results("nope", dt="dt=2025-01-15") is None
+
+
 class TestConstructorInjection:
     def test_constructor_accepts_explicit_clients(self, aws_resources) -> None:
         s3, dynamodb = aws_resources
