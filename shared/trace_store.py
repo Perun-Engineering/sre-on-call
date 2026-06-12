@@ -497,6 +497,24 @@ class TraceStore:
             return None
         return results_from_dict(payload)
 
+    def get_manifest(
+        self, investigation_id: str, *, dt: str | None = None
+    ) -> dict | None:
+        """Read the manifest JSON for *investigation_id* (fail-open → None).
+
+        Used by the PIR flow (#56) to recover the original ``alert_context``.
+        """
+        key = self._manifest_key(investigation_id, dt=dt)
+        try:
+            obj = self._s3.get_object(Bucket=self._bucket, Key=key)
+            return json.loads(obj["Body"].read())
+        except Exception:
+            logger.exception(
+                "TraceStore.get_manifest failed (investigation_id=%s)",
+                investigation_id,
+            )
+            return None
+
     def put_manifest(self, manifest: TraceManifest) -> None:
         """Write the manifest to S3 and index entry to DynamoDB.
 

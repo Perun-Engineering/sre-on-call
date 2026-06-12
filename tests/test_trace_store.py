@@ -432,6 +432,36 @@ def test_get_results_missing_object_returns_none(aws_resources):
     assert store.get_results("nope", dt="dt=2025-01-15") is None
 
 
+def test_get_manifest_round_trips_alert_context(aws_resources):
+    from shared.trace_store import ResultSummary, TraceManifest
+
+    s3, dynamodb = aws_resources
+    store = _make_store(s3, dynamodb)
+    manifest = TraceManifest(
+        investigation_id="inv-7",
+        alert_context={"investigation_id": "inv-7", "platform": "slack",
+                       "channel_id": "C1", "message_id": "1700.1"},
+        started_at="2025-01-15T14:00:00Z",
+        ended_at="2025-01-15T14:01:00Z",
+        total_duration_seconds=60.0,
+        dispatched_agents=["eks"],
+        results_summary={"eks": ResultSummary("success", 1, 4.0)},
+        status="completed",
+        error_count=0,
+    )
+    store.put_manifest(manifest)
+
+    got = store.get_manifest("inv-7", dt="dt=2025-01-15")
+    assert got is not None
+    assert got["alert_context"]["message_id"] == "1700.1"
+
+
+def test_get_manifest_missing_returns_none(aws_resources):
+    s3, dynamodb = aws_resources
+    store = _make_store(s3, dynamodb)
+    assert store.get_manifest("absent", dt="dt=2025-01-15") is None
+
+
 class TestConstructorInjection:
     def test_constructor_accepts_explicit_clients(self, aws_resources) -> None:
         s3, dynamodb = aws_resources
