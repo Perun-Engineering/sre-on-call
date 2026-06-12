@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import Iterator
 from decimal import Decimal
@@ -13,6 +14,12 @@ from boto3.dynamodb.conditions import Attr
 from shared.experiment import ExperimentResult, Judgement
 
 DEFAULT_TABLE_NAME = "sre-on-call-experiment-results"
+
+# Env var letting a deployment point the store at a results table other than
+# the project default — used by the A/B scorecard (#29), where a control-arm
+# master deployed as a separate stack (its own ``project_name``) writes into the
+# treatment's results table so the judge can pair both variants.
+_TABLE_NAME_ENV = "EXPERIMENT_RESULTS_TABLE_NAME"
 
 # Experiment results expire after 30 days.
 _TTL_SECONDS = 30 * 86400
@@ -27,11 +34,12 @@ class ExperimentResultsStore:
 
     def __init__(
         self,
-        table_name: str = DEFAULT_TABLE_NAME,
+        table_name: str | None = None,
         dynamodb_resource: Any = None,
     ) -> None:
         resource: Any = dynamodb_resource or boto3.resource("dynamodb")
-        self._table = resource.Table(table_name)
+        resolved = table_name or os.environ.get(_TABLE_NAME_ENV) or DEFAULT_TABLE_NAME
+        self._table = resource.Table(resolved)
 
     def put_result(self, result: ExperimentResult) -> None:
         """Write an experiment result to DynamoDB."""

@@ -91,6 +91,23 @@ variable "embedding_model_id" {
 locals {
   agent_prefix = "${var.project_name}-${var.environment}"
 
+  # Results table the master writes A/B variant reports to. Defaults to this
+  # stack's own table; an A/B control arm overrides it to the treatment's
+  # shared table (#29) so both variants land in one table for the judge to pair.
+  experiment_results_table_name = (
+    var.experiment_results_table_name != ""
+    ? var.experiment_results_table_name
+    : aws_dynamodb_table.experiment_results.name
+  )
+  # ARN of that override table, for the master's PutItem grant (built from the
+  # name since an external table isn't a resource in this state). Empty when not
+  # overriding — compact() drops it from the policy.
+  experiment_results_override_arn = (
+    var.experiment_results_table_name != ""
+    ? "arn:aws:dynamodb:${var.aws_region}:${data.aws_caller_identity.current.account_id}:table/${var.experiment_results_table_name}"
+    : ""
+  )
+
   # Guardrail env injected into every runtime when enabled; empty map (no-op)
   # otherwise. shared.a2a_factory._resolve_model reads these to bind the model
   # to the guardrail — unset means no guardrail, preserving prior behaviour.
@@ -371,7 +388,12 @@ resource "aws_bedrockagentcore_agent_runtime" "master" {
       DISCORD_BOT_TOKEN  = aws_secretsmanager_secret.discord_bot_token.arn
       TRACES_BUCKET_NAME = aws_s3_bucket.traces.bucket
       TRACES_TABLE_NAME  = aws_dynamodb_table.traces.name
-      SYNTHESIS_ENABLED  = var.enable_analysis_synthesis ? "true" : "false"
+      # The master writes per-variant A/B results here. Normally its own,
+      # project-scoped table; an A/B control arm (#29) deployed under a separate
+      # project_name overrides this to the treatment's table via
+      # experiment_results_table_name so the judge can pair both variants.
+      EXPERIMENT_RESULTS_TABLE_NAME = local.experiment_results_table_name
+      SYNTHESIS_ENABLED             = var.enable_analysis_synthesis ? "true" : "false"
       # Issue #28 — pre-dispatch routing + Stage 2 follow-up round. Both are
       # independently fail-open in the orchestrator; these env vars only gate
       # whether the call site is attempted at all.

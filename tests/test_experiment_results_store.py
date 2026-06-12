@@ -42,6 +42,41 @@ def dynamodb_table():
         yield dynamodb
 
 
+class TestTableNameResolution:
+    """The results-table name resolves: explicit arg > env var > default.
+
+    A/B scorecard runs (#29) deploy a second master arm under a different
+    ``environment`` whose project-scoped results table is shared. The control
+    master points at the shared table via ``EXPERIMENT_RESULTS_TABLE_NAME``.
+    """
+
+    @pytest.fixture()
+    def shared_table(self):
+        with mock_aws():
+            dynamodb = boto3.resource("dynamodb", region_name="us-east-1")
+            dynamodb.create_table(
+                TableName="shared-results",
+                KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],
+                AttributeDefinitions=[{"AttributeName": "pk", "AttributeType": "S"}],
+                BillingMode="PAY_PER_REQUEST",
+            )
+            yield dynamodb
+
+    def test_env_var_selects_table_when_no_arg(self, shared_table, monkeypatch) -> None:
+        monkeypatch.setenv("EXPERIMENT_RESULTS_TABLE_NAME", "shared-results")
+        store = ExperimentResultsStore(dynamodb_resource=shared_table)
+        store.put_result(_make_result("a"))
+        assert store.get_results("exp-001", "inv-001")[0].variant_id == "a"
+
+    def test_explicit_arg_overrides_env_var(self, shared_table, monkeypatch) -> None:
+        monkeypatch.setenv("EXPERIMENT_RESULTS_TABLE_NAME", "ignored-name")
+        store = ExperimentResultsStore(
+            table_name="shared-results", dynamodb_resource=shared_table
+        )
+        store.put_result(_make_result("b"))
+        assert store.get_results("exp-001", "inv-001")[0].variant_id == "b"
+
+
 class TestExperimentResultsStore:
     def test_put_and_get_single_result(self, dynamodb_table) -> None:
         store = ExperimentResultsStore(dynamodb_resource=dynamodb_table)

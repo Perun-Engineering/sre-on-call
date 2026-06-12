@@ -54,6 +54,10 @@ module "sre_on_call" {
   enable_bedrock_guardrail  = var.enable_bedrock_guardrail
   alarm_email_subscriptions = var.alarm_email_subscriptions
 
+  # A/B control-arm seams (#29) — empty for normal deploys.
+  experiment_results_table_name  = var.experiment_results_table_name
+  additional_master_runtime_arns = var.additional_master_runtime_arns
+
   # Build the Lambda zip/layer and read agent composition from the repo root.
   source_root = "${path.root}/../.."
   config_path = "${path.root}/../../config.yaml"
