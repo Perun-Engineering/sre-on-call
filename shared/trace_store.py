@@ -229,6 +229,14 @@ class TraceManifest:
 # ---------------------------------------------------------------------------
 
 
+@dataclass
+class InvestigationRef:
+    """A resolved pointer from a thread to its investigation (#56)."""
+
+    investigation_id: str
+    dt: str  # the ``dt=YYYY-MM-DD`` S3 partition the objects live under
+
+
 class TraceStore:
     """Append-only S3 trace archive with a DynamoDB lookup index.
 
@@ -497,6 +505,48 @@ class TraceStore:
             return None
         return results_from_dict(payload)
 
+    THREAD_INDEX_NAME = "channel_id-message_id-index"
+
+    def find_investigation(
+        self, channel_id: str, thread_ts: str
+    ) -> InvestigationRef | None:
+        """Resolve a chat thread to its originating investigation (#56).
+
+        Queries the channel_id+message_id GSI (the alert message is the
+        thread root, so ``thread_ts == alert_context.message_id``). On
+        multiple hits — a re-alert in the same thread — returns the newest
+        by ``started_at``. Fail-open → ``None``.
+        """
+        from boto3.dynamodb.conditions import Key
+
+        try:
+            resp = self._table.query(
+                IndexName=self.THREAD_INDEX_NAME,
+                KeyConditionExpression=(
+                    Key("channel_id").eq(str(channel_id))
+                    & Key("message_id").eq(str(thread_ts))
+                ),
+            )
+            items = resp.get("Items", [])
+        except Exception:
+            logger.exception(
+                "TraceStore.find_investigation query failed "
+                "(channel_id=%s, thread_ts=%s)",
+                channel_id, thread_ts,
+            )
+            return None
+
+        if not items:
+            return None
+        newest = max(items, key=lambda i: str(i.get("started_at", "")))
+        pk = newest.get("pk")
+        dt = newest.get("dt")
+        if not pk or not dt:
+            return None
+        return InvestigationRef(
+            investigation_id=str(pk), dt=f"dt={dt}",
+        )
+
     def get_manifest(
         self, investigation_id: str, *, dt: str | None = None
     ) -> dict | None:
@@ -594,6 +644,7 @@ def _index_item(manifest: TraceManifest, *, s3_prefix: str) -> dict:
         "dt": s3_prefix.split("/", 1)[0].split("=", 1)[1],
         "s3_prefix": s3_prefix,
         "channel_id": str(ctx.get("channel_id", "")),
+        "message_id": str(ctx.get("message_id", "")),
         "platform": str(ctx.get("platform", "")),
         "alert_timestamp": str(ctx.get("alert_timestamp", "")),
         "started_at": manifest.started_at,
