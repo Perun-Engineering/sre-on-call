@@ -61,6 +61,10 @@ class PageModel:
     analysis: dict | None  # AnalysisSection fields, or None
     evidence: list[PageEvidenceBlock] = field(default_factory=list)
     chart_ids: list[str] = field(default_factory=list)
+    # Ordered incident timeline (#34): a list of TimelineEvent json dicts, or
+    # None when no timeline was built. The renderer draws it as a scrubbable
+    # strip whose events focus the linked chart window on click.
+    timeline: list[dict] | None = None
 
     def to_json_dict(self) -> dict:
         return {
@@ -77,4 +81,5 @@ class PageModel:
             "analysis": self.analysis,
             "evidence": [b.to_json_dict() for b in self.evidence],
             "chart_ids": list(self.chart_ids),
+            "timeline": self.timeline,
         }
