@@ -129,6 +129,11 @@ resource "aws_dynamodb_table" "traces" {
     type = "S"
   }
 
+  attribute {
+    name = "message_id"
+    type = "S"
+  }
+
   global_secondary_index {
     name            = "channel_id-alert_timestamp-index"
     projection_type = "ALL"
@@ -139,6 +144,20 @@ resource "aws_dynamodb_table" "traces" {
     }
     key_schema {
       attribute_name = "alert_timestamp"
+      key_type       = "RANGE"
+    }
+  }
+
+  global_secondary_index {
+    name            = "channel_id-message_id-index"
+    projection_type = "ALL"
+
+    key_schema {
+      attribute_name = "channel_id"
+      key_type       = "HASH"
+    }
+    key_schema {
+      attribute_name = "message_id"
       key_type       = "RANGE"
     }
   }
@@ -204,16 +223,20 @@ resource "aws_iam_role_policy" "master_agent_traces" {
       {
         Sid      = "PutTraceEventsMaster"
         Effect   = "Allow"
-        Action   = ["s3:PutObject"]
+        Action   = ["s3:PutObject", "s3:GetObject"]
         Resource = "${aws_s3_bucket.traces.arn}/*"
       },
       {
-        Sid    = "PutTraceIndex"
+        Sid    = "PutAndQueryTraceIndex"
         Effect = "Allow"
         Action = [
           "dynamodb:PutItem",
+          "dynamodb:Query",
         ]
-        Resource = aws_dynamodb_table.traces.arn
+        Resource = [
+          aws_dynamodb_table.traces.arn,
+          "${aws_dynamodb_table.traces.arn}/index/*",
+        ]
       },
       {
         Sid    = "TraceArchiveKMS"
