@@ -98,7 +98,8 @@ def _env(monkeypatch):
 
 
 def _create_dedup_table():
-    ddb = boto3.resource("dynamodb", region_name="us-east-1")
+    from typing import Any
+    ddb: Any = boto3.resource("dynamodb", region_name="us-east-1")
     ddb.create_table(
         TableName=DEDUP_TABLE,
         KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],
@@ -185,6 +186,7 @@ class TestHappyPath:
         assert len(dispatch.tasks) == 1
         task = dispatch.tasks[0]
         assert task.kind == "investigate"
+        assert task.alert_context is not None
         assert task.alert_context.channel_id == "C12345"
         assert task.master_arn is None  # default ARN resolved by the adapter
 
@@ -215,7 +217,8 @@ def _create_traces_resources():
     s3 = boto3.client("s3", region_name="us-east-1")
     s3.create_bucket(Bucket=TRACES_BUCKET)
 
-    ddb = boto3.resource("dynamodb", region_name="us-east-1")
+    from typing import Any
+    ddb: Any = boto3.resource("dynamodb", region_name="us-east-1")
     ddb.create_table(
         TableName=TRACES_TABLE,
         KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],

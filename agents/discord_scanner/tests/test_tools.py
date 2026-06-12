@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 import boto3
 import pytest
 from moto import mock_aws
+from typing import Any
 
 from shared.platforms.discord import verify_discord_signature
 from shared.platforms.discord import parse_alert_context as discord_parse
@@ -184,7 +185,7 @@ class TestDiscordHandler:
 
     @mock_aws
     def test_valid_event_invokes_agent(self):
-        ddb = boto3.resource("dynamodb", region_name="us-east-1")
+        ddb: Any = boto3.resource("dynamodb", region_name="us-east-1")
         ddb.create_table(
             TableName=DEDUP_TABLE,
             KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],
@@ -282,7 +283,7 @@ def _stub_client(
     self_body: dict | None = None,
     self_exception: Exception | None = None,
     guilds_status: int = 200,
-    guilds_body: list | None = None,
+    guilds_body: list | dict | None = None,
     guilds_exception: Exception | None = None,
 ) -> MagicMock:
     """Build a mock DiscordRESTClient with controllable per-method responses."""

@@ -274,13 +274,22 @@ async def test_executor_appends_structured_tool_result_footer():
     ]
     executor = TelemetryCapturingA2AExecutor(agent=agent)
 
-    class FakeMetrics:
-        accumulated_usage = {}
+    from strands.agent.agent_result import AgentResult as StrandsAgentResult
+    from strands.telemetry.metrics import EventLoopMetrics
 
-    class FakeResult:
+    class FakeMetrics(EventLoopMetrics):
         def __init__(self) -> None:
-            self.message = {"content": [{"text": "Concise final analysis."}]}
-            self.metrics = FakeMetrics()
+            super().__init__()
+            self.accumulated_usage = {}  # type: ignore[assignment]
+
+    class FakeResult(StrandsAgentResult):
+        def __init__(self) -> None:
+            super().__init__(
+                stop_reason="end_turn",
+                message={"role": "assistant", "content": [{"text": "Concise final analysis."}]},
+                metrics=FakeMetrics(),
+                state=None,
+            )
 
         def __str__(self) -> str:
             return "\n".join(
@@ -341,13 +350,22 @@ async def test_executor_emits_structured_datapart_artifact():
     model_id = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
     executor = TelemetryCapturingA2AExecutor(agent=agent, model_id=model_id)
 
-    class FakeMetrics:
-        accumulated_usage = {"inputTokens": 100, "outputTokens": 50, "totalTokens": 150}
+    from strands.agent.agent_result import AgentResult as StrandsAgentResult
+    from strands.telemetry.metrics import EventLoopMetrics
 
-    class FakeResult:
+    class FakeMetrics(EventLoopMetrics):
         def __init__(self) -> None:
-            self.message = {"content": [{"text": "Concise final analysis."}]}
-            self.metrics = FakeMetrics()
+            super().__init__()
+            self.accumulated_usage = {"inputTokens": 100, "outputTokens": 50, "totalTokens": 150}  # type: ignore[assignment]
+
+    class FakeResult(StrandsAgentResult):
+        def __init__(self) -> None:
+            super().__init__(
+                stop_reason="end_turn",
+                message={"role": "assistant", "content": [{"text": "Concise final analysis."}]},
+                metrics=FakeMetrics(),
+                state=None,
+            )
 
         def __str__(self) -> str:
             return "\n".join(

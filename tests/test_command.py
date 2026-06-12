@@ -269,6 +269,7 @@ class TestCommandRouting:
 
         task = dispatch.tasks[0]
         assert task.kind == "postmortem"
+        assert task.command is not None
         assert task.command.channel_id == "C12345"
         assert task.command.thread_ts == "1700000000.000100"
 
@@ -353,12 +354,15 @@ class TestStatusCommandRouting:
 
         task = dispatch.tasks[0]
         assert task.kind == "status"
+        assert task.command is not None
         assert task.command.platform == "slack"
         assert task.command.channel_id == "C99999"
         assert task.command.user_id == "U22222"
         # requested_at is an ISO 8601 instant; the snapshot-{channel}-{at}
         # session-id convention is verified in test_master_dispatch.
-        assert "T" in task.requested_at
+        requested_at = task.requested_at
+        assert requested_at is not None
+        assert "T" in requested_at
 
     def test_status_dispatches_status_not_postmortem(self):
         """/sre-snapshot must dispatch a status task, even if a thread_ts is present

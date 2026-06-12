@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 import boto3
 import pytest
 from moto import mock_aws
+from typing import Any
 
 from shared.trace_store import (
     EVENT_A2A_REQUEST,
@@ -34,7 +35,7 @@ def aws_resources():
         s3 = boto3.client("s3", region_name="us-east-1")
         s3.create_bucket(Bucket=BUCKET)
 
-        dynamodb = boto3.resource("dynamodb", region_name="us-east-1")
+        dynamodb: Any = boto3.resource("dynamodb", region_name="us-east-1")
         dynamodb.create_table(
             TableName=TABLE,
             KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],
@@ -65,8 +66,8 @@ def _make_store(s3, dynamodb) -> TraceStore:
     )
 
 
-def _make_manifest(**overrides) -> TraceManifest:
-    base = dict(
+def _make_manifest(**overrides: Any) -> TraceManifest:
+    kwargs: dict[str, Any] = dict(
         investigation_id="inv-001",
         alert_context={
             "investigation_id": "inv-001",
@@ -88,8 +89,8 @@ def _make_manifest(**overrides) -> TraceManifest:
         status="completed",
         error_count=1,
     )
-    base.update(overrides)
-    return TraceManifest(**base)
+    kwargs.update(overrides)
+    return TraceManifest(**kwargs)
 
 
 class TestManifestRouting:
@@ -446,6 +447,7 @@ def test_put_then_get_results_round_trips(aws_resources):
         investigation_id="inv-1", results=results, dt="dt=2025-01-15",
     )
     restored = store.get_results("inv-1", dt="dt=2025-01-15")
+    assert restored is not None
 
     assert isinstance(restored["eks"], AgentResult)
     assert restored["eks"].findings[0].content == "CrashLoop"
@@ -494,7 +496,7 @@ def aws_resources_with_thread_gsi():
     with mock_aws():
         s3 = boto3.client("s3", region_name="us-east-1")
         s3.create_bucket(Bucket=BUCKET)
-        dynamodb = boto3.resource("dynamodb", region_name="us-east-1")
+        dynamodb: Any = boto3.resource("dynamodb", region_name="us-east-1")
         dynamodb.create_table(
             TableName=TABLE,
             KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],
@@ -557,6 +559,7 @@ def test_find_investigation_picks_newest_on_collision(
                       message_id="1700.1", started_at="2025-01-16T10:00:00Z")
 
     ref = store.find_investigation("C1", "1700.1")
+    assert ref is not None
     assert ref.investigation_id == "new"
 
 

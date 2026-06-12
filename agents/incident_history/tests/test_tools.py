@@ -8,7 +8,7 @@ from agents.incident_history.tools import (
     _find_similar,
 )
 from shared.agent_footer import AgentFooter
-from shared.incident_history_store import SimilarIncident
+from shared.incident_history_store import IncidentHistoryStore, SimilarIncident
 from shared.tool_result import AGENT_RESULT, SNAPSHOT_RESULT
 
 
@@ -20,17 +20,18 @@ class _FakeEmbedder:
         return self._vector
 
 
-class _FakeStore:
-    def __init__(self, hits=None, count=0):
+class _FakeStore(IncidentHistoryStore):
+    def __init__(self, hits=None, count: int | None = 0):
+        # Skip the real __init__ (requires DynamoDB); set internal state directly.
         self._hits = hits or []
         self._count = count
-        self.search_calls = []
+        self.search_calls: list = []
 
     def search_similar(self, embedding, *, top_k=3, min_score=0.5, exclude_investigation_id=None):
         self.search_calls.append((embedding, top_k, min_score))
         return self._hits
 
-    def count_recent(self, *, days=30):
+    def count_recent(self, *, days=30) -> int | None:
         return self._count
 
 

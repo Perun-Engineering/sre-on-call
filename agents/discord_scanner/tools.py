@@ -7,6 +7,7 @@ import logging
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+from typing import Any
 
 from strands import tool
 
@@ -128,7 +129,7 @@ class DiscordRESTClient:
         """``GET /users/@me/guilds`` — list of guilds the bot belongs to."""
         return self._get("/users/@me/guilds")
 
-    def _get(self, path: str) -> tuple[int, object]:
+    def _get(self, path: str) -> tuple[int, Any]:
         req = urllib.request.Request(
             self.BASE_URL + path,
             headers={

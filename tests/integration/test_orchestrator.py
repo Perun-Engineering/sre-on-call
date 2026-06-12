@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import boto3
 import pytest
@@ -150,6 +151,9 @@ class FakeChatPlatform:
         raise NotImplementedError
 
     def ack(self, command, text):  # not exercised in orchestrator tests
+        raise NotImplementedError
+
+    def notice(self, target, text):  # not exercised in orchestrator tests
         raise NotImplementedError
 
     async def deliver(self, target, payload) -> str:
@@ -566,7 +570,10 @@ class TestOrchestratorErrorHandling:
             def ack(self, command, text):
                 raise NotImplementedError
 
-            async def deliver(self, alert_context, payload):
+            def notice(self, target, text):
+                raise NotImplementedError
+
+            async def deliver(self, target, payload):
                 raise RuntimeError("Slack API error")
 
         orch = _make_orchestrator(
@@ -968,7 +975,7 @@ def _make_trace_resources():
     s3 = boto3.client("s3", region_name="us-east-1")
     s3.create_bucket(Bucket=_TRACE_BUCKET)
 
-    ddb = boto3.resource("dynamodb", region_name="us-east-1")
+    ddb: Any = boto3.resource("dynamodb", region_name="us-east-1")
     ddb.create_table(
         TableName=_TRACE_TABLE,
         KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],
@@ -1114,7 +1121,7 @@ class _FakeSynthesizer:
 
     timeout_seconds = 0.0  # no budget reservation in fast tests
 
-    def __init__(self, *, returns="default"):
+    def __init__(self, *, returns: Any = "default"):
         from agents.master.synthesis import IncidentAnalysis
 
         if returns == "default":
@@ -1273,10 +1280,11 @@ from agents.master.synthesis import AnalysisSynthesizer
 from shared.trace_store import EVENT_FOLLOWUP_DECISION, EVENT_ROUTING_DECISION
 
 
-class _FakeRouter:
+class _FakeRouter(AgentRouter):
     """Injectable router returning a fixed RoutingResult (or None=fail-open)."""
 
     def __init__(self, result):
+        super().__init__()
         self._result = result
         self.calls: list[list[str]] = []
 
@@ -1481,7 +1489,8 @@ class TestFollowupRound:
         assert elapsed < 2.3, f"investigation overran the cutoff: {elapsed:.2f}s"
         # The follow-up genuinely dispatched eks (otherwise the test is vacuous).
         assert any(u == EKS_URL for u, _ in http_client.calls)
-        assert _find_report_msg(chat.messages)
+        # Raises AssertionError if no Incident Report was posted.
+        _find_report_msg(chat.messages)
 
     @pytest.mark.asyncio
     async def test_no_followup_when_disabled(self, alert_context):

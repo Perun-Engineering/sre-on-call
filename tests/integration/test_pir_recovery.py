@@ -6,6 +6,7 @@ import asyncio
 
 import boto3
 from moto import mock_aws
+from typing import Any
 
 from agents.master import tools
 from shared.models import AgentResult, AgentMetadata, Finding
@@ -42,7 +43,7 @@ async def test_postmortem_recovers_and_posts(monkeypatch):
     with mock_aws():
         s3 = boto3.client("s3", region_name="us-east-1")
         s3.create_bucket(Bucket=BUCKET)
-        ddb = boto3.resource("dynamodb", region_name="us-east-1")
+        ddb: Any = boto3.resource("dynamodb", region_name="us-east-1")
         ddb.create_table(
             TableName=TABLE,
             KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],

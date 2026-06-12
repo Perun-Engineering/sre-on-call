@@ -29,10 +29,12 @@ class DeduplicationStore:
         table_name: str = DEFAULT_TABLE_NAME,
         dynamodb_resource: Any = None,
     ) -> None:
-        if dynamodb_resource is not None:
-            self._table = dynamodb_resource.Table(table_name)
-        else:
-            self._table = boto3.resource("dynamodb").Table(table_name)
+        resource: Any = (
+            dynamodb_resource
+            if dynamodb_resource is not None
+            else boto3.resource("dynamodb")
+        )
+        self._table = resource.Table(table_name)
 
     # ------------------------------------------------------------------
     # Public API

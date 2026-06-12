@@ -178,15 +178,31 @@ class TestDiscordParenLinks:
 # ---------------------------------------------------------------------------
 
 
-def _minimal_sections(**overrides) -> ReportSections:
-    base = dict(
-        severity="🔴 Critical", affected_services="rds",
-        time_of_detection="t", summary="s", root_cause="rc",
-        evidence_blocks=[], impact_assessment="i",
-        recommended_actions="a", links=[],
+def _minimal_sections(
+    *,
+    severity: str = "🔴 Critical",
+    affected_services: str = "rds",
+    time_of_detection: str = "t",
+    summary: str = "s",
+    root_cause: str = "rc",
+    evidence_blocks: list = [],
+    impact_assessment: str = "i",
+    recommended_actions: str = "a",
+    links: list = [],
+    **extra,
+) -> ReportSections:
+    return ReportSections(
+        severity=severity,
+        affected_services=affected_services,
+        time_of_detection=time_of_detection,
+        summary=summary,
+        root_cause=root_cause,
+        evidence_blocks=evidence_blocks,
+        impact_assessment=impact_assessment,
+        recommended_actions=recommended_actions,
+        links=links,
+        **extra,
     )
-    base.update(overrides)
-    return ReportSections(**base)
 
 
 def test_slack_renders_interactive_page_link_when_set():

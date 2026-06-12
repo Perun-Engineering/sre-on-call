@@ -33,6 +33,7 @@ from shared.platforms.slack import SlackChatPlatform
 from shared.report_renderer import (
     EnrichmentSections,
     InvestigationStartedSections,
+    MarkupReportRenderer,
     PIRSections,
     ReportSections,
     SlackReportRenderer,
@@ -250,7 +251,7 @@ class TestRenderDispatch:
     """MarkupReportRenderer.render owns the section→method dispatch — the
     single home the ChatPlatform adapters and test fakes all route through."""
 
-    def _renderer_with_mocked_methods(self) -> SlackReportRenderer:
+    def _renderer_with_mocked_methods(self) -> MarkupReportRenderer:
         r = SlackReportRenderer()
         r.render_report = MagicMock(return_value="REPORT")  # type: ignore[method-assign]
         r.render_enrichment = MagicMock(return_value="ENRICH")  # type: ignore[method-assign]
@@ -283,8 +284,8 @@ class TestRenderDispatch:
         assert r.render(started) == "STARTED"
         assert r.render(pir) == "PIR"
         assert r.render(snapshot) == "SNAPSHOT"
-        r.render_report.assert_called_once_with(report)
-        r.render_snapshot.assert_called_once_with(snapshot)
+        r.render_report.assert_called_once_with(report)  # type: ignore[attr-defined]
+        r.render_snapshot.assert_called_once_with(snapshot)  # type: ignore[attr-defined]
 
     def test_unknown_payload_is_unreachable(self) -> None:
         with pytest.raises(AssertionError):

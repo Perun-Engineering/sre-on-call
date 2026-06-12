@@ -6,6 +6,7 @@ import uuid
 
 import boto3
 from hypothesis import given, settings
+from typing import Any
 from hypothesis import strategies as st
 from moto import mock_aws
 
@@ -14,7 +15,7 @@ from lambda_adapter.dedup import DEFAULT_TABLE_NAME, DeduplicationStore
 
 def _create_dedup_table():
     """Create a mocked DynamoDB table and return the resource."""
-    dynamodb = boto3.resource("dynamodb", region_name="us-east-1")
+    dynamodb: Any = boto3.resource("dynamodb", region_name="us-east-1")
     dynamodb.create_table(
         TableName=DEFAULT_TABLE_NAME,
         KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],

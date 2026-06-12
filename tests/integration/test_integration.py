@@ -99,7 +99,8 @@ def _slack_event_payload(
 
 def _create_dedup_table() -> None:
     """Create the DynamoDB dedup table inside an active moto context."""
-    ddb = boto3.resource("dynamodb", region_name="us-east-1")
+    from typing import Any
+    ddb: Any = boto3.resource("dynamodb", region_name="us-east-1")
     ddb.create_table(
         TableName=DEDUP_TABLE,
         KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],
@@ -165,6 +166,9 @@ class FakeChatPlatform:
         raise NotImplementedError
 
     def ack(self, command, text):
+        raise NotImplementedError
+
+    def notice(self, target, text) -> None:
         raise NotImplementedError
 
     async def deliver(self, target, payload) -> str:
@@ -297,7 +301,8 @@ class TestLambdaEndToEnd:
         assert body.get("ok") is True
 
         # DynamoDB dedup record written
-        ddb = boto3.resource("dynamodb", region_name="us-east-1")
+        from typing import Any
+        ddb: Any = boto3.resource("dynamodb", region_name="us-east-1")
         table = ddb.Table(DEDUP_TABLE)
         resp = table.get_item(Key={"pk": "slack#C_INTEG_001#1700000000.000200"})
         item = resp["Item"]  # type: ignore[typeddict-item]
@@ -321,7 +326,8 @@ class TestLambdaEndToEnd:
         assert result["statusCode"] == 401
 
         # No DynamoDB record
-        ddb = boto3.resource("dynamodb", region_name="us-east-1")
+        from typing import Any
+        ddb: Any = boto3.resource("dynamodb", region_name="us-east-1")
         table = ddb.Table(DEDUP_TABLE)
         resp = table.scan()
         assert resp["Count"] == 0
@@ -366,6 +372,7 @@ class TestLambdaEndToEnd:
         process_webhook(event, detect_platform(event["headers"]), dispatch)
 
         ctx = dispatch.tasks[0].alert_context
+        assert ctx is not None
         assert ctx.channel_id == "C_CTX_TEST"
         assert ctx.message_id == "1700000001.000300"
         assert ctx.alert_text == "ALERT: disk full on db-primary"
@@ -574,6 +581,9 @@ class TestSlackThreadReply:
                 raise NotImplementedError
 
             def ack(self, command, text):
+                raise NotImplementedError
+
+            def notice(self, target, text) -> None:
                 raise NotImplementedError
 
             async def deliver(self, target, payload):

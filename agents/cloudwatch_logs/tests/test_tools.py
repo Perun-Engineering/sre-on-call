@@ -598,7 +598,7 @@ NOW = datetime(2026, 5, 28, 19, 0, 0, tzinfo=timezone.utc)
 
 
 def _describe_response(group_names: list[str], next_token: str | None = None) -> dict:
-    response = {"logGroups": [{"logGroupName": n} for n in group_names]}
+    response: dict[str, list[dict[str, str]] | str] = {"logGroups": [{"logGroupName": n} for n in group_names]}
     if next_token:
         response["nextToken"] = next_token
     return response
