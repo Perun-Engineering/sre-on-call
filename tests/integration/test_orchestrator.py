@@ -378,6 +378,23 @@ class TestOrchestratorFanOut:
             assert "params" in payload
             assert payload["params"]["message"]["role"] == "user"
 
+    @pytest.mark.asyncio
+    async def test_dispatch_injects_specialist_deadline(self, alert_context):
+        """Each dispatched agent's payload carries a positive deadline_seconds (issue #58)."""
+        import json
+
+        http_client = FakeHTTPClient()
+        orch = _make_orchestrator(http_client=http_client, initial_deadline=30.0)
+
+        await orch.investigate(alert_context)
+
+        assert http_client.calls
+        for _, payload in http_client.calls:
+            text = payload["params"]["message"]["parts"][0]["text"]
+            sent = json.loads(text)
+            assert sent["deadline_seconds"] is not None
+            assert 0 < sent["deadline_seconds"] <= 30.0
+
 
 class TestOrchestratorDeadlines:
     """Test deadline management."""

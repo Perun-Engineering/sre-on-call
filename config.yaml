@@ -31,6 +31,11 @@ agents:
 
   cloudwatch_logs:
     enabled: true
+    # Bounded iterative investigator (issue #58): a Sonnet-class model runs a
+    # short drill-down loop (query from hints → refine once on suspicious
+    # results), hard-capped at 4 tool-use cycles and the master's deadline.
+    model_id: us.anthropic.claude-sonnet-4-6
+    max_tool_cycles: 4
     skills:
       - query_cloudwatch_logs
       - capture_snapshot
@@ -43,6 +48,10 @@ agents:
   eks:
     enabled: true
     network_mode: VPC
+    # Bounded iterative investigator (issue #58): Sonnet drills state → crashloop
+    # → that pod's logs + events, hard-capped at 4 tool-use cycles + deadline.
+    model_id: us.anthropic.claude-sonnet-4-6
+    max_tool_cycles: 4
     skills:
       - gather_eks_state
       - capture_snapshot

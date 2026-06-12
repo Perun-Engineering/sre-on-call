@@ -46,6 +46,25 @@ def test_agent_model_id_accepted_when_set():
     assert cfg.agents["master"].model_id == "us.anthropic.claude-sonnet-4-6"
 
 
+def test_max_tool_cycles_defaults_to_none():
+    cfg = ProjectConfig(**_base())
+    assert cfg.agents["eks"].max_tool_cycles is None
+
+
+def test_max_tool_cycles_accepted_when_positive():
+    data = _base()
+    data["agents"]["eks"]["max_tool_cycles"] = 4
+    cfg = ProjectConfig(**data)
+    assert cfg.agents["eks"].max_tool_cycles == 4
+
+
+def test_max_tool_cycles_rejects_non_positive():
+    data = _base()
+    data["agents"]["eks"]["max_tool_cycles"] = 0
+    with pytest.raises(Exception, match="max_tool_cycles must be >= 1"):
+        ProjectConfig(**data)
+
+
 def test_unknown_agent_name_rejected():
     data = _base()
     data["agents"]["typo"] = {"skills": [], "mcps": []}

@@ -5,7 +5,7 @@ tool: agents.cloudwatch_logs.tools:query_cloudwatch_logs
 ---
 # When to use
 
-Call this skill once per investigation. Derive log group names from the `AlertContext` (service, application identifier, environment prefix) before calling.
+Derive log group names from the `AlertContext` (service, application identifier, environment prefix), then run an initial query. If the results look suspicious — an error spike, an unexpected pattern, a gap — drill in with a focused follow-up call (a tighter window around the spike, an added filter, or a `stats … by bin()` to quantify it) rather than reporting the first pass as-is. Stop once you can explain the alert or your budget is spent.
 
 # Inputs
 

@@ -45,6 +45,13 @@ class AlertContext:
     # time-window emphasis) injected just before dispatch. None for the
     # unrouted/today's path; carried verbatim on the A2A payload.
     investigation_hints: str | None = None
+    # Wall-clock budget (seconds) the master grants the specialist for this
+    # invocation (issue #58). Iterative agents (eks, cloudwatch_logs) read it
+    # to stop starting new tool-use passes once the budget minus an emit
+    # reserve is spent — returning what they have rather than risking a
+    # mid-pass cancel at the master's harvest. ``None`` for single-pass agents
+    # and today's unbudgeted path.
+    deadline_seconds: float | None = None
 
 
 @dataclass
