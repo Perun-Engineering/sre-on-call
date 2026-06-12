@@ -49,6 +49,7 @@ from shared.trace_store import (
     ResultSummary,
     TraceManifest,
     TraceStore,
+    _dt_partition_from_iso,
 )
 from agents.master.followup import FollowupCandidate, FollowupPlanner
 from agents.master.report_formatter import ReportFormatter
@@ -487,6 +488,12 @@ class InvestigationOrchestrator:
             started_at_iso=started_at_iso,
             start_time=start_time,
             routing=routing.manifest_record,
+        )
+
+        self._persist_results(
+            alert_context=alert_context,
+            results=results,
+            started_at_iso=started_at_iso,
         )
 
         # Snapshot the series behind chart-carrying findings (#32). Same
@@ -962,6 +969,27 @@ class InvestigationOrchestrator:
                     chart_id=chart_id,
                     payload=payload,
                 )
+
+    def _persist_results(
+        self,
+        *,
+        alert_context: AlertContext,
+        results: dict[str, AgentResult | AgentFailure],
+        started_at_iso: str,
+    ) -> None:
+        """Archive the full results map so /postmortem can rebuild the PIR (#56).
+
+        Fail-open: ``self._trace_store`` may be ``None`` (tracing disabled).
+        The ``dt`` partition is derived from ``started_at`` so results.json
+        lands in the same prefix as the manifest written this run.
+        """
+        if self._trace_store is None:
+            return
+        self._trace_store.put_results(
+            investigation_id=alert_context.investigation_id,
+            results=results,
+            dt=_dt_partition_from_iso(started_at_iso),
+        )
 
     def _write_page_model(
         self,

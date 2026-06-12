@@ -9,10 +9,11 @@ at the bottom of this module — :data:`AGENT_RESULT` and :data:`SNAPSHOT_RESULT
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 from shared.agent_footer import AgentFooter, neutralize_markers
 from shared.models import (
+    AgentFailure,
     AgentMetadata,
     AgentResult,
     ChartDescriptor,
@@ -178,6 +179,21 @@ def _agent_result_from_dict(payload: dict) -> AgentResult:
     )
 
 
+def _agent_failure_from_dict(payload: dict) -> AgentFailure:
+    metadata_payload = payload.get("metadata")
+    metadata = (
+        _metadata_from_dict(metadata_payload)
+        if isinstance(metadata_payload, dict)
+        else AgentMetadata()
+    )
+    return AgentFailure(
+        agent_name=str(payload["agent_name"]),
+        error_message=str(payload["error_message"]),
+        timestamp=str(payload.get("timestamp", "")),
+        metadata=metadata,
+    )
+
+
 def _finding_from_dict(payload: dict) -> Finding:
     metadata = payload.get("metadata")
     link = payload.get("link")
@@ -282,3 +298,40 @@ AGENT_RESULT: AgentFooter[AgentResult] = AgentFooter(
 SNAPSHOT_RESULT: AgentFooter[SnapshotReport] = AgentFooter(
     "SNAPSHOT_RESULT", parse=_snapshot_report_from_dict,
 )
+
+
+def results_to_dict(
+    results: dict[str, "AgentResult | AgentFailure"],
+) -> dict[str, dict]:
+    """Serialize the orchestrator's results map for the trace archive.
+
+    Each entry is tagged with ``_kind`` so the reader can reconstruct the
+    right dataclass without shape-sniffing.
+    """
+    out: dict[str, dict] = {}
+    for agent_id, obj in results.items():
+        kind = "failure" if isinstance(obj, AgentFailure) else "result"
+        out[str(agent_id)] = {"_kind": kind, **asdict(obj)}
+    return out
+
+
+def results_from_dict(
+    payload: dict,
+) -> dict[str, "AgentResult | AgentFailure"]:
+    """Reconstruct the results map written by :func:`results_to_dict`.
+
+    Unparseable entries are skipped (fail-open archive contract).
+    """
+    out: dict[str, AgentResult | AgentFailure] = {}
+    for agent_id, entry in payload.items():
+        if not isinstance(entry, dict):
+            continue
+        body = {k: v for k, v in entry.items() if k != "_kind"}
+        try:
+            if entry.get("_kind") == "failure":
+                out[str(agent_id)] = _agent_failure_from_dict(body)
+            else:
+                out[str(agent_id)] = _agent_result_from_dict(body)
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out

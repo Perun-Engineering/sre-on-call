@@ -265,6 +265,7 @@ class TestPutManifest:
         assert item["dt"] == "2026-05-28"
         assert item["s3_prefix"] == "dt=2026-05-28/investigation_id=inv-001/"
         assert item["channel_id"] == "C12345"
+        assert item["message_id"] == "1700000000.000100"
         assert item["platform"] == "slack"
         assert item["agent_count"] == 3
         assert item["error_count"] == 1
@@ -396,6 +397,150 @@ class TestPutPageModel:
         store = TraceStore(bucket=BUCKET, table_name=TABLE,
                            s3_client=bad_s3, dynamodb_resource=MagicMock())
         store.put_page_model(investigation_id="inv-9", payload={})  # must not raise
+
+
+def test_put_then_get_results_round_trips(aws_resources):
+    from shared.models import AgentResult, AgentFailure, AgentMetadata, Finding
+
+    s3, dynamodb = aws_resources
+    store = _make_store(s3, dynamodb)
+    results = {
+        "eks": AgentResult(
+            agent_name="eks", status="success",
+            findings=[Finding(source="pod", timestamp="t",
+                              content="CrashLoop", severity="critical")],
+            summary="bad", duration_seconds=1.0, metadata=AgentMetadata(),
+        ),
+        "slack_scanner": AgentFailure(
+            agent_name="slack_scanner", error_message="timeout",
+            timestamp="t", metadata=AgentMetadata(),
+        ),
+    }
+
+    store.put_results(
+        investigation_id="inv-1", results=results, dt="dt=2025-01-15",
+    )
+    restored = store.get_results("inv-1", dt="dt=2025-01-15")
+
+    assert isinstance(restored["eks"], AgentResult)
+    assert restored["eks"].findings[0].content == "CrashLoop"
+    assert isinstance(restored["slack_scanner"], AgentFailure)
+
+
+def test_get_results_missing_object_returns_none(aws_resources):
+    s3, dynamodb = aws_resources
+    store = _make_store(s3, dynamodb)
+    assert store.get_results("nope", dt="dt=2025-01-15") is None
+
+
+def test_get_manifest_round_trips_alert_context(aws_resources):
+    from shared.trace_store import ResultSummary, TraceManifest
+
+    s3, dynamodb = aws_resources
+    store = _make_store(s3, dynamodb)
+    manifest = TraceManifest(
+        investigation_id="inv-7",
+        alert_context={"investigation_id": "inv-7", "platform": "slack",
+                       "channel_id": "C1", "message_id": "1700.1"},
+        started_at="2025-01-15T14:00:00Z",
+        ended_at="2025-01-15T14:01:00Z",
+        total_duration_seconds=60.0,
+        dispatched_agents=["eks"],
+        results_summary={"eks": ResultSummary("success", 1, 4.0)},
+        status="completed",
+        error_count=0,
+    )
+    store.put_manifest(manifest)
+
+    got = store.get_manifest("inv-7", dt="dt=2025-01-15")
+    assert got is not None
+    assert got["alert_context"]["message_id"] == "1700.1"
+
+
+def test_get_manifest_missing_returns_none(aws_resources):
+    s3, dynamodb = aws_resources
+    store = _make_store(s3, dynamodb)
+    assert store.get_manifest("absent", dt="dt=2025-01-15") is None
+
+
+@pytest.fixture()
+def aws_resources_with_thread_gsi():
+    """S3 + a DDB table carrying the channel_id-message_id GSI (#56)."""
+    with mock_aws():
+        s3 = boto3.client("s3", region_name="us-east-1")
+        s3.create_bucket(Bucket=BUCKET)
+        dynamodb = boto3.resource("dynamodb", region_name="us-east-1")
+        dynamodb.create_table(
+            TableName=TABLE,
+            KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],
+            AttributeDefinitions=[
+                {"AttributeName": "pk", "AttributeType": "S"},
+                {"AttributeName": "channel_id", "AttributeType": "S"},
+                {"AttributeName": "message_id", "AttributeType": "S"},
+            ],
+            GlobalSecondaryIndexes=[{
+                "IndexName": "channel_id-message_id-index",
+                "KeySchema": [
+                    {"AttributeName": "channel_id", "KeyType": "HASH"},
+                    {"AttributeName": "message_id", "KeyType": "RANGE"},
+                ],
+                "Projection": {"ProjectionType": "ALL"},
+            }],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        dynamodb.Table(TABLE).meta.client.get_waiter("table_exists").wait(
+            TableName=TABLE,
+        )
+        yield s3, dynamodb
+
+
+def _put_manifest_for(store, *, inv, channel, message_id, started_at):
+    from shared.trace_store import ResultSummary, TraceManifest
+    store.put_manifest(TraceManifest(
+        investigation_id=inv,
+        alert_context={"channel_id": channel, "message_id": message_id,
+                       "platform": "slack"},
+        started_at=started_at, ended_at=started_at,
+        total_duration_seconds=1.0, dispatched_agents=["eks"],
+        results_summary={"eks": ResultSummary("success", 1, 1.0)},
+        status="completed", error_count=0,
+    ))
+
+
+def test_find_investigation_resolves_thread_to_investigation(
+    aws_resources_with_thread_gsi,
+):
+    s3, dynamodb = aws_resources_with_thread_gsi
+    store = _make_store(s3, dynamodb)
+    _put_manifest_for(store, inv="inv-A", channel="C1",
+                      message_id="1700.1", started_at="2025-01-15T10:00:00Z")
+
+    ref = store.find_investigation("C1", "1700.1")
+    assert ref is not None
+    assert ref.investigation_id == "inv-A"
+    assert ref.dt == "dt=2025-01-15"
+
+
+def test_find_investigation_picks_newest_on_collision(
+    aws_resources_with_thread_gsi,
+):
+    s3, dynamodb = aws_resources_with_thread_gsi
+    store = _make_store(s3, dynamodb)
+    _put_manifest_for(store, inv="old", channel="C1",
+                      message_id="1700.1", started_at="2025-01-15T10:00:00Z")
+    _put_manifest_for(store, inv="new", channel="C1",
+                      message_id="1700.1", started_at="2025-01-16T10:00:00Z")
+
+    ref = store.find_investigation("C1", "1700.1")
+    assert ref.investigation_id == "new"
+
+
+def test_find_investigation_no_match_returns_none(
+    aws_resources_with_thread_gsi,
+):
+    s3, dynamodb = aws_resources_with_thread_gsi
+    store = _make_store(s3, dynamodb)
+    assert store.find_investigation("C1", "absent") is None
 
 
 class TestConstructorInjection:

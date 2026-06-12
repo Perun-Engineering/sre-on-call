@@ -336,6 +336,42 @@ class TestChartRoundTrip:
         assert agent_result.chart_series == {"abc": ChartSeries(points=[{"a": 1}])}
 
 
+def test_results_map_round_trips_result_and_failure():
+    from shared.tool_result import results_to_dict, results_from_dict
+    from shared.models import (
+        AgentResult, AgentFailure, AgentMetadata, Finding,
+    )
+
+    results = {
+        "eks": AgentResult(
+            agent_name="eks",
+            status="success",
+            findings=[Finding(
+                source="pod/api-7c", timestamp="2025-01-15T14:33:00Z",
+                content="CrashLoopBackOff", severity="critical",
+                metadata={"restarts": 12}, link="https://console/eks",
+            )],
+            summary="api pod crashlooping",
+            duration_seconds=4.2,
+            metadata=AgentMetadata(model_id="m", input_tokens=10),
+        ),
+        "slack_scanner": AgentFailure(
+            agent_name="slack_scanner",
+            error_message="timeout",
+            timestamp="2025-01-15T14:34:00Z",
+            metadata=AgentMetadata(),
+        ),
+    }
+
+    restored = results_from_dict(results_to_dict(results))
+
+    assert isinstance(restored["eks"], AgentResult)
+    assert restored["eks"].findings[0].content == "CrashLoopBackOff"
+    assert restored["eks"].metadata.input_tokens == 10
+    assert isinstance(restored["slack_scanner"], AgentFailure)
+    assert restored["slack_scanner"].error_message == "timeout"
+
+
 def test_dangling_marker_prefix_in_content_does_not_suppress_real_footer():
     """A finding content with an unclosed AGENT_RESULT prefix must not swallow
     the legitimate footer (denial / suppression of the structured result)."""

@@ -134,6 +134,8 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
+from shared.tool_result import results_from_dict, results_to_dict
+
 logger = logging.getLogger(__name__)
 
 
@@ -225,6 +227,14 @@ class TraceManifest:
 # ---------------------------------------------------------------------------
 # TraceStore
 # ---------------------------------------------------------------------------
+
+
+@dataclass
+class InvestigationRef:
+    """A resolved pointer from a thread to its investigation (#56)."""
+
+    investigation_id: str
+    dt: str  # the ``dt=YYYY-MM-DD`` S3 partition the objects live under
 
 
 class TraceStore:
@@ -345,6 +355,13 @@ class TraceStore:
         """Build the S3 key for the #33 page model under the investigation prefix."""
         return f"{cls.investigation_prefix(investigation_id, dt=dt)}page_model.json"
 
+    @classmethod
+    def _results_key(
+        cls, investigation_id: str, *, dt: str | None = None
+    ) -> str:
+        """S3 key for the full per-agent results map (#56 PIR recovery)."""
+        return f"{cls.investigation_prefix(investigation_id, dt=dt)}results.json"
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -441,6 +458,113 @@ class TraceStore:
                 investigation_id,
             )
 
+    def put_results(
+        self,
+        *,
+        investigation_id: str,
+        results: dict,
+        dt: str | None = None,
+    ) -> None:
+        """Archive the full per-agent results map as ``results.json``.
+
+        Enables the PIR flow (#56) to rebuild the incident report from the
+        original findings — events/manifest only keep summaries. Fail-open.
+        """
+        key = self._results_key(investigation_id, dt=dt)
+        try:
+            self._s3.put_object(
+                Bucket=self._bucket,
+                Key=key,
+                Body=json.dumps(
+                    results_to_dict(results), default=_json_default,
+                ).encode("utf-8"),
+                ContentType="application/json",
+            )
+        except Exception:
+            logger.exception(
+                "TraceStore.put_results failed (investigation_id=%s)",
+                investigation_id,
+            )
+
+    def get_results(
+        self, investigation_id: str, *, dt: str | None = None
+    ) -> dict | None:
+        """Read + rebuild the results map written by :meth:`put_results`.
+
+        Returns ``None`` on any miss/error (fail-open).
+        """
+        key = self._results_key(investigation_id, dt=dt)
+        try:
+            obj = self._s3.get_object(Bucket=self._bucket, Key=key)
+            payload = json.loads(obj["Body"].read())
+        except Exception:
+            logger.exception(
+                "TraceStore.get_results failed (investigation_id=%s)",
+                investigation_id,
+            )
+            return None
+        return results_from_dict(payload)
+
+    THREAD_INDEX_NAME = "channel_id-message_id-index"
+
+    def find_investigation(
+        self, channel_id: str, thread_ts: str
+    ) -> InvestigationRef | None:
+        """Resolve a chat thread to its originating investigation (#56).
+
+        Queries the channel_id+message_id GSI (the alert message is the
+        thread root, so ``thread_ts == alert_context.message_id``). On
+        multiple hits — a re-alert in the same thread — returns the newest
+        by ``started_at``. Fail-open → ``None``.
+        """
+        from boto3.dynamodb.conditions import Key
+
+        try:
+            resp = self._table.query(
+                IndexName=self.THREAD_INDEX_NAME,
+                KeyConditionExpression=(
+                    Key("channel_id").eq(str(channel_id))
+                    & Key("message_id").eq(str(thread_ts))
+                ),
+            )
+            items = resp.get("Items", [])
+        except Exception:
+            logger.exception(
+                "TraceStore.find_investigation query failed "
+                "(channel_id=%s, thread_ts=%s)",
+                channel_id, thread_ts,
+            )
+            return None
+
+        if not items:
+            return None
+        newest = max(items, key=lambda i: str(i.get("started_at", "")))
+        pk = newest.get("pk")
+        dt = newest.get("dt")
+        if not pk or not dt:
+            return None
+        return InvestigationRef(
+            investigation_id=str(pk), dt=f"dt={dt}",
+        )
+
+    def get_manifest(
+        self, investigation_id: str, *, dt: str | None = None
+    ) -> dict | None:
+        """Read the manifest JSON for *investigation_id* (fail-open → None).
+
+        Used by the PIR flow (#56) to recover the original ``alert_context``.
+        """
+        key = self._manifest_key(investigation_id, dt=dt)
+        try:
+            obj = self._s3.get_object(Bucket=self._bucket, Key=key)
+            return json.loads(obj["Body"].read())
+        except Exception:
+            logger.exception(
+                "TraceStore.get_manifest failed (investigation_id=%s)",
+                investigation_id,
+            )
+            return None
+
     def put_manifest(self, manifest: TraceManifest) -> None:
         """Write the manifest to S3 and index entry to DynamoDB.
 
@@ -520,6 +644,7 @@ def _index_item(manifest: TraceManifest, *, s3_prefix: str) -> dict:
         "dt": s3_prefix.split("/", 1)[0].split("=", 1)[1],
         "s3_prefix": s3_prefix,
         "channel_id": str(ctx.get("channel_id", "")),
+        "message_id": str(ctx.get("message_id", "")),
         "platform": str(ctx.get("platform", "")),
         "alert_timestamp": str(ctx.get("alert_timestamp", "")),
         "started_at": manifest.started_at,
