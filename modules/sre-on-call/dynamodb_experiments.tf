@@ -7,6 +7,20 @@
 #      (pk: {experiment_id}#{investigation_id}#{variant_id})
 ###############################################################################
 
+variable "experiment_results_table_name" {
+  description = <<-EOT
+    Override for the table the master writes A/B variant reports to. Leave empty
+    (default) for normal deployments — the master uses this stack's own
+    project-scoped experiment-results table. Set it to another stack's results
+    table name to run an A/B *control* arm (#29): deploy the control as an
+    independent stack (its own project_name, so nothing collides) and point this
+    at the treatment's table, so both variants land in one table for the judge
+    to pair. The master is also granted PutItem on that table.
+  EOT
+  type        = string
+  default     = ""
+}
+
 resource "aws_dynamodb_table" "experiments" {
   name         = "${var.project_name}-experiments"
   billing_mode = "PAY_PER_REQUEST"

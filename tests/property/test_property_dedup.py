@@ -40,7 +40,10 @@ message_timestamps = st.text(
 )
 
 
-@settings(max_examples=100)
+# deadline disabled: each example spins up a fresh moto DynamoDB mock whose
+# first op cold-starts well past hypothesis' 200ms default — a timing artefact
+# of the mock, not the idempotence property under test.
+@settings(max_examples=100, deadline=None)
 @given(channel_id=channel_ids, message_ts=message_timestamps)
 def test_deduplication_idempotence(channel_id: str, message_ts: str) -> None:
     """

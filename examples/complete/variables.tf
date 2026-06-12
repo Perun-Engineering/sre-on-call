@@ -29,6 +29,18 @@ variable "eks_cluster_name" {
   default     = ""
 }
 
+variable "experiment_results_table_name" {
+  description = "A/B control-arm override: results table the master writes to. Empty (default) = this stack's own table. See modules/sre-on-call/dynamodb_experiments.tf and docs/scorecard-runbook.md."
+  type        = string
+  default     = ""
+}
+
+variable "additional_master_runtime_arns" {
+  description = "Extra master AgentCore runtime ARNs this stack's intake Lambda may invoke (A/B control arm). See docs/scorecard-runbook.md."
+  type        = list(string)
+  default     = []
+}
+
 variable "agent_container_registry" {
   description = "ECR registry URL for agent container images (e.g. 123456789012.dkr.ecr.us-east-1.amazonaws.com)"
   type        = string

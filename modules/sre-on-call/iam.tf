@@ -18,6 +18,15 @@
 
 data "aws_caller_identity" "current" {}
 
+# A/B scorecard seam (#29): extra master runtime ARNs the intake Lambda is
+# allowed to invoke, so the treatment stack can fan out to a separately-deployed
+# control-arm master. Empty for normal deployments.
+variable "additional_master_runtime_arns" {
+  description = "Extra master AgentCore runtime ARNs the intake Lambda may invoke (A/B control arm). See docs/scorecard-runbook.md."
+  type        = list(string)
+  default     = []
+}
+
 # ── 1. Lambda_Adapter Role (Requirement 9.1) ────────────────────────────────
 
 resource "aws_iam_role" "lambda_adapter" {
@@ -108,10 +117,15 @@ resource "aws_iam_role_policy" "lambda_adapter_agentcore" {
         Action = [
           "bedrock-agentcore:InvokeAgentRuntime",
         ]
-        Resource = [
-          aws_bedrockagentcore_agent_runtime.master.agent_runtime_arn,
-          "${aws_bedrockagentcore_agent_runtime.master.agent_runtime_arn}/*",
-        ]
+        # This stack's master, plus any A/B control-arm masters (#29) the intake
+        # fans out to (each ARN and its /<session> children).
+        Resource = flatten(concat(
+          [
+            aws_bedrockagentcore_agent_runtime.master.agent_runtime_arn,
+            "${aws_bedrockagentcore_agent_runtime.master.agent_runtime_arn}/*",
+          ],
+          [for arn in var.additional_master_runtime_arns : [arn, "${arn}/*"]],
+        ))
       }
     ]
   })
@@ -312,7 +326,12 @@ resource "aws_iam_role_policy" "master_agent_experiment_results" {
         Action = [
           "dynamodb:PutItem"
         ]
-        Resource = aws_dynamodb_table.experiment_results.arn
+        # This stack's own results table, plus the override table when an A/B
+        # control arm (#29) writes into the treatment's shared table.
+        Resource = compact([
+          aws_dynamodb_table.experiment_results.arn,
+          local.experiment_results_override_arn,
+        ])
       }
     ]
   })
