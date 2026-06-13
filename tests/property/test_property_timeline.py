@@ -12,7 +12,8 @@ from datetime import datetime, timedelta, timezone
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from agents.master.report_formatter import ReportFormatter, _timeline_sort_epoch
+from agents.master.incident_facts import timeline_sort_epoch
+from agents.master.report_formatter import ReportFormatter
 from shared.agents import get_registry
 from shared.models import AgentMetadata, AgentResult, AlertContext, Finding
 
@@ -68,10 +69,10 @@ def test_timeline_carries_the_alert_and_is_clock_ordered(results):
     # precursor signal — legitimately sorts ahead of it.)
     alerts = [e for e in events if e.kind == "alert"]
     assert len(alerts) == 1
-    assert _timeline_sort_epoch(alerts[0].timestamp) is not None
+    assert timeline_sort_epoch(alerts[0].timestamp) is not None
 
     # Parseable timestamps are non-decreasing across the whole timeline.
     epochs = [
-        e for e in (_timeline_sort_epoch(ev.timestamp) for ev in events) if e is not None
+        e for e in (timeline_sort_epoch(ev.timestamp) for ev in events) if e is not None
     ]
     assert epochs == sorted(epochs)

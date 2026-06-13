@@ -4,7 +4,7 @@ from __future__ import annotations
 from agents.master.incident_facts import EvidenceFact, IncidentFacts, render_pir_timeline_markdown
 from agents.master.synthesis import IncidentTimeline
 from shared.agents import get_registry
-from shared.models import AgentFailure, AgentMetadata, AgentResult, AlertContext, Finding
+from shared.models import AgentFailure, AgentResult, AlertContext, Finding
 from shared.report_renderer import EvidenceLine
 
 

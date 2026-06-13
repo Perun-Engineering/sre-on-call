@@ -28,7 +28,7 @@ SEVERITY_EMOJI: dict[str, str] = {
 }
 
 
-def _enrichment_error(result: AgentResult | AgentFailure) -> str | None:
+def enrichment_error(result: AgentResult | AgentFailure) -> str | None:
     """Return an error message when ``result`` represents a failure, else ``None``."""
     if isinstance(result, AgentFailure):
         return result.error_message
@@ -37,7 +37,7 @@ def _enrichment_error(result: AgentResult | AgentFailure) -> str | None:
     return None
 
 
-def _timeline_sort_epoch(raw: str | None) -> float | None:
+def timeline_sort_epoch(raw: str | None) -> float | None:
     """Parse a timeline timestamp to a UTC epoch for ordering, tolerant of forms.
 
     Handles ISO 8601 (``…Z`` / ``+00:00`` / naive) and the alert's human
@@ -117,7 +117,7 @@ def _format_totals_line(
     return " · ".join(parts)
 
 
-def _format_metadata_line(metadata: AgentMetadata | None) -> str | None:
+def format_metadata_line(metadata: AgentMetadata | None) -> str | None:
     """Render an agent's per-invocation telemetry as a one-liner.
 
     Returns ``None`` when there's nothing meaningful to show — keeps the
@@ -348,7 +348,7 @@ class IncidentFacts:
             return (
                 [EvidenceLine(f"⚠️ {display_name} data unavailable: {result.error_message}")],
                 "error",
-                _format_metadata_line(result.metadata),
+                format_metadata_line(result.metadata),
             )
         if isinstance(result, AgentResult) and result.status == "unhealthy":
             reason = result.error_message or "agent reported unhealthy"
@@ -360,14 +360,14 @@ class IncidentFacts:
                     )
                 ],
                 "disabled",
-                _format_metadata_line(result.metadata),
+                format_metadata_line(result.metadata),
             )
         if isinstance(result, AgentResult) and result.status == "error":
             error_detail = result.error_message or "unknown error"
             return (
                 [EvidenceLine(f"⚠️ {display_name} data unavailable: {error_detail}")],
                 "error",
-                _format_metadata_line(result.metadata),
+                format_metadata_line(result.metadata),
             )
         if isinstance(result, AgentResult) and result.status == "success":
             lines = (
@@ -375,7 +375,7 @@ class IncidentFacts:
                 if result.findings
                 else [EvidenceLine(f"No notable findings from {display_name}")]
             )
-            return lines, "ok", _format_metadata_line(result.metadata)
+            return lines, "ok", format_metadata_line(result.metadata)
         return [EvidenceLine(f"⚠️ {display_name} data unavailable")], "error", None
 
     @staticmethod
@@ -437,8 +437,8 @@ class IncidentFacts:
 
         events.sort(
             key=lambda e: (
-                _timeline_sort_epoch(e.timestamp) is None,
-                _timeline_sort_epoch(e.timestamp) or 0.0,
+                timeline_sort_epoch(e.timestamp) is None,
+                timeline_sort_epoch(e.timestamp) or 0.0,
             )
         )
         return IncidentTimeline(events=events)
