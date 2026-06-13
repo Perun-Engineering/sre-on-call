@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 
 from agents.master.routing import (
@@ -15,6 +13,7 @@ from agents.master.routing import (
     build_routing_prompt,
 )
 from shared.models import AlertContext
+from tests.fakes import FakeModelCall
 
 
 def _alert() -> AlertContext:
@@ -49,42 +48,19 @@ class TestBuildRoutingPrompt:
             assert c.description in prompt
 
 
-class _FakeAgent:
-    """Stand-in Strands agent for structured_output_async."""
-
-    def __init__(
-        self,
-        *,
-        returns: RoutingDecision | None = None,
-        raises: Exception | None = None,
-        delay: float = 0.0,
-    ):
-        self._returns = returns
-        self._raises = raises
-        self._delay = delay
-        self.calls: list[str] = []
-
-    async def structured_output_async(
-        self, output_model: type[RoutingDecision], prompt: str
-    ) -> RoutingDecision:
-        self.calls.append(prompt)
-        if self._delay:
-            await asyncio.sleep(self._delay)
-        if self._raises is not None:
-            raise self._raises
-        assert self._returns is not None
-        return self._returns
-
-
 def _decision(*selections: AgentSelection, rationale: str = "r") -> RoutingDecision:
     return RoutingDecision(selections=list(selections), rationale=rationale)
+
+
+def _router(decision: RoutingDecision | None = None, *, raises: Exception | None = None) -> AgentRouter:
+    return AgentRouter(model_call=FakeModelCall(returns=decision, raises=raises))
 
 
 class TestRoute:
     @pytest.mark.asyncio
     async def test_selects_subset_and_carries_hints(self):
-        agent = _FakeAgent(
-            returns=_decision(
+        router = _router(
+            _decision(
                 AgentSelection(
                     agent_id="cloudwatch_logs",
                     dispatch=True,
@@ -96,7 +72,7 @@ class TestRoute:
                 ),
             )
         )
-        result = await AgentRouter(agent=agent).route(_alert(), _candidates())
+        result = await router.route(_alert(), _candidates())
 
         assert isinstance(result, RoutingResult)
         assert set(result.selected) == {"cloudwatch_logs", "eks"}
@@ -106,12 +82,12 @@ class TestRoute:
     @pytest.mark.asyncio
     async def test_unmentioned_candidate_defaults_to_dispatch(self):
         # Model only spoke about slack_scanner; the other two must still dispatch.
-        agent = _FakeAgent(
-            returns=_decision(
+        router = _router(
+            _decision(
                 AgentSelection(agent_id="slack_scanner", dispatch=False, reason="n/a"),
             )
         )
-        result = await AgentRouter(agent=agent).route(_alert(), _candidates())
+        result = await router.route(_alert(), _candidates())
 
         assert result is not None
         assert set(result.selected) == {"cloudwatch_logs", "eks"}
@@ -119,13 +95,13 @@ class TestRoute:
 
     @pytest.mark.asyncio
     async def test_unknown_agent_ids_are_ignored(self):
-        agent = _FakeAgent(
-            returns=_decision(
+        router = _router(
+            _decision(
                 AgentSelection(agent_id="ghost_agent", dispatch=False, reason="x"),
                 AgentSelection(agent_id="eks", dispatch=False, reason="not k8s"),
             )
         )
-        result = await AgentRouter(agent=agent).route(_alert(), _candidates())
+        result = await router.route(_alert(), _candidates())
 
         assert result is not None
         # ghost_agent never appears; eks is the only real skip.
@@ -135,35 +111,26 @@ class TestRoute:
 
     @pytest.mark.asyncio
     async def test_skipping_every_agent_fails_open_to_none(self):
-        agent = _FakeAgent(
-            returns=_decision(
+        router = _router(
+            _decision(
                 *[
                     AgentSelection(agent_id=c.agent_id, dispatch=False, reason="x")
                     for c in _candidates()
                 ]
             )
         )
-        assert await AgentRouter(agent=agent).route(_alert(), _candidates()) is None
+        assert await router.route(_alert(), _candidates()) is None
 
     @pytest.mark.asyncio
     async def test_fail_open_on_model_error(self):
-        agent = _FakeAgent(raises=RuntimeError("bedrock down"))
-        assert await AgentRouter(agent=agent).route(_alert(), _candidates()) is None
-
-    @pytest.mark.asyncio
-    async def test_fail_open_on_timeout(self):
-        agent = _FakeAgent(
-            returns=_decision(
-                AgentSelection(agent_id="eks", dispatch=True),
-            ),
-            delay=0.2,
-        )
-        router = AgentRouter(agent=agent, timeout_seconds=0.01)
+        # The seam swallows model errors/timeouts to None (tested in
+        # tests/test_model_call.py); the router must fall open to dispatch-all.
+        router = _router(raises=RuntimeError("bedrock down"))
         assert await router.route(_alert(), _candidates()) is None
 
     @pytest.mark.asyncio
     async def test_no_candidates_returns_none(self):
-        assert await AgentRouter(agent=_FakeAgent()).route(_alert(), []) is None
+        assert await _router(_decision()).route(_alert(), []) is None
 
 
 class TestFromEnv:

@@ -14,14 +14,13 @@ exactly as it does today.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 from dataclasses import dataclass
-from typing import Protocol
 
 from pydantic import BaseModel, Field
 
+from shared.model_call import StructuredModelCall
 from shared.models import AgentFailure, AgentResult, AlertContext
 
 logger = logging.getLogger(__name__)
@@ -110,40 +109,29 @@ def build_followup_prompt(
     return "\n".join(parts)
 
 
-class _StructuredAgent(Protocol):
-    async def structured_output_async(
-        self, output_model: type[FollowupDecision], prompt: str
-    ) -> FollowupDecision: ...
-
-
-def _truthy(value: str | None) -> bool:
-    return (value or "").strip().lower() in ("1", "true", "yes", "on")
-
-
 class FollowupPlanner:
     """Runs the Stage 2 follow-up decision, fail-open and hard-capped.
 
-    The agent is injectable for tests; in production it is lazily built from a
-    tools-less Strands ``Agent`` bound to the follow-up model. ``plan`` never
-    raises — on any failure or a "no follow-up" decision it returns ``[]``.
+    Composes one :class:`StructuredModelCall` (injectable for tests). ``plan``
+    never raises — on any failure or a "no follow-up" decision it returns ``[]``.
     """
 
     def __init__(
         self,
         *,
-        agent: _StructuredAgent | None = None,
-        model_id: str | None = None,
-        timeout_seconds: float = DEFAULT_FOLLOWUP_TIMEOUT_SECONDS,
+        model_call: StructuredModelCall | None = None,
         max_agents: int = DEFAULT_MAX_FOLLOWUP_AGENTS,
     ) -> None:
-        self._agent = agent
-        self._model_id = model_id
-        self._timeout_seconds = timeout_seconds
+        self._model_call = model_call
         self._max_agents = max_agents
 
     @property
     def timeout_seconds(self) -> float:
-        return self._timeout_seconds
+        return (
+            self._model_call.timeout_seconds
+            if self._model_call is not None
+            else DEFAULT_FOLLOWUP_TIMEOUT_SECONDS
+        )
 
     @property
     def max_agents(self) -> int:
@@ -158,40 +146,21 @@ class FollowupPlanner:
         timeout and cap are overridable via ``FOLLOWUP_TIMEOUT_SECONDS`` /
         ``FOLLOWUP_MAX_AGENTS``.
         """
-        if not _truthy(os.environ.get("FOLLOWUP_ROUND_ENABLED")):
+        model_call = StructuredModelCall.from_env(
+            system_prompt=_SYSTEM_PROMPT,
+            gate_env="FOLLOWUP_ROUND_ENABLED",
+            model_env="FOLLOWUP_MODEL_ID",
+            timeout_env="FOLLOWUP_TIMEOUT_SECONDS",
+            default_timeout=DEFAULT_FOLLOWUP_TIMEOUT_SECONDS,
+        )
+        if model_call is None:
             return None
-        timeout_raw = os.environ.get("FOLLOWUP_TIMEOUT_SECONDS")
-        try:
-            timeout = (
-                float(timeout_raw) if timeout_raw else DEFAULT_FOLLOWUP_TIMEOUT_SECONDS
-            )
-        except ValueError:
-            timeout = DEFAULT_FOLLOWUP_TIMEOUT_SECONDS
         max_raw = os.environ.get("FOLLOWUP_MAX_AGENTS")
         try:
             max_agents = int(max_raw) if max_raw else DEFAULT_MAX_FOLLOWUP_AGENTS
         except ValueError:
             max_agents = DEFAULT_MAX_FOLLOWUP_AGENTS
-        return cls(
-            model_id=os.environ.get("FOLLOWUP_MODEL_ID") or None,
-            timeout_seconds=timeout,
-            max_agents=max_agents,
-        )
-
-    def _get_agent(self) -> _StructuredAgent | None:
-        if self._agent is not None:
-            return self._agent
-        try:
-            from strands import Agent
-
-            from shared.a2a_factory import _resolve_model
-
-            model = _resolve_model(model_id_override=self._model_id)
-            self._agent = Agent(model=model, system_prompt=_SYSTEM_PROMPT)
-        except Exception:
-            logger.exception("Failed to build the follow-up agent; skipping the round.")
-            return None
-        return self._agent
+        return cls(model_call=model_call, max_agents=max_agents)
 
     async def plan(
         self,
@@ -205,25 +174,11 @@ class FollowupPlanner:
         candidates, or when the planner decides no follow-up is warranted.
         Unknown agent ids are dropped.
         """
-        if not candidates:
-            return []
-        agent = self._get_agent()
-        if agent is None:
+        if not candidates or self._model_call is None:
             return []
         prompt = build_followup_prompt(alert_context, results, candidates)
-        try:
-            decision = await asyncio.wait_for(
-                agent.structured_output_async(FollowupDecision, prompt),
-                timeout=self._timeout_seconds,
-            )
-        except Exception:
-            logger.warning(
-                "Follow-up planning failed for investigation %s; skipping the round.",
-                alert_context.investigation_id,
-                exc_info=True,
-            )
-            return []
-        if not decision.should_followup:
+        decision = await self._model_call.call(FollowupDecision, prompt)
+        if decision is None or not decision.should_followup:
             return []
         candidate_ids = {c.agent_id for c in candidates}
         plan: list[tuple[str, str]] = []

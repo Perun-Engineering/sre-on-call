@@ -1277,6 +1277,7 @@ import json as _json
 from agents.master.routing import AgentRouter, RoutingResult
 from agents.master.followup import FollowupPlanner
 from agents.master.synthesis import AnalysisSynthesizer
+from tests.fakes import FakeModelCall
 from shared.trace_store import EVENT_FOLLOWUP_DECISION, EVENT_ROUTING_DECISION
 
 
@@ -1305,11 +1306,9 @@ class _FakePlanner:
         return self._plan
 
 
-class _RaisingStructuredAgent:
-    """A model client that always fails — used to prove fail-open behavior."""
-
-    async def structured_output_async(self, output_model, prompt):
-        raise RuntimeError("bedrock down")
+def _raising_model_call() -> FakeModelCall:
+    """A structured-model call that always fails — proves fail-open behavior."""
+    return FakeModelCall(raises=RuntimeError("bedrock down"))
 
 
 class _PerUrlDelayClient:
@@ -1409,9 +1408,9 @@ class TestFailingModelClientDegradesToToday:
 
     @pytest.mark.asyncio
     async def test_all_fail_open_to_baseline(self, alert_context):
-        router = AgentRouter(agent=_RaisingStructuredAgent())
-        followup = FollowupPlanner(agent=_RaisingStructuredAgent())
-        synth = AnalysisSynthesizer(agent=_RaisingStructuredAgent())
+        router = AgentRouter(model_call=_raising_model_call())
+        followup = FollowupPlanner(model_call=_raising_model_call())
+        synth = AnalysisSynthesizer(model_call=_raising_model_call())
         http_client = FakeHTTPClient()
         chat = FakeChatPlatform()
         orch = _make_orchestrator(

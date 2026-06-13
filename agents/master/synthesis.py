@@ -12,14 +12,13 @@ yields ``None`` and the report posts exactly as it would without synthesis.
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import os
 from dataclasses import dataclass, field
-from typing import Literal, Protocol
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from shared.model_call import StructuredModelCall
 from shared.models import AgentFailure, AgentResult, AlertContext
 
 logger = logging.getLogger(__name__)
@@ -144,43 +143,27 @@ def build_synthesis_prompt(
     return "\n".join(parts)
 
 
-class _StructuredAgent(Protocol):
-    """Minimal seam over a Strands ``Agent`` for structured output."""
-
-    async def structured_output_async(
-        self, output_model: type[IncidentAnalysis], prompt: str
-    ) -> IncidentAnalysis: ...
-
-
-def _truthy(value: str | None) -> bool:
-    return (value or "").strip().lower() in ("1", "true", "yes", "on")
-
-
 class AnalysisSynthesizer:
     """Runs the post-harvest synthesis call, fail-open.
 
-    The agent is injectable for tests; in production it is lazily built from
-    a tools-less Strands ``Agent`` bound to the synthesis model. ``synthesize``
-    never raises — on any error, timeout, or model build failure it returns
-    ``None`` and the caller posts the report without an Analysis section.
+    Composes one :class:`StructuredModelCall` (injectable for tests).
+    ``synthesize`` never raises — on any error, timeout, or model build failure
+    it returns ``None`` and the caller posts the report without an Analysis
+    section.
     """
 
-    def __init__(
-        self,
-        *,
-        agent: _StructuredAgent | None = None,
-        model_id: str | None = None,
-        timeout_seconds: float = DEFAULT_SYNTHESIS_TIMEOUT_SECONDS,
-    ) -> None:
-        self._agent = agent
-        self._model_id = model_id
-        self._timeout_seconds = timeout_seconds
+    def __init__(self, *, model_call: StructuredModelCall | None = None) -> None:
+        self._model_call = model_call
 
     @property
     def timeout_seconds(self) -> float:
         """Time budget for the synthesis call; the orchestrator reserves it
         out of the initial-report deadline."""
-        return self._timeout_seconds
+        return (
+            self._model_call.timeout_seconds
+            if self._model_call is not None
+            else DEFAULT_SYNTHESIS_TIMEOUT_SECONDS
+        )
 
     @classmethod
     def from_env(cls) -> AnalysisSynthesizer | None:
@@ -191,33 +174,16 @@ class AnalysisSynthesizer:
         ``SYNTHESIS_MODEL_ID`` → ``MODEL_ID`` → config/default; the timeout is
         overridable via ``SYNTHESIS_TIMEOUT_SECONDS``.
         """
-        if not _truthy(os.environ.get("SYNTHESIS_ENABLED")):
-            return None
-        timeout_raw = os.environ.get("SYNTHESIS_TIMEOUT_SECONDS")
-        try:
-            timeout = float(timeout_raw) if timeout_raw else DEFAULT_SYNTHESIS_TIMEOUT_SECONDS
-        except ValueError:
-            timeout = DEFAULT_SYNTHESIS_TIMEOUT_SECONDS
-        return cls(
-            model_id=os.environ.get("SYNTHESIS_MODEL_ID") or None,
-            timeout_seconds=timeout,
+        model_call = StructuredModelCall.from_env(
+            system_prompt=_SYSTEM_PROMPT,
+            gate_env="SYNTHESIS_ENABLED",
+            model_env="SYNTHESIS_MODEL_ID",
+            timeout_env="SYNTHESIS_TIMEOUT_SECONDS",
+            default_timeout=DEFAULT_SYNTHESIS_TIMEOUT_SECONDS,
         )
-
-    def _get_agent(self) -> _StructuredAgent | None:
-        """Return the structured-output agent, building it lazily on first use."""
-        if self._agent is not None:
-            return self._agent
-        try:
-            from strands import Agent
-
-            from shared.a2a_factory import _resolve_model
-
-            model = _resolve_model(model_id_override=self._model_id)
-            self._agent = Agent(model=model, system_prompt=_SYSTEM_PROMPT)
-        except Exception:
-            logger.exception("Failed to build the synthesis agent; skipping Analysis.")
+        if model_call is None:
             return None
-        return self._agent
+        return cls(model_call=model_call)
 
     async def synthesize(
         self,
@@ -228,20 +194,7 @@ class AnalysisSynthesizer:
 
         Returns ``None`` on any failure so the report posts unchanged.
         """
-        agent = self._get_agent()
-        if agent is None:
+        if self._model_call is None:
             return None
         prompt = build_synthesis_prompt(alert_context, results)
-        try:
-            return await asyncio.wait_for(
-                agent.structured_output_async(IncidentAnalysis, prompt),
-                timeout=self._timeout_seconds,
-            )
-        except Exception:
-            logger.warning(
-                "Synthesis failed for investigation %s; posting report without "
-                "Analysis.",
-                alert_context.investigation_id,
-                exc_info=True,
-            )
-            return None
+        return await self._model_call.call(IncidentAnalysis, prompt)

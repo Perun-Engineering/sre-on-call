@@ -29,6 +29,8 @@ import re
 from dataclasses import dataclass
 from typing import Protocol
 
+from shared.env import truthy
+
 logger = logging.getLogger(__name__)
 
 
@@ -238,10 +240,6 @@ _LLM_SYSTEM_PROMPT = (
 _DEFAULT_CLASSIFIER_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 
-def _truthy(value: str | None) -> bool:
-    return (value or "").strip().lower() in ("1", "true", "yes", "on")
-
-
 class BedrockLlmClassifier:
     """:class:`LlmClassifier` backed by a single Bedrock Converse turn.
 
@@ -272,12 +270,24 @@ class BedrockLlmClassifier:
 
     def classify(self, alert_text: str) -> bool | None:
         try:
-            response = self._get_client().converse(
+            kwargs: dict = dict(
                 modelId=self._model_id,
                 system=[{"text": _LLM_SYSTEM_PROMPT}],
                 messages=[{"role": "user", "content": [{"text": alert_text}]}],
                 inferenceConfig={"maxTokens": 5, "temperature": 0.0},
             )
+            # This is the one component reading untrusted chat text. The Strands
+            # tier is guardrailed via ``_resolve_model``; mirror that here when
+            # ``BEDROCK_GUARDRAIL_ID`` is set so the raw Converse turn does not
+            # bypass prompt-attack / content filtering. Unset → unchanged.
+            guardrail_id = os.environ.get("BEDROCK_GUARDRAIL_ID") or None
+            if guardrail_id:
+                kwargs["guardrailConfig"] = {
+                    "guardrailIdentifier": guardrail_id,
+                    "guardrailVersion": os.environ.get("BEDROCK_GUARDRAIL_VERSION")
+                    or "DRAFT",
+                }
+            response = self._get_client().converse(**kwargs)
             return _parse_llm_verdict(response)
         except Exception:
             logger.warning(
@@ -307,7 +317,7 @@ def llm_classifier_from_env() -> LlmClassifier | None:
     Returns ``None`` when disabled (the default), so Tier 1 + the fail-open
     default fully govern classification and no Bedrock call is ever made.
     """
-    if not _truthy(os.environ.get("CLASSIFIER_LLM_ENABLED")):
+    if not truthy(os.environ.get("CLASSIFIER_LLM_ENABLED")):
         return None
     return BedrockLlmClassifier()
 

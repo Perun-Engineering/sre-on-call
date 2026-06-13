@@ -225,3 +225,56 @@ class TestOrchestratorExperimentStorage:
         ctx = _alert(variant_id="b", variant_label="B: Nova Pro")
         await orch.investigate(ctx)
         assert any("[B: Nova Pro]" in m for m in platform.messages)
+
+
+class TestMasterSideDecisionTelemetry:
+    """Master-side decision cost (routing/synthesis/follow-up) joins the
+    scorecard total alongside specialized-agent cost (issue #65)."""
+
+    def _orch(self, store) -> InvestigationOrchestrator:
+        return InvestigationOrchestrator(
+            http_client=FakeHTTPClient(),
+            chat_platform=FakeChatPlatform(),
+            registry=_eks_only_registry(),
+            results_store=store,
+        )
+
+    async def test_decision_tokens_and_cost_folded_into_totals(self, results_table) -> None:
+        import asyncio
+
+        from shared import model_call
+
+        store = ExperimentResultsStore(dynamodb_resource=results_table)
+        orch = self._orch(store)
+        ctx = _alert(variant_id="a", experiment_id="exp-tele")
+
+        # Simulate the master's routing/synthesis/follow-up decision calls
+        # recording their usage during the investigation, then store the result.
+        model_call.reset_usage()
+        model_call.record_usage(100, 20, 0.0007)
+        orch._store_experiment_result(
+            ctx, {}, "report", asyncio.get_event_loop().time()
+        )
+
+        res = store.get_results("exp-tele", "inv-001")[0]
+        assert res.total_tokens == 120
+        assert res.total_cost_usd == pytest.approx(0.0007)
+
+    async def test_blank_when_no_decision_calls(self, results_table) -> None:
+        import asyncio
+
+        from shared import model_call
+
+        store = ExperimentResultsStore(dynamodb_resource=results_table)
+        orch = self._orch(store)
+        ctx = _alert(variant_id="a", experiment_id="exp-blank")
+
+        model_call.reset_usage()  # no decision calls recorded
+        orch._store_experiment_result(
+            ctx, {}, "report", asyncio.get_event_loop().time()
+        )
+
+        res = store.get_results("exp-blank", "inv-001")[0]
+        # No agents, no decisions → blank totals, not a misleading zero.
+        assert res.total_tokens is None
+        assert res.total_cost_usd is None

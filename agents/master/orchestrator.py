@@ -33,6 +33,8 @@ from shared.constants import HARD_CUTOFF_SECONDS, INITIAL_DEADLINE_SECONDS
 from shared.embeddings import EmbeddingClient
 from shared.fanout import Fanout
 from shared.incident_history_store import IncidentHistoryStore, IncidentOutcome
+from shared.model_call import drain_usage as drain_decision_usage
+from shared.model_call import reset_usage as reset_decision_usage
 from shared.models import AgentFailure, AgentMetadata, AgentResult, AlertContext
 from shared.time_utils import now_iso
 from shared.platforms import ChatPlatform, DeliveryTarget, deliver_with_retry, for_platform
@@ -334,6 +336,10 @@ class InvestigationOrchestrator:
         """Run the full investigation lifecycle."""
         start_time = asyncio.get_event_loop().time()
         started_at_iso = now_iso()
+        # Zero the master-side decision-call accumulator (routing / synthesis /
+        # follow-up) for this investigation so its tokens + cost are attributed
+        # to this run's experiment scorecard, not a prior one (issue #65).
+        reset_decision_usage()
         results: dict[str, AgentResult | AgentFailure] = {}
         initial_report_summary = ""
         platform = self._get_platform(alert_context.platform)
@@ -816,6 +822,15 @@ class InvestigationOrchestrator:
             if isinstance(r, AgentResult):
                 durations[aid] = r.duration_seconds
         total_cost, total_tokens = _sum_agent_telemetry(results)
+        # Fold in master-side decision cost/tokens (routing / synthesis /
+        # follow-up). These run on the master, not the specialized agents, so
+        # they never appear in an agent footer; without this the #26 scorecard
+        # would undercount what the master spends deciding (issue #65).
+        m_in, m_out, m_cost = drain_decision_usage()
+        if m_in is not None or m_out is not None:
+            total_tokens = (total_tokens or 0) + (m_in or 0) + (m_out or 0)
+        if m_cost is not None:
+            total_cost = (total_cost or 0.0) + m_cost
         total = asyncio.get_event_loop().time() - start_time
         try:
             store.put_result(ExperimentResult(

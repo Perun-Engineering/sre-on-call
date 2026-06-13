@@ -5,6 +5,7 @@ __pycache__/
 .pytest_cache/
 .build/
 .terraform/
+.terraform.lock.hcl
 *.tfstate*
 *.tfvars
 .kiro/

@@ -20,6 +20,7 @@ from dataclasses import asdict, replace
 from lambda_adapter.classifier import classify_alert, llm_classifier_from_env
 from lambda_adapter.dedup import DeduplicationStore
 from lambda_adapter.master_dispatch import AgentCoreMasterDispatch, MasterDispatch
+from shared.env import truthy
 from shared.experiment_store import ExperimentStore
 from shared.models import AlertContext, CommandRequest
 from shared.platforms import (
@@ -47,17 +48,13 @@ _NON_ALERT_NOTICE = (
 )
 
 
-def _truthy(value: str | None) -> bool:
-    return (value or "").strip().lower() in ("1", "true", "yes", "on")
-
-
 def _classification_enabled() -> bool:
     """Whether the intake classification gate is active.
 
     On by default; set ``ALERT_CLASSIFICATION_ENABLED`` to a falsy value as an
     operational kill-switch to investigate every mention unconditionally.
     """
-    return _truthy(os.environ.get("ALERT_CLASSIFICATION_ENABLED", "true"))
+    return truthy(os.environ.get("ALERT_CLASSIFICATION_ENABLED", "true"))
 
 
 def _get_env(name: str) -> str:
