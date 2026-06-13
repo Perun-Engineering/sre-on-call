@@ -54,6 +54,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
+from boto3.dynamodb.conditions import Attr
+
+from shared.dynamo_table import DynamoTable
 from shared.embeddings import cosine_similarity, pack_embedding, unpack_embedding
 
 logger = logging.getLogger(__name__)
@@ -134,6 +137,10 @@ class IncidentHistoryStore:
     raises.
     """
 
+    # Investigation-path store: fail-open so similar-incident lookup never
+    # blocks or fails an investigation.
+    _HISTORY_FILTER = Attr("record_type").eq(RECORD_TYPE) & Attr("embedding").exists()
+
     def __init__(
         self,
         *,
@@ -142,12 +149,12 @@ class IncidentHistoryStore:
         region_name: str | None = None,
     ) -> None:
         self._table_name = table_name
-        self._region = region_name or os.environ.get("AWS_REGION", "us-east-1")
-        if dynamodb_resource is None:
-            import boto3
-
-            dynamodb_resource = boto3.resource("dynamodb", region_name=self._region)
-        self._table = dynamodb_resource.Table(table_name)
+        self._table = DynamoTable(
+            table_name,
+            dynamodb_resource=dynamodb_resource,
+            region_name=region_name,
+            fail_open=True,
+        )
 
     @classmethod
     def from_env(cls) -> IncidentHistoryStore | None:
@@ -191,13 +198,8 @@ class IncidentHistoryStore:
         if outcome.thread_link:
             item["thread_link"] = outcome.thread_link
 
-        try:
-            self._table.put_item(Item=item)
-        except Exception:
-            logger.exception(
-                "IncidentHistoryStore.put_outcome failed (investigation_id=%s)",
-                outcome.investigation_id,
-            )
+        # Fail-open lives in the adapter (fail_open=True).
+        self._table.put(item)
 
     # ------------------------------------------------------------------
     # Read
@@ -220,11 +222,8 @@ class IncidentHistoryStore:
         """
         if not embedding:
             return []
-        try:
-            items = self._scan_history_items()
-        except Exception:
-            logger.exception("IncidentHistoryStore.search_similar scan failed")
-            return []
+        # scan_all is fail-open (fail_open=True) — a scan error yields nothing.
+        items = self._table.scan_all(self._HISTORY_FILTER)
 
         scored: list[SimilarIncident] = []
         for item in items:
@@ -263,43 +262,22 @@ class IncidentHistoryStore:
     def count_recent(self, *, days: int = 30) -> int | None:
         """Count outcome records recorded within the last *days*.
 
-        Used by the agent's snapshot tool. Returns ``None`` on error so the
-        caller can render "unknown" rather than a misleading zero.
+        Used by the agent's snapshot tool. The underlying scan is fail-open, so
+        a scan error logs and yields nothing (count ``0``); ``None`` is reserved
+        for a guard-level failure (e.g. building the cutoff).
         """
-        cutoff = (
-            datetime.now(tz=timezone.utc) - _timedelta_days(days)
-        ).isoformat()
         try:
-            count = 0
-            for item in self._scan_history_items():
-                if str(item.get("recorded_at", "")) >= cutoff:
-                    count += 1
-            return count
+            cutoff = (
+                datetime.now(tz=timezone.utc) - _timedelta_days(days)
+            ).isoformat()
+            return sum(
+                1
+                for item in self._table.scan_all(self._HISTORY_FILTER)
+                if str(item.get("recorded_at", "")) >= cutoff
+            )
         except Exception:
-            logger.exception("IncidentHistoryStore.count_recent scan failed")
+            logger.exception("IncidentHistoryStore.count_recent failed")
             return None
-
-    # ------------------------------------------------------------------
-    # Internals
-    # ------------------------------------------------------------------
-
-    def _scan_history_items(self) -> list[dict]:
-        """Paginated Scan of the history partition (``record_type`` filter)."""
-        from boto3.dynamodb.conditions import Attr
-
-        items: list[dict] = []
-        kwargs: dict[str, Any] = {
-            "FilterExpression": Attr("record_type").eq(RECORD_TYPE)
-            & Attr("embedding").exists(),
-        }
-        while True:
-            response = self._table.scan(**kwargs)
-            items.extend(response.get("Items", []))
-            last_key = response.get("LastEvaluatedKey")
-            if not last_key:
-                break
-            kwargs["ExclusiveStartKey"] = last_key
-        return items
 
 
 def _timedelta_days(days: int):

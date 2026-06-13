@@ -5,12 +5,11 @@ from __future__ import annotations
 import os
 import time
 from collections.abc import Iterator
-from decimal import Decimal
 from typing import Any, cast
 
-import boto3
 from boto3.dynamodb.conditions import Attr
 
+from shared.dynamo_table import DynamoTable
 from shared.experiment import ExperimentResult, Judgement
 
 DEFAULT_TABLE_NAME = "sre-on-call-experiment-results"
@@ -37,9 +36,10 @@ class ExperimentResultsStore:
         table_name: str | None = None,
         dynamodb_resource: Any = None,
     ) -> None:
-        resource: Any = dynamodb_resource or boto3.resource("dynamodb")
         resolved = table_name or os.environ.get(_TABLE_NAME_ENV) or DEFAULT_TABLE_NAME
-        self._table = resource.Table(resolved)
+        # Offline judge-CLI path: fail-closed so a silent DDB error never
+        # corrupts a scorecard. Floats marshal to Decimal inside the adapter.
+        self._table = DynamoTable(resolved, dynamodb_resource=dynamodb_resource)
 
     def put_result(self, result: ExperimentResult) -> None:
         """Write an experiment result to DynamoDB."""
@@ -50,18 +50,18 @@ class ExperimentResultsStore:
             "investigation_id": result.investigation_id,
             "variant_id": result.variant_id,
             "report": result.report,
-            "agent_durations": {k: Decimal(str(v)) for k, v in result.agent_durations.items()},
-            "total_duration_seconds": Decimal(str(result.total_duration_seconds)),
+            "agent_durations": dict(result.agent_durations),
+            "total_duration_seconds": result.total_duration_seconds,
             "timestamp": result.timestamp,
             "ttl": now + _TTL_SECONDS,
         }
         # Optional telemetry — omit the attributes entirely when absent so old
         # rows and new rows share one shape and reads can default to ``None``.
         if result.total_cost_usd is not None:
-            item["total_cost_usd"] = Decimal(str(result.total_cost_usd))
+            item["total_cost_usd"] = result.total_cost_usd
         if result.total_tokens is not None:
             item["total_tokens"] = int(result.total_tokens)
-        self._table.put_item(Item=item)
+        self._table.put(item)
 
     def get_results(self, experiment_id: str, investigation_id: str) -> list[ExperimentResult]:
         """Fetch both variant results for a given investigation."""
@@ -69,10 +69,9 @@ class ExperimentResultsStore:
         results = []
         for vid in ("a", "b"):
             pk = f"{experiment_id}#{investigation_id}#{vid}"
-            resp = self._table.get_item(Key={"pk": pk})
-            item = resp.get("Item")
+            item = self._table.get({"pk": pk})
             if item:
-                results.append(_result_from_item(cast(dict[str, Any], item)))
+                results.append(_result_from_item(item))
         return results
 
     def iter_pairs(
@@ -85,7 +84,7 @@ class ExperimentResultsStore:
         missing a variant are skipped so the judge never compares against a hole.
         """
         by_investigation: dict[str, dict[str, ExperimentResult]] = {}
-        for item in self._scan_experiment_items(experiment_id):
+        for item in self._table.scan_all(Attr("experiment_id").eq(experiment_id)):
             vid = item.get("variant_id")
             if vid not in ("a", "b"):
                 continue  # judgement rows and anything unexpected
@@ -102,7 +101,7 @@ class ExperimentResultsStore:
         Idempotent — re-judging the same investigation overwrites in place.
         """
         now = int(time.time())
-        self._table.put_item(Item={
+        self._table.put({
             "pk": f"{judgement.experiment_id}#{judgement.investigation_id}#{_JUDGEMENT_SUFFIX}",
             "experiment_id": judgement.experiment_id,
             "investigation_id": judgement.investigation_id,
@@ -118,8 +117,7 @@ class ExperimentResultsStore:
     def get_judgement(self, experiment_id: str, investigation_id: str) -> Judgement | None:
         """Fetch the stored judgement for an investigation, or ``None``."""
         pk = f"{experiment_id}#{investigation_id}#{_JUDGEMENT_SUFFIX}"
-        resp = self._table.get_item(Key={"pk": pk})
-        item = resp.get("Item")
+        item = self._table.get({"pk": pk})
         if not item:
             return None
         d = cast(dict[str, Any], item)
@@ -132,21 +130,6 @@ class ExperimentResultsStore:
             rationale=d.get("rationale", ""),
             timestamp=d.get("timestamp", ""),
         )
-
-    def _scan_experiment_items(self, experiment_id: str) -> Iterator[dict[str, Any]]:
-        """Scan all items for an experiment, transparently paginating."""
-        kwargs: dict[str, Any] = {
-            "FilterExpression": Attr("experiment_id").eq(experiment_id),
-        }
-        while True:
-            resp = self._table.scan(**kwargs)
-            for item in resp.get("Items", []):
-                yield cast(dict[str, Any], item)
-            last_key = resp.get("LastEvaluatedKey")
-            if not last_key:
-                break
-            kwargs["ExclusiveStartKey"] = last_key
-
 
 def _result_from_item(d: dict[str, Any]) -> ExperimentResult:
     """Reconstruct an :class:`ExperimentResult` from a DynamoDB item."""

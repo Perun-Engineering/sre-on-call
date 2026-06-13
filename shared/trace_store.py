@@ -124,16 +124,16 @@ for at least the retention window.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import time
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from decimal import Decimal
 from typing import Any
 
+from shared.dynamo_table import DynamoTable
+from shared.s3_json_store import S3JsonStore
 from shared.tool_result import results_from_dict, results_to_dict
 
 logger = logging.getLogger(__name__)
@@ -263,21 +263,18 @@ class TraceStore:
         dynamodb_resource: Any = None,
         region_name: str | None = None,
     ) -> None:
-        self._bucket = bucket
-        self._table_name = table_name
-        self._region = region_name or os.environ.get("AWS_REGION", "us-east-1")
-
-        if s3_client is None:
-            import boto3
-
-            s3_client = boto3.client("s3", region_name=self._region)
-        self._s3 = s3_client
-
-        if dynamodb_resource is None:
-            import boto3
-
-            dynamodb_resource = boto3.resource("dynamodb", region_name=self._region)
-        self._table = dynamodb_resource.Table(table_name)
+        # Investigation-path archive: both adapters fail-open, so tracing never
+        # blocks an investigation and an S3 failure never skips the DDB index
+        # write (or vice versa) — each adapter call swallows independently.
+        self._s3 = S3JsonStore(
+            bucket, s3_client=s3_client, region_name=region_name, fail_open=True
+        )
+        self._ddb = DynamoTable(
+            table_name,
+            dynamodb_resource=dynamodb_resource,
+            region_name=region_name,
+            fail_open=True,
+        )
 
     # ------------------------------------------------------------------
     # Construction helpers
@@ -387,18 +384,7 @@ class TraceStore:
             "payload": payload,
         }
         key = self._event_key(investigation_id, source, event_type)
-        try:
-            self._s3.put_object(
-                Bucket=self._bucket,
-                Key=key,
-                Body=json.dumps(envelope, default=_json_default).encode("utf-8"),
-                ContentType="application/json",
-            )
-        except Exception:
-            logger.exception(
-                "TraceStore.put_event failed (investigation_id=%s, type=%s)",
-                investigation_id, event_type,
-            )
+        self._s3.put_json(key, envelope)
 
     def put_chart_series(
         self,
@@ -416,19 +402,7 @@ class TraceStore:
         record that outlives CloudWatch retention.
         """
         key = self._charts_key(investigation_id, chart_id, dt=dt)
-        try:
-            self._s3.put_object(
-                Bucket=self._bucket,
-                Key=key,
-                Body=json.dumps(payload, default=_json_default).encode("utf-8"),
-                ContentType="application/json",
-            )
-        except Exception:
-            logger.exception(
-                "TraceStore.put_chart_series failed "
-                "(investigation_id=%s, chart_id=%s)",
-                investigation_id, chart_id,
-            )
+        self._s3.put_json(key, payload)
 
     def put_page_model(
         self,
@@ -445,18 +419,7 @@ class TraceStore:
         swallows any S3 error.
         """
         key = self._page_model_key(investigation_id, dt=dt)
-        try:
-            self._s3.put_object(
-                Bucket=self._bucket,
-                Key=key,
-                Body=json.dumps(payload, default=_json_default).encode("utf-8"),
-                ContentType="application/json",
-            )
-        except Exception:
-            logger.exception(
-                "TraceStore.put_page_model failed (investigation_id=%s)",
-                investigation_id,
-            )
+        self._s3.put_json(key, payload)
 
     def get_page_model(
         self, investigation_id: str, *, dt: str | None = None
@@ -471,15 +434,7 @@ class TraceStore:
         finalize.
         """
         key = self._page_model_key(investigation_id, dt=dt)
-        try:
-            obj = self._s3.get_object(Bucket=self._bucket, Key=key)
-            return json.loads(obj["Body"].read())
-        except Exception:
-            logger.exception(
-                "TraceStore.get_page_model failed (investigation_id=%s)",
-                investigation_id,
-            )
-            return None
+        return self._s3.get_json(key)
 
     def put_results(
         self,
@@ -494,20 +449,7 @@ class TraceStore:
         original findings — events/manifest only keep summaries. Fail-open.
         """
         key = self._results_key(investigation_id, dt=dt)
-        try:
-            self._s3.put_object(
-                Bucket=self._bucket,
-                Key=key,
-                Body=json.dumps(
-                    results_to_dict(results), default=_json_default,
-                ).encode("utf-8"),
-                ContentType="application/json",
-            )
-        except Exception:
-            logger.exception(
-                "TraceStore.put_results failed (investigation_id=%s)",
-                investigation_id,
-            )
+        self._s3.put_json(key, results_to_dict(results))
 
     def get_results(
         self, investigation_id: str, *, dt: str | None = None
@@ -517,14 +459,8 @@ class TraceStore:
         Returns ``None`` on any miss/error (fail-open).
         """
         key = self._results_key(investigation_id, dt=dt)
-        try:
-            obj = self._s3.get_object(Bucket=self._bucket, Key=key)
-            payload = json.loads(obj["Body"].read())
-        except Exception:
-            logger.exception(
-                "TraceStore.get_results failed (investigation_id=%s)",
-                investigation_id,
-            )
+        payload = self._s3.get_json(key)
+        if payload is None:
             return None
         return results_from_dict(payload)
 
@@ -542,22 +478,11 @@ class TraceStore:
         """
         from boto3.dynamodb.conditions import Key
 
-        try:
-            resp = self._table.query(
-                IndexName=self.THREAD_INDEX_NAME,
-                KeyConditionExpression=(
-                    Key("channel_id").eq(str(channel_id))
-                    & Key("message_id").eq(str(thread_ts))
-                ),
-            )
-            items = resp.get("Items", [])
-        except Exception:
-            logger.exception(
-                "TraceStore.find_investigation query failed "
-                "(channel_id=%s, thread_ts=%s)",
-                channel_id, thread_ts,
-            )
-            return None
+        items = self._ddb.query(
+            self.THREAD_INDEX_NAME,
+            Key("channel_id").eq(str(channel_id))
+            & Key("message_id").eq(str(thread_ts)),
+        )
 
         if not items:
             return None
@@ -578,15 +503,7 @@ class TraceStore:
         Used by the PIR flow (#56) to recover the original ``alert_context``.
         """
         key = self._manifest_key(investigation_id, dt=dt)
-        try:
-            obj = self._s3.get_object(Bucket=self._bucket, Key=key)
-            return json.loads(obj["Body"].read())
-        except Exception:
-            logger.exception(
-                "TraceStore.get_manifest failed (investigation_id=%s)",
-                investigation_id,
-            )
-            return None
+        return self._s3.get_json(key)
 
     def put_manifest(self, manifest: TraceManifest) -> None:
         """Write the manifest to S3 and index entry to DynamoDB.
@@ -599,49 +516,22 @@ class TraceStore:
         dt = _dt_partition_from_iso(manifest.started_at)
         key = self._manifest_key(manifest.investigation_id, dt=dt)
 
-        try:
-            self._s3.put_object(
-                Bucket=self._bucket,
-                Key=key,
-                Body=json.dumps(
-                    manifest.to_json_dict(), default=_json_default,
-                ).encode("utf-8"),
-                ContentType="application/json",
+        # Both adapters fail-open independently: a failed S3 write does not
+        # skip the DDB index write, nor vice versa.
+        self._s3.put_json(key, manifest.to_json_dict())
+        self._ddb.put(
+            _index_item(
+                manifest,
+                s3_prefix=self.investigation_prefix(
+                    manifest.investigation_id, dt=dt
+                ),
             )
-        except Exception:
-            logger.exception(
-                "TraceStore.put_manifest S3 write failed (investigation_id=%s)",
-                manifest.investigation_id,
-            )
-
-        try:
-            self._table.put_item(
-                Item=_index_item(manifest, s3_prefix=self.investigation_prefix(
-                    manifest.investigation_id, dt=dt,
-                )),
-            )
-        except Exception:
-            logger.exception(
-                "TraceStore.put_manifest DDB index write failed "
-                "(investigation_id=%s)",
-                manifest.investigation_id,
-            )
+        )
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _json_default(obj: Any) -> Any:
-    """Fallback for ``json.dumps`` — handles dataclasses and Decimal."""
-    if hasattr(obj, "to_json_dict"):
-        return obj.to_json_dict()
-    if hasattr(obj, "__dataclass_fields__"):
-        return asdict(obj)
-    if isinstance(obj, Decimal):
-        return float(obj)
-    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
 def _dt_partition_from_iso(iso_ts: str) -> str:
@@ -658,7 +548,8 @@ def _dt_partition_from_iso(iso_ts: str) -> str:
 def _index_item(manifest: TraceManifest, *, s3_prefix: str) -> dict:
     """Build the DynamoDB item for the index entry.
 
-    Decimal is required for floats per DynamoDB's type system.
+    Floats (``total_duration_seconds``) are marshalled to ``Decimal`` by
+    :class:`~shared.dynamo_table.DynamoTable` on write.
     """
     now = int(time.time())
     ctx = manifest.alert_context
@@ -672,7 +563,7 @@ def _index_item(manifest: TraceManifest, *, s3_prefix: str) -> dict:
         "alert_timestamp": str(ctx.get("alert_timestamp", "")),
         "started_at": manifest.started_at,
         "ended_at": manifest.ended_at,
-        "total_duration_seconds": Decimal(str(manifest.total_duration_seconds)),
+        "total_duration_seconds": manifest.total_duration_seconds,
         "agent_count": len(manifest.dispatched_agents),
         "error_count": manifest.error_count,
         "status": manifest.status,
