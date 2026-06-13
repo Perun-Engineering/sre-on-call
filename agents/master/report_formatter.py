@@ -15,6 +15,12 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from agents.master.incident_facts import (
+    EvidenceFact,
+    IncidentFacts,
+    _enrichment_error,
+    _format_metadata_line,
+)
 from agents.master.synthesis import IncidentTimeline, TimelineEvent
 from shared.agents import AgentRegistry, get_registry
 from shared.models import AgentMetadata, AgentResult, AgentFailure, AlertContext
@@ -44,15 +50,6 @@ SEVERITY_EMOJI: dict[str, str] = {
     "medium": "🟡 Medium",
     "low": "🔵 Low",
 }
-
-
-def _enrichment_error(result: AgentResult | AgentFailure) -> str | None:
-    """Return an error message when ``result`` represents a failure, else ``None``."""
-    if isinstance(result, AgentFailure):
-        return result.error_message
-    if isinstance(result, AgentResult) and result.status in ("error", "unhealthy"):
-        return result.error_message or "unknown error"
-    return None
 
 
 def _timeline_sort_epoch(raw: str | None) -> float | None:
@@ -135,29 +132,6 @@ def _format_totals_line(
     return " · ".join(parts)
 
 
-def _format_metadata_line(metadata: AgentMetadata | None) -> str | None:
-    """Render an agent's per-invocation telemetry as a one-liner.
-
-    Returns ``None`` when there's nothing meaningful to show — keeps the
-    rendered report uncluttered for agents that didn't supply any metadata.
-    """
-    if metadata is None:
-        return None
-    parts: list[str] = []
-    if metadata.model_id:
-        parts.append(f"model={metadata.model_id}")
-    analysis_time = _format_analysis_time(metadata.started_at, metadata.completed_at)
-    if analysis_time:
-        parts.append(f"analysis time={analysis_time}")
-    if metadata.input_tokens is not None or metadata.output_tokens is not None:
-        in_t = metadata.input_tokens if metadata.input_tokens is not None else "?"
-        out_t = metadata.output_tokens if metadata.output_tokens is not None else "?"
-        parts.append(f"tokens={in_t}in/{out_t}out")
-    if metadata.cost_usd is not None:
-        parts.append(f"cost=${metadata.cost_usd:.4f}")
-    return " · ".join(parts) if parts else None
-
-
 class ReportFormatter:
     """Builds platform-agnostic report sections from agent results.
 
@@ -211,12 +185,23 @@ class ReportFormatter:
         Agents not in any of these sets are treated as not configured
         for this investigation and omitted entirely.
         """
-        sections = self._build_report_sections(
-            alert_context,
-            agent_results,
-            pending_agents or set(),
-            disabled_agents or set(),
-            skipped_agents or {},
+        facts = self._facts(
+            alert_context, agent_results,
+            pending_agents or set(), disabled_agents or set(), skipped_agents or {},
+        )
+        sections = ReportSections(
+            severity=facts.severity,
+            affected_services=facts.affected_services,
+            time_of_detection=facts.time_of_detection,
+            summary=facts.summary,
+            root_cause=facts.root_cause,
+            evidence_blocks=[self._evidence_block(e) for e in facts.evidence],
+            impact_assessment=facts.impact_assessment,
+            recommended_actions=facts.recommended_actions,
+            links=facts.links,
+            totals_line=facts.totals_line,
+            summary_parts=facts.summary_parts,
+            root_cause_parts=facts.root_cause_parts,
         )
         sections.variant_label = alert_context.variant_label
         sections.analysis = analysis
@@ -428,53 +413,32 @@ class ReportFormatter:
         unparseable timestamp keeps stable insertion order rather than
         misordering the narrative.
         """
-        events: list[TimelineEvent] = [
-            TimelineEvent(
-                timestamp=alert_context.alert_timestamp,
-                source="alert",
-                kind="alert",
-                label=_first_line(alert_context.alert_text),
-            )
-        ]
-        for agent_key in self._ordered_specialized_ids():
-            result = agent_results.get(agent_key)
-            if not isinstance(result, AgentResult) or result.status != "success":
-                continue
-            _, display_name = self._display(agent_key)
-            for f in result.findings:
-                chart_id = (
-                    f.chart.chart_id
-                    if f.chart is not None and f.chart.chart_id in result.chart_series
-                    else None
-                )
-                events.append(
-                    TimelineEvent(
-                        timestamp=f.timestamp,
-                        source=f.source or display_name,
-                        kind="finding",
-                        label=_first_line(f.content),
-                        severity=f.severity,
-                        chart_id=chart_id,
-                    )
-                )
-            completed_at = result.metadata.completed_at if result.metadata else None
-            if completed_at:
-                events.append(
-                    TimelineEvent(
-                        timestamp=completed_at,
-                        source=display_name,
-                        kind="action",
-                        label=f"{display_name} reported",
-                    )
-                )
+        return IncidentFacts.derive(
+            self.registry, alert_context, agent_results,
+            pending=set(), disabled=set(), skipped={},
+        ).timeline
 
-        events.sort(
-            key=lambda e: (
-                _timeline_sort_epoch(e.timestamp) is None,
-                _timeline_sort_epoch(e.timestamp) or 0.0,
-            )
+    # --- Facts helpers ---
+
+    def _facts(
+        self,
+        alert_context: AlertContext,
+        agent_results: dict[str, AgentResult | AgentFailure],
+        pending_agents: set[str],
+        disabled_agents: set[str],
+        skipped_agents: dict[str, str],
+    ) -> IncidentFacts:
+        return IncidentFacts.derive(
+            self.registry, alert_context, agent_results,
+            pending=pending_agents, disabled=disabled_agents, skipped=skipped_agents,
         )
-        return IncidentTimeline(events=events)
+
+    @staticmethod
+    def _evidence_block(fact: EvidenceFact) -> EvidenceBlock:
+        return EvidenceBlock(
+            emoji=fact.emoji, display_name=fact.display_name,
+            lines=fact.lines, metadata_line=fact.metadata_line, status=fact.status,
+        )
 
     # --- Registry helpers ---
 
@@ -514,33 +478,6 @@ class ReportFormatter:
         if len(entries) == 1:
             entries.append("- (No additional timeline data available from agents)")
         return "\n".join(entries)
-
-    def _build_report_sections(
-        self,
-        alert_context: AlertContext,
-        agent_results: dict[str, AgentResult | AgentFailure],
-        pending_agents: set[str],
-        disabled_agents: set[str],
-        skipped_agents: dict[str, str],
-    ) -> ReportSections:
-        summary_parts = self._collect_summary_parts(agent_results)
-        root_cause_parts = self._collect_root_cause_parts(agent_results)
-        return ReportSections(
-            severity=self._determine_severity(agent_results),
-            affected_services=self._extract_affected_services(alert_context, agent_results),
-            time_of_detection=alert_context.alert_timestamp,
-            summary=self._joined_summary_or_fallback(alert_context, summary_parts),
-            root_cause=self._joined_root_cause_or_fallback(root_cause_parts),
-            evidence_blocks=self._build_evidence_blocks(
-                agent_results, pending_agents, disabled_agents, skipped_agents,
-            ),
-            impact_assessment=self._build_impact_assessment(alert_context, agent_results),
-            recommended_actions=self._build_recommended_actions(agent_results, pending_agents),
-            links=self._build_links(agent_results),
-            totals_line=_format_totals_line(agent_results),
-            summary_parts=summary_parts,
-            root_cause_parts=root_cause_parts,
-        )
 
     def _determine_severity(
         self, agent_results: dict[str, AgentResult | AgentFailure]
