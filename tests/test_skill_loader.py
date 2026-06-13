@@ -83,6 +83,25 @@ def test_resolve_rejects_name_mismatch(tmp_path: Path):
         resolve("list_pods", "eks", repo_root=repo)
 
 
+def test_find_repo_root_falls_back_to_source_layout_without_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # Regression for the #23 deploy-blocker: AWS runtime images externalize
+    # config.yaml to SSM and drop it from disk, so the cwd walk finds nothing.
+    # _find_repo_root must still anchor on the source layout (skill_loader.py
+    # lives at <root>/shared/skill_loader.py) instead of crashing at startup.
+    from shared import skill_loader
+
+    monkeypatch.chdir(tmp_path)  # no config.yaml anywhere up the chain
+    root = skill_loader._find_repo_root()
+    assert root == Path(skill_loader.__file__).resolve().parent.parent
+
+    # and resolve() works without an explicit repo_root from that cwd, the way
+    # a2a_factory calls it in the container.
+    skill = skill_loader.resolve("investigate_alert", "master")
+    assert skill.name == "investigate_alert"
+
+
 def test_import_tool_resolves_module_and_attr():
     tool = import_tool("shared.skill_loader:resolve")
     assert tool is resolve

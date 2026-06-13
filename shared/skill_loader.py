@@ -78,7 +78,11 @@ def _find_repo_root() -> Path:
     for parent in [cwd, *cwd.parents]:
         if (parent / "config.yaml").exists():
             return parent
-    raise FileNotFoundError("repo root not found (looked for config.yaml)")
+    # config.yaml is no longer on disk in AWS runtime images (#23 externalized
+    # it to SSM). Fall back to the source layout: skill_loader.py always lives
+    # at <root>/shared/skill_loader.py, so its package parent is the repo root
+    # in both the container (/app) and local checkouts.
+    return Path(__file__).resolve().parent.parent
 
 
 def import_tool(tool_symbol: str):
