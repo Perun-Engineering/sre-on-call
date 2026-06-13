@@ -15,6 +15,7 @@ from shared.experiment_judge import (
     JudgeVerdict,
     build_judge_prompt,
 )
+from tests.fakes import FakeModelCall
 
 
 def _result(variant_id: str, report: str, investigation_id: str = "inv-1") -> ExperimentResult:
@@ -38,26 +39,14 @@ def _verdict(pick: str) -> JudgeVerdict:
     )
 
 
-class _FakeJudge:
-    """Stand-in Strands agent driven by a prompt -> verdict function."""
-
-    def __init__(
-        self,
-        verdict_fn: Callable[[str], JudgeVerdict],
-        *,
-        delay: float = 0.0,
-    ) -> None:
-        self._fn = verdict_fn
-        self._delay = delay
-        self.prompts: list[str] = []
-
-    async def structured_output_async(
-        self, output_model: type[JudgeVerdict], prompt: str
-    ) -> JudgeVerdict:
-        self.prompts.append(prompt)
-        if self._delay:
-            await asyncio.sleep(self._delay)
-        return self._fn(prompt)
+def _judge(
+    verdict_fn: Callable[[str], JudgeVerdict],
+    *,
+    model_id: str | None = DEFAULT_JUDGE_MODEL_ID,
+) -> ExperimentJudge:
+    return ExperimentJudge(
+        model_call=FakeModelCall(response_fn=verdict_fn, model_id=model_id)
+    )
 
 
 class TestBuildJudgePrompt:
@@ -75,7 +64,7 @@ class TestDualOrder:
     @pytest.mark.asyncio
     async def test_position_bias_resolves_to_tie(self):
         # Judge always prefers whatever is shown as REPORT 1 (pure position bias).
-        judge = ExperimentJudge(agent=_FakeJudge(lambda _p: _verdict("first")))
+        judge = _judge(lambda _p: _verdict("first"))
 
         judgement = await judge.judge_pair(_result("a", "AA"), _result("b", "BB"))
 
@@ -89,7 +78,7 @@ class TestDualOrder:
             a_is_first = prompt.index("ALPHA") < prompt.index("BETA")
             return _verdict("first" if a_is_first else "second")
 
-        judge = ExperimentJudge(agent=_FakeJudge(prefer_a))
+        judge = _judge(prefer_a)
         judgement = await judge.judge_pair(_result("a", "ALPHA"), _result("b", "BETA"))
 
         assert judgement.overall_winner == "a"
@@ -97,20 +86,20 @@ class TestDualOrder:
 
     @pytest.mark.asyncio
     async def test_consistent_tie_stays_tie(self):
-        judge = ExperimentJudge(agent=_FakeJudge(lambda _p: _verdict("tie")))
+        judge = _judge(lambda _p: _verdict("tie"))
         judgement = await judge.judge_pair(_result("a", "AA"), _result("b", "BB"))
         assert judgement.overall_winner == "tie"
 
     @pytest.mark.asyncio
     async def test_runs_both_orderings(self):
-        fake = _FakeJudge(lambda _p: _verdict("tie"))
-        judge = ExperimentJudge(agent=fake)
+        mc = FakeModelCall(response_fn=lambda _p: _verdict("tie"))
+        judge = ExperimentJudge(model_call=mc)
         await judge.judge_pair(_result("a", "AA"), _result("b", "BB"))
-        assert len(fake.prompts) == 2
+        assert len(mc.prompts) == 2
 
     @pytest.mark.asyncio
     async def test_carries_pair_identity(self):
-        judge = ExperimentJudge(agent=_FakeJudge(lambda _p: _verdict("tie")))
+        judge = _judge(lambda _p: _verdict("tie"))
         judgement = await judge.judge_pair(
             _result("a", "AA", investigation_id="inv-42"),
             _result("b", "BB", investigation_id="inv-42"),
@@ -125,26 +114,26 @@ class TestDualOrder:
 class TestModelResolution:
     def test_default_is_opus_class(self, monkeypatch):
         monkeypatch.delenv("JUDGE_MODEL_ID", raising=False)
-        assert ExperimentJudge().model_id == DEFAULT_JUDGE_MODEL_ID
+        assert ExperimentJudge.from_env().model_id == DEFAULT_JUDGE_MODEL_ID
 
     def test_env_override(self, monkeypatch):
         monkeypatch.setenv("JUDGE_MODEL_ID", "us.anthropic.claude-sonnet-4-6")
-        assert ExperimentJudge().model_id == "us.anthropic.claude-sonnet-4-6"
+        assert ExperimentJudge.from_env().model_id == "us.anthropic.claude-sonnet-4-6"
 
-    def test_explicit_arg_wins_over_env(self, monkeypatch):
-        monkeypatch.setenv("JUDGE_MODEL_ID", "us.anthropic.claude-sonnet-4-6")
-        assert ExperimentJudge(model_id="explicit-id").model_id == "explicit-id"
+    def test_injected_model_id_is_reported(self):
+        # The judge surfaces whatever model its composed call resolves to.
+        judge = ExperimentJudge(model_call=FakeModelCall(model_id="explicit-id"))
+        assert judge.model_id == "explicit-id"
 
     def test_from_env_reads_timeout(self, monkeypatch):
         monkeypatch.setenv("JUDGE_TIMEOUT_SECONDS", "12.5")
-        assert ExperimentJudge.from_env()._timeout_seconds == 12.5
+        assert ExperimentJudge.from_env().timeout_seconds == 12.5
 
 
 class TestBiasWarning:
     @pytest.mark.asyncio
-    async def test_warns_when_judge_equals_variant_model(self, monkeypatch, caplog):
-        monkeypatch.setenv("JUDGE_MODEL_ID", "shared-model")
-        judge = ExperimentJudge(agent=_FakeJudge(lambda _p: _verdict("tie")))
+    async def test_warns_when_judge_equals_variant_model(self, caplog):
+        judge = _judge(lambda _p: _verdict("tie"), model_id="shared-model")
         with caplog.at_level(logging.WARNING):
             await judge.judge_pair(
                 _result("a", "AA"),
@@ -154,9 +143,8 @@ class TestBiasWarning:
         assert any("matches a variant" in r.message for r in caplog.records)
 
     @pytest.mark.asyncio
-    async def test_no_warning_when_distinct(self, monkeypatch, caplog):
-        monkeypatch.setenv("JUDGE_MODEL_ID", "judge-model")
-        judge = ExperimentJudge(agent=_FakeJudge(lambda _p: _verdict("tie")))
+    async def test_no_warning_when_distinct(self, caplog):
+        judge = _judge(lambda _p: _verdict("tie"), model_id="judge-model")
         with caplog.at_level(logging.WARNING):
             await judge.judge_pair(
                 _result("a", "AA"),
@@ -168,10 +156,13 @@ class TestBiasWarning:
 
 class TestTimeout:
     @pytest.mark.asyncio
-    async def test_raises_on_timeout(self):
+    async def test_propagates_seam_failure(self):
+        # The seam raises timeouts/errors from call_or_raise; the judge, which
+        # owns its own failure policy, propagates them to the CLI.
         judge = ExperimentJudge(
-            agent=_FakeJudge(lambda _p: _verdict("tie"), delay=0.2),
-            timeout_seconds=0.01,
+            model_call=FakeModelCall(
+                response_fn=lambda _p: _verdict("tie"), raises=asyncio.TimeoutError()
+            )
         )
         with pytest.raises(asyncio.TimeoutError):
             await judge.judge_pair(_result("a", "AA"), _result("b", "BB"))

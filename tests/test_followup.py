@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 
 from agents.master.followup import (
@@ -15,6 +13,7 @@ from agents.master.followup import (
     build_followup_prompt,
 )
 from shared.models import AgentFailure, AgentResult, AlertContext, Finding
+from tests.fakes import FakeModelCall
 
 
 def _alert() -> AlertContext:
@@ -61,36 +60,22 @@ class TestBuildFollowupPrompt:
         assert "eks" in prompt
 
 
-class _FakeAgent:
-    def __init__(
-        self,
-        *,
-        returns: FollowupDecision | None = None,
-        raises: Exception | None = None,
-        delay: float = 0.0,
-    ):
-        self._returns = returns
-        self._raises = raises
-        self._delay = delay
-        self.calls: list[str] = []
-
-    async def structured_output_async(
-        self, output_model: type[FollowupDecision], prompt: str
-    ) -> FollowupDecision:
-        self.calls.append(prompt)
-        if self._delay:
-            await asyncio.sleep(self._delay)
-        if self._raises is not None:
-            raise self._raises
-        assert self._returns is not None
-        return self._returns
+def _planner(
+    decision: FollowupDecision | None = None,
+    *,
+    raises: Exception | None = None,
+    max_agents: int = DEFAULT_MAX_FOLLOWUP_AGENTS,
+) -> FollowupPlanner:
+    return FollowupPlanner(
+        model_call=FakeModelCall(returns=decision, raises=raises), max_agents=max_agents
+    )
 
 
 class TestPlan:
     @pytest.mark.asyncio
     async def test_returns_refined_dispatches(self):
-        agent = _FakeAgent(
-            returns=FollowupDecision(
+        planner = _planner(
+            FollowupDecision(
                 should_followup=True,
                 dispatches=[
                     FollowupDispatch(agent_id="eks", hint="describe payment pods now")
@@ -98,36 +83,37 @@ class TestPlan:
                 rationale="logs point at OOM; confirm in k8s",
             )
         )
-        plan = await FollowupPlanner(agent=agent).plan(_alert(), {}, _candidates())
+        plan = await planner.plan(_alert(), {}, _candidates())
         assert plan == [("eks", "describe payment pods now")]
 
     @pytest.mark.asyncio
     async def test_caps_at_max_agents(self):
         many = [FollowupCandidate(f"a{i}", f"agent {i}") for i in range(5)]
-        agent = _FakeAgent(
-            returns=FollowupDecision(
+        planner = _planner(
+            FollowupDecision(
                 should_followup=True,
                 dispatches=[FollowupDispatch(agent_id=f"a{i}") for i in range(5)],
                 rationale="all of them",
-            )
+            ),
+            max_agents=2,
         )
-        plan = await FollowupPlanner(agent=agent, max_agents=2).plan(_alert(), {}, many)
+        plan = await planner.plan(_alert(), {}, many)
         assert len(plan) == 2
         assert [aid for aid, _ in plan] == ["a0", "a1"]
 
     @pytest.mark.asyncio
     async def test_should_followup_false_returns_empty(self):
-        agent = _FakeAgent(
-            returns=FollowupDecision(
+        planner = _planner(
+            FollowupDecision(
                 should_followup=False, dispatches=[], rationale="enough evidence"
             )
         )
-        assert await FollowupPlanner(agent=agent).plan(_alert(), {}, _candidates()) == []
+        assert await planner.plan(_alert(), {}, _candidates()) == []
 
     @pytest.mark.asyncio
     async def test_unknown_ids_dropped(self):
-        agent = _FakeAgent(
-            returns=FollowupDecision(
+        planner = _planner(
+            FollowupDecision(
                 should_followup=True,
                 dispatches=[
                     FollowupDispatch(agent_id="ghost", hint="x"),
@@ -136,30 +122,18 @@ class TestPlan:
                 rationale="r",
             )
         )
-        plan = await FollowupPlanner(agent=agent).plan(_alert(), {}, _candidates())
+        plan = await planner.plan(_alert(), {}, _candidates())
         assert plan == [("eks", "real")]
 
     @pytest.mark.asyncio
     async def test_no_candidates_returns_empty(self):
-        agent = _FakeAgent(returns=FollowupDecision(should_followup=True, dispatches=[], rationale="r"))
-        assert await FollowupPlanner(agent=agent).plan(_alert(), {}, []) == []
+        planner = _planner(FollowupDecision(should_followup=True, dispatches=[], rationale="r"))
+        assert await planner.plan(_alert(), {}, []) == []
 
     @pytest.mark.asyncio
     async def test_fail_open_on_model_error(self):
-        agent = _FakeAgent(raises=RuntimeError("bedrock down"))
-        assert await FollowupPlanner(agent=agent).plan(_alert(), {}, _candidates()) == []
-
-    @pytest.mark.asyncio
-    async def test_fail_open_on_timeout(self):
-        agent = _FakeAgent(
-            returns=FollowupDecision(
-                should_followup=True,
-                dispatches=[FollowupDispatch(agent_id="eks")],
-                rationale="r",
-            ),
-            delay=0.2,
-        )
-        planner = FollowupPlanner(agent=agent, timeout_seconds=0.01)
+        # The seam swallows errors/timeouts to None; the planner skips the round.
+        planner = _planner(raises=RuntimeError("bedrock down"))
         assert await planner.plan(_alert(), {}, _candidates()) == []
 
 

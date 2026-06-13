@@ -19,14 +19,13 @@ archive), never on the investigation hot path.
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import os
-from typing import Literal, Protocol
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from shared.experiment import JUDGEMENT_DIMENSIONS, ExperimentResult, Judgement
+from shared.model_call import StructuredModelCall
 
 logger = logging.getLogger(__name__)
 
@@ -79,12 +78,19 @@ def build_judge_prompt(first: ExperimentResult, second: ExperimentResult) -> str
     ])
 
 
-class _StructuredJudge(Protocol):
-    """Minimal seam over a Strands ``Agent`` for structured output."""
-
-    async def structured_output_async(
-        self, output_model: type[JudgeVerdict], prompt: str
-    ) -> JudgeVerdict: ...
+def _default_model_call() -> StructuredModelCall:
+    """The judge's structured-output call: Opus-class default, ``temperature=0``,
+    no gate flag (the judge is always available; it is gated by being offline)."""
+    model_call = StructuredModelCall.from_env(
+        system_prompt=_SYSTEM_PROMPT,
+        model_env="JUDGE_MODEL_ID",
+        timeout_env="JUDGE_TIMEOUT_SECONDS",
+        default_timeout=DEFAULT_JUDGE_TIMEOUT_SECONDS,
+        default_model_id=DEFAULT_JUDGE_MODEL_ID,
+        temperature=0.0,
+    )
+    assert model_call is not None  # no gate_env → always built
+    return model_call
 
 
 def _map_pick(pick: str, first_variant: str) -> str:
@@ -103,65 +109,34 @@ def _combine(winner_order_ab: str, winner_order_ba: str) -> str:
 class ExperimentJudge:
     """Runs the dual-order pairwise judge for one variant pair.
 
-    The judge agent is injectable for tests; in production it is lazily built
-    from a tools-less Strands ``Agent`` bound to the judge model (Opus-class by
-    default, ``JUDGE_MODEL_ID`` override). ``judge_pair`` is offline-only.
+    Composes one :class:`StructuredModelCall` (injectable for tests), pinned to
+    its own (Opus-class by default, ``JUDGE_MODEL_ID`` override) model at
+    ``temperature=0`` independent of the deploy-time ``MODEL_ID`` the scanners
+    run on. ``judge_pair`` is offline-only and uses ``call_or_raise`` — the
+    judge owns its failure policy (the CLI fails per-pair). ``judge_pair`` is
+    offline-only.
     """
 
-    def __init__(
-        self,
-        *,
-        agent: _StructuredJudge | None = None,
-        model_id: str | None = None,
-        timeout_seconds: float = DEFAULT_JUDGE_TIMEOUT_SECONDS,
-    ) -> None:
-        self._agent = agent
-        self._model_id = model_id
-        self._timeout_seconds = timeout_seconds
+    def __init__(self, *, model_call: StructuredModelCall | None = None) -> None:
+        self._model_call = model_call if model_call is not None else _default_model_call()
 
     @classmethod
     def from_env(cls) -> ExperimentJudge:
         """Build a judge from the environment (``JUDGE_MODEL_ID``/``JUDGE_TIMEOUT_SECONDS``)."""
-        timeout_raw = os.environ.get("JUDGE_TIMEOUT_SECONDS")
-        try:
-            timeout = float(timeout_raw) if timeout_raw else DEFAULT_JUDGE_TIMEOUT_SECONDS
-        except ValueError:
-            timeout = DEFAULT_JUDGE_TIMEOUT_SECONDS
-        return cls(
-            model_id=os.environ.get("JUDGE_MODEL_ID") or None,
-            timeout_seconds=timeout,
-        )
+        return cls(model_call=_default_model_call())
 
     @property
     def model_id(self) -> str:
         """The judge model id actually in effect (explicit → env → Opus default)."""
-        return self._model_id or os.environ.get("JUDGE_MODEL_ID") or DEFAULT_JUDGE_MODEL_ID
+        return self._model_call.model_id or DEFAULT_JUDGE_MODEL_ID
 
-    def _get_agent(self) -> _StructuredJudge:
-        """Return the structured-output agent, building it lazily on first use."""
-        if self._agent is not None:
-            return self._agent
-        from strands import Agent
-
-        from shared.a2a_factory import _resolve_model
-
-        # Pin the judge to its own (Opus-class) model, independent of the
-        # deploy-time ``MODEL_ID`` the scanners run on.
-        model = _resolve_model(model_id_override=self.model_id)
-        try:
-            model.update_config(temperature=0.0)  # type: ignore[attr-defined]
-        except Exception:  # pragma: no cover - depends on Strands model surface
-            logger.debug("Could not set judge temperature=0; relying on dual-order.")
-        self._agent = Agent(model=model, system_prompt=_SYSTEM_PROMPT)
-        return self._agent
+    @property
+    def timeout_seconds(self) -> float:
+        return self._model_call.timeout_seconds
 
     async def _verdict(self, first: ExperimentResult, second: ExperimentResult) -> JudgeVerdict:
-        agent = self._get_agent()
         prompt = build_judge_prompt(first, second)
-        return await asyncio.wait_for(
-            agent.structured_output_async(JudgeVerdict, prompt),
-            timeout=self._timeout_seconds,
-        )
+        return await self._model_call.call_or_raise(JudgeVerdict, prompt)
 
     async def judge_pair(
         self,

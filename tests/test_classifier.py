@@ -223,6 +223,32 @@ class TestBedrockLlmClassifier:
         clf = BedrockLlmClassifier(client=_FakeBedrock(_converse_response("ALERT")))
         assert clf._model_id == "env-model"
 
+    def test_guardrail_applied_when_configured(self, monkeypatch):
+        monkeypatch.setenv("BEDROCK_GUARDRAIL_ID", "gr-123")
+        monkeypatch.setenv("BEDROCK_GUARDRAIL_VERSION", "7")
+        client = _FakeBedrock(_converse_response("ALERT"))
+        BedrockLlmClassifier(model_id="m", client=client).classify("untrusted text")
+        assert client.kwargs is not None
+        assert client.kwargs["guardrailConfig"] == {
+            "guardrailIdentifier": "gr-123",
+            "guardrailVersion": "7",
+        }
+
+    def test_guardrail_version_defaults_to_draft(self, monkeypatch):
+        monkeypatch.setenv("BEDROCK_GUARDRAIL_ID", "gr-123")
+        monkeypatch.delenv("BEDROCK_GUARDRAIL_VERSION", raising=False)
+        client = _FakeBedrock(_converse_response("ALERT"))
+        BedrockLlmClassifier(model_id="m", client=client).classify("x")
+        assert client.kwargs is not None
+        assert client.kwargs["guardrailConfig"]["guardrailVersion"] == "DRAFT"
+
+    def test_no_guardrail_key_when_unset(self, monkeypatch):
+        monkeypatch.delenv("BEDROCK_GUARDRAIL_ID", raising=False)
+        client = _FakeBedrock(_converse_response("ALERT"))
+        BedrockLlmClassifier(model_id="m", client=client).classify("x")
+        assert client.kwargs is not None
+        assert "guardrailConfig" not in client.kwargs
+
 
 class TestParseVerdict:
     @pytest.mark.parametrize(

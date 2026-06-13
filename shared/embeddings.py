@@ -30,6 +30,8 @@ import os
 from array import array
 from typing import Any, Protocol
 
+from shared.env import truthy
+
 logger = logging.getLogger(__name__)
 
 
@@ -117,7 +119,7 @@ class EmbeddingClient:
         permission it needs) is explicitly opt-in. The boto3 client is created
         lazily on first :meth:`embed`, so returning a client here costs nothing.
         """
-        if not _truthy(os.environ.get("INCIDENT_HISTORY_ENABLED")):
+        if not truthy(os.environ.get("INCIDENT_HISTORY_ENABLED")):
             return None
         model_id = os.environ.get("EMBEDDING_MODEL_ID") or DEFAULT_EMBEDDING_MODEL_ID
         dims_raw = os.environ.get("EMBEDDING_DIMENSIONS")
@@ -165,7 +167,3 @@ class EmbeddingClient:
         except Exception:
             logger.warning("Embedding call failed; skipping similarity.", exc_info=True)
             return None
-
-
-def _truthy(value: str | None) -> bool:
-    return (value or "").strip().lower() in ("1", "true", "yes", "on")

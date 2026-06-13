@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 
 from agents.master.synthesis import (
@@ -12,6 +10,7 @@ from agents.master.synthesis import (
     build_synthesis_prompt,
 )
 from shared.models import AgentFailure, AgentResult, AlertContext, Finding
+from tests.fakes import FakeModelCall
 
 
 def _alert() -> AlertContext:
@@ -72,31 +71,6 @@ class TestBuildSynthesisPrompt:
         assert "timed out after 60s" in prompt
 
 
-class _FakeAgent:
-    """Stand-in Strands agent for structured_output_async."""
-
-    def __init__(
-        self,
-        *,
-        returns: IncidentAnalysis | None = None,
-        raises: Exception | None = None,
-        delay: float = 0.0,
-    ):
-        self._returns = returns
-        self._raises = raises
-        self._delay = delay
-        self.calls: list[str] = []
-
-    async def structured_output_async(
-        self, output_model: type[IncidentAnalysis], prompt: str
-    ) -> IncidentAnalysis:
-        self.calls.append(prompt)
-        if self._delay:
-            await asyncio.sleep(self._delay)
-        if self._raises is not None:
-            raise self._raises
-        assert self._returns is not None
-        return self._returns
 
 
 def _analysis() -> IncidentAnalysis:
@@ -111,27 +85,19 @@ def _analysis() -> IncidentAnalysis:
 class TestSynthesize:
     @pytest.mark.asyncio
     async def test_returns_structured_analysis(self):
-        agent = _FakeAgent(returns=_analysis())
-        synth = AnalysisSynthesizer(agent=agent)
+        model_call = FakeModelCall(returns=_analysis())
+        synth = AnalysisSynthesizer(model_call=model_call)
 
         result = await synth.synthesize(_alert(), {})
 
         assert isinstance(result, IncidentAnalysis)
         assert result.confidence == "high"
-        assert agent.calls, "agent should have been invoked"
+        assert model_call.prompts, "the model call should have been invoked"
 
     @pytest.mark.asyncio
     async def test_fail_open_on_model_error(self):
-        synth = AnalysisSynthesizer(agent=_FakeAgent(raises=RuntimeError("bedrock down")))
-
-        assert await synth.synthesize(_alert(), {}) is None
-
-    @pytest.mark.asyncio
-    async def test_fail_open_on_timeout(self):
-        synth = AnalysisSynthesizer(
-            agent=_FakeAgent(returns=_analysis(), delay=0.2),
-            timeout_seconds=0.01,
-        )
+        # The seam swallows errors/timeouts to None; synthesis posts no Analysis.
+        synth = AnalysisSynthesizer(model_call=FakeModelCall(raises=RuntimeError("bedrock down")))
 
         assert await synth.synthesize(_alert(), {}) is None
 
