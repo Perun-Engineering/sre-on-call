@@ -1,7 +1,7 @@
 """IncidentFacts — the canonical derived view of one investigation (#66)."""
 from __future__ import annotations
 
-from agents.master.incident_facts import EvidenceFact, IncidentFacts
+from agents.master.incident_facts import EvidenceFact, IncidentFacts, render_pir_timeline_markdown
 from agents.master.synthesis import IncidentTimeline
 from shared.agents import get_registry
 from shared.models import AgentFailure, AgentMetadata, AgentResult, AlertContext, Finding
@@ -117,3 +117,29 @@ def test_derive_timeline_is_clock_sorted_with_alert_and_findings():
     assert "alert" in kinds and "finding" in kinds
     ts = [e.timestamp for e in facts.timeline.events]
     assert ts.index("2025-01-15T14:31:00Z") < ts.index("2025-01-15T14:32:00Z")
+
+
+def test_pir_timeline_markdown_lists_alert_and_findings_in_clock_order():
+    reg = get_registry()
+    ok_id = next(a.id for a in reg.all(kind="specialized"))
+    results: dict[str, AgentResult | AgentFailure] = {
+        ok_id: AgentResult(agent_name=ok_id, status="success",
+                           findings=[Finding(source="#alerts",
+                                             timestamp="2025-01-15T14:31:00Z",
+                                             content="Disk warning", severity="warning")],
+                           summary="s"),
+    }
+    facts = IncidentFacts.derive(reg, _ctx(alert_text="Disk full"),
+                                 results, pending=set(), disabled=set(), skipped={})
+    md = render_pir_timeline_markdown(facts.timeline)
+    assert "Disk warning" in md
+    assert "2025-01-15T14:31:00Z" in md
+    assert md.lstrip().startswith("-")
+    assert "No additional timeline data" not in md
+    # finding (14:31) precedes the alert (14:32) — clock order, not insertion order
+    assert md.index("2025-01-15T14:31:00Z") < md.index("2025-01-15T14:32:00Z")
+
+
+def test_pir_timeline_markdown_empty_has_fallback_line():
+    md = render_pir_timeline_markdown(IncidentTimeline(events=[]))
+    assert "No additional timeline data" in md

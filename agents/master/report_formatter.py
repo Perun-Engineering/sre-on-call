@@ -20,6 +20,7 @@ from agents.master.incident_facts import (
     IncidentFacts,
     _enrichment_error,
     _format_metadata_line,
+    render_pir_timeline_markdown,
 )
 from agents.master.synthesis import IncidentTimeline, TimelineEvent
 from shared.agents import AgentRegistry, get_registry
@@ -275,14 +276,13 @@ class ReportFormatter:
         agent_results: dict[str, AgentResult | AgentFailure],
     ) -> PIRSections:
         """Build the structured Post-Incident Report sections."""
-        summary_parts = self._collect_summary_parts(agent_results)
-        root_cause_parts = self._collect_root_cause_parts(agent_results)
+        facts = self._facts(alert_context, agent_results, set(), set(), {})
         return PIRSections(
-            incident_summary=self._joined_summary_or_fallback(alert_context, summary_parts),
-            timeline=self._build_pir_timeline(alert_context, agent_results),
-            root_cause=self._joined_root_cause_or_fallback(root_cause_parts),
-            impact=self._build_impact_assessment(alert_context, agent_results),
-            action_items=self._build_recommended_actions(agent_results, set()),
+            incident_summary=facts.summary,
+            timeline=render_pir_timeline_markdown(facts.timeline),
+            root_cause=facts.root_cause,
+            impact=facts.impact_assessment,
+            action_items=facts.recommended_actions,
             lessons_learned="(To be filled in by the team during the post-incident review.)",
         )
 
@@ -440,24 +440,6 @@ class ReportFormatter:
         return [a.id for a in self.registry.all(kind="specialized")]
 
     # --- Private helpers ---
-
-    def _build_pir_timeline(
-        self,
-        alert_context: AlertContext,
-        agent_results: dict[str, AgentResult | AgentFailure],
-    ) -> str:
-        """Build a chronological timeline from alert context and agent findings."""
-        entries: list[str] = [
-            f"- {alert_context.alert_timestamp} — Alert detected: {alert_context.alert_text}",
-        ]
-        for agent_key in self._ordered_specialized_ids():
-            result = agent_results.get(agent_key)
-            if isinstance(result, AgentResult) and result.status == "success":
-                for finding in result.findings:
-                    entries.append(f"- {finding.timestamp} — [{finding.source}] {finding.content}")
-        if len(entries) == 1:
-            entries.append("- (No additional timeline data available from agents)")
-        return "\n".join(entries)
 
     def _determine_severity(
         self, agent_results: dict[str, AgentResult | AgentFailure]

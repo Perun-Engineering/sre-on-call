@@ -606,3 +606,21 @@ class IncidentFacts:
                     if url:
                         links.append((url, finding.source))
         return links
+
+
+def render_pir_timeline_markdown(timeline: IncidentTimeline) -> str:
+    """Project an ``IncidentTimeline`` to the PIR's markdown timeline block (#66).
+
+    One bullet per event in clock order: ``- <timestamp> — [<source>] <label>``.
+    Replaces the former second-walk ``_build_pir_timeline``; the PIR timeline is
+    now a projection of the same deterministic ``IncidentTimeline`` the page and
+    trace manifest use. Falls back to a single placeholder line when the timeline
+    carries no agent contribution (only the alert, or nothing).
+    """
+    lines = [f"- {e.timestamp} — [{e.source}] {e.label}" for e in timeline.events]
+    # The empty-timeline ("or nothing") branch is only reachable from an
+    # externally-constructed/deserialized IncidentTimeline — _build_timeline
+    # always emits the alert event.
+    if not any(e.kind != "alert" for e in timeline.events):
+        lines.append("- (No additional timeline data available from agents)")
+    return "\n".join(lines)
