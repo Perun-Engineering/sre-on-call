@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
-import boto3
 from boto3.dynamodb.conditions import Attr
 
+from shared.dynamo_table import DynamoTable
 from shared.experiment import (
     AgentVariantConfig,
     ExperimentConfig,
@@ -24,27 +24,24 @@ class ExperimentStore:
         table_name: str = DEFAULT_TABLE_NAME,
         dynamodb_resource: Any = None,
     ) -> None:
-        resource: Any = dynamodb_resource or boto3.resource("dynamodb")
-        self._table = resource.Table(table_name)
+        # Config CRUD for the A/B intake/CLI path: fail-closed (default).
+        self._table = DynamoTable(table_name, dynamodb_resource=dynamodb_resource)
 
     def get_active_experiment(self) -> ExperimentConfig | None:
         """Return the single active experiment, or None."""
-        resp = self._table.scan(
-            FilterExpression=Attr("status").eq("active"),
-            Limit=1,
+        active = next(
+            iter(self._table.scan_all(Attr("status").eq("active"))), None
         )
-        items = resp.get("Items", [])
-        return _item_to_config(items[0]) if items else None
+        return _item_to_config(active) if active else None
 
     def get_experiment(self, experiment_id: str) -> ExperimentConfig | None:
         """Fetch a single experiment by ID."""
-        resp = self._table.get_item(Key={"pk": f"EXPERIMENT#{experiment_id}"})
-        item = resp.get("Item")
+        item = self._table.get({"pk": f"EXPERIMENT#{experiment_id}"})
         return _item_to_config(item) if item else None
 
     def put_experiment(self, config: ExperimentConfig) -> None:
         """Write an experiment config to DynamoDB."""
-        self._table.put_item(Item=_config_to_item(config))
+        self._table.put(_config_to_item(config))
 
 
 def _variant_to_dict(v: PipelineVariant) -> dict:
