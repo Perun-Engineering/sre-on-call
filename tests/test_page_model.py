@@ -1,6 +1,7 @@
 """Unit tests for shared.page_model — the master→renderer page contract."""
 from __future__ import annotations
 
+from shared.models import AgentFailure
 from shared.page_model import PageEvidenceBlock, PageEvidenceLine, PageModel
 
 
@@ -48,3 +49,35 @@ def test_to_json_dict_handles_none_analysis_and_no_chart():
     assert d["analysis"] is None
     assert d["evidence"][0]["chart_id"] is None
     assert d["evidence"][0]["lines"][0]["link"] is None
+
+
+def test_build_page_model_mirrors_all_five_evidence_states():
+    from agents.master.report_formatter import ReportFormatter
+    from shared.agents import get_registry
+    from shared.models import AlertContext, AgentResult, Finding
+
+    reg = get_registry()
+    specialized = [a.id for a in reg.all(kind="specialized")]
+    assert len(specialized) >= 5, "test needs 5 distinct specialized agents"
+    ok_id, err_id, pend_id, dis_id, skip_id = specialized[:5]
+    ctx = AlertContext(
+        investigation_id="inv-page-1", platform="slack", channel_id="C1",
+        message_id="1700000000.0001", alert_text="Disk full",
+        alert_timestamp="2025-01-15T14:32:00Z",
+        investigation_window=("2025-01-15T14:27:00Z", "2025-01-15T14:37:00Z"),
+    )
+    results: dict[str, AgentResult | AgentFailure] = {
+        ok_id: AgentResult(agent_name=ok_id, status="success",
+                           findings=[Finding(source="s", timestamp="2025-01-15T14:31:00Z",
+                                             content="found", severity="critical")],
+                           summary="ok"),
+        err_id: AgentResult(agent_name=err_id, status="error", findings=[],
+                            summary="", error_message="boom"),
+    }
+    model = ReportFormatter().build_page_model(
+        ctx, results, analysis=None,
+        pending_agents={pend_id}, disabled_agents={dis_id},
+        skipped_agents={skip_id: "not relevant"},
+    )
+    statuses = {b.status for b in model.evidence}
+    assert {"ok", "error", "pending", "disabled", "skipped"} <= statuses

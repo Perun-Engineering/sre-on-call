@@ -291,55 +291,38 @@ class ReportFormatter:
         alert_context: AlertContext,
         agent_results: dict[str, AgentResult | AgentFailure],
         analysis: AnalysisSection | None = None,
+        pending_agents: set[str] | None = None,
+        disabled_agents: set[str] | None = None,
+        skipped_agents: dict[str, str] | None = None,
     ) -> PageModel:
-        """Build the #33 interactive-page model from agent results.
+        """Build the #33 interactive-page model as a projection of IncidentFacts.
 
-        Severity / summary / root-cause reuse the same private helpers as the
-        chat report, so the page never disagrees with Slack. Evidence comes
-        directly from findings (text + deep link + chart_id); a chart_id is
-        carried only when the owning result actually shipped series data.
+        Emits all five evidence states (full mirror of the chat report) — the
+        page no longer drops error/pending/disabled/skipped agents (#66).
         """
-        summary_parts = self._collect_summary_parts(agent_results)
-        root_cause_parts = self._collect_root_cause_parts(agent_results)
-        chart_ids: list[str] = []
-        evidence: list[PageEvidenceBlock] = []
-
-        for agent_key in self._ordered_specialized_ids():
-            result = agent_results.get(agent_key)
-            if not isinstance(result, AgentResult) or result.status != "success":
-                continue
-            emoji, display_name = self._display(agent_key)
-            lines = [
-                PageEvidenceLine(text=f.content, link=f.link)
-                for f in result.findings
-            ] or [PageEvidenceLine(text=f"No notable findings from {display_name}")]
-            block_chart_id: str | None = None
-            for f in result.findings:
-                if f.chart is not None and f.chart.chart_id in result.chart_series:
-                    block_chart_id = f.chart.chart_id
-                    if f.chart.chart_id not in chart_ids:
-                        chart_ids.append(f.chart.chart_id)
-                    break
-            evidence.append(
-                PageEvidenceBlock(
-                    emoji=emoji, display_name=display_name, status="ok",
-                    lines=lines, chart_id=block_chart_id,
-                )
+        facts = self._facts(
+            alert_context, agent_results,
+            pending_agents or set(), disabled_agents or set(), skipped_agents or {},
+        )
+        evidence = [
+            PageEvidenceBlock(
+                emoji=e.emoji, display_name=e.display_name, status=e.status,
+                lines=[PageEvidenceLine(text=ln.text, link=ln.link) for ln in e.lines],
+                chart_id=e.chart_id,
             )
-
+            for e in facts.evidence
+        ]
         return PageModel(
             schema_version=PAGE_SCHEMA_VERSION,
-            investigation_id=alert_context.investigation_id,
+            investigation_id=facts.investigation_id,
             generated_at=now_iso(),
-            alert_text=alert_context.alert_text,
-            severity=self._determine_severity(agent_results),
-            affected_services=self._extract_affected_services(
-                alert_context, agent_results
-            ),
-            time_of_detection=alert_context.alert_timestamp,
+            alert_text=facts.alert_text,
+            severity=facts.severity,
+            affected_services=facts.affected_services,
+            time_of_detection=facts.time_of_detection,
             status="completed",
-            summary=self._joined_summary_or_fallback(alert_context, summary_parts),
-            root_cause=self._joined_root_cause_or_fallback(root_cause_parts),
+            summary=facts.summary,
+            root_cause=facts.root_cause,
             analysis=(
                 {
                     "root_cause_hypothesis": analysis.root_cause_hypothesis,
@@ -347,14 +330,11 @@ class ReportFormatter:
                     "confidence": analysis.confidence,
                     "suggested_next_action": analysis.suggested_next_action,
                 }
-                if analysis is not None
-                else None
+                if analysis is not None else None
             ),
             evidence=evidence,
-            chart_ids=chart_ids,
-            timeline=self.build_timeline(alert_context, agent_results).to_json_dict()[
-                "events"
-            ],
+            chart_ids=facts.chart_ids,
+            timeline=facts.timeline.to_json_dict()["events"],
         )
 
     def resolve_page_model(
