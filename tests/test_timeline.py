@@ -180,7 +180,7 @@ def test_build_page_model_populates_timeline():
 
 
 def sorted_by_clock(times: list[str]) -> list[str]:
-    from agents.master.report_formatter import _timeline_sort_epoch
+    from agents.master.incident_facts import timeline_sort_epoch
 
-    return sorted(times, key=lambda t: (_timeline_sort_epoch(t) is None,
-                                        _timeline_sort_epoch(t) or 0.0))
+    return sorted(times, key=lambda t: (timeline_sort_epoch(t) is None,
+                                        timeline_sort_epoch(t) or 0.0))

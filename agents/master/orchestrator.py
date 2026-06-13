@@ -523,6 +523,8 @@ class InvestigationOrchestrator:
         # once the charts it references already exist. Fail-open.
         self._write_page_model(
             alert_context=alert_context, results=results, analysis=analysis,
+            pending_agents=pending_ids, disabled_agents=self.disabled_agents,
+            skipped_agents=skipped_agents,
         )
 
         # --- Phase 8: record the incident outcome for similar-incident lookup ---
@@ -1024,12 +1026,17 @@ class InvestigationOrchestrator:
         alert_context: AlertContext,
         results: dict[str, AgentResult | AgentFailure],
         analysis: AnalysisSection | None,
+        pending_agents: set[str],
+        disabled_agents: set[str],
+        skipped_agents: dict[str, str],
     ) -> None:
         """Build + persist the #33 page model (render trigger). Fail-open."""
         if self._trace_store is None:
             return
         model = self.report_formatter.build_page_model(
             alert_context, results, analysis=analysis,
+            pending_agents=pending_agents, disabled_agents=disabled_agents,
+            skipped_agents=skipped_agents,
         )
         self._trace_store.put_page_model(
             investigation_id=alert_context.investigation_id,
