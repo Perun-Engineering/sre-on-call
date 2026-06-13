@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from agents.master.incident_facts import EvidenceFact, IncidentFacts
 from agents.master.synthesis import IncidentTimeline
+from shared.agents import get_registry
+from shared.models import AgentFailure, AgentMetadata, AgentResult, AlertContext, Finding
 from shared.report_renderer import EvidenceLine
 
 
@@ -41,3 +43,77 @@ def test_incident_facts_is_a_dataclass_with_timeline():
     )
     assert facts.investigation_id == "inv-1"
     assert isinstance(facts.timeline, IncidentTimeline)
+
+
+def _ctx(
+    investigation_id: str = "inv-1",
+    platform: str = "slack",
+    channel_id: str = "C1",
+    message_id: str = "1700000000.0001",
+    alert_text: str = "Disk full on api-server",
+    alert_timestamp: str = "2025-01-15T14:32:00Z",
+    investigation_window: tuple[str, str] = (
+        "2025-01-15T14:27:00Z",
+        "2025-01-15T14:37:00Z",
+    ),
+) -> AlertContext:
+    return AlertContext(
+        investigation_id=investigation_id,
+        platform=platform,
+        channel_id=channel_id,
+        message_id=message_id,
+        alert_text=alert_text,
+        alert_timestamp=alert_timestamp,
+        investigation_window=investigation_window,
+    )
+
+
+def test_derive_emits_all_five_evidence_states_in_registry_order():
+    reg = get_registry()
+    specialized = [a.id for a in reg.all(kind="specialized")]
+    assert len(specialized) >= 5, "test needs 5 distinct specialized agents"
+    ok_id, err_id, pend_id, dis_id = specialized[:4]
+    skip_id = specialized[4]
+
+    results: dict[str, AgentResult | AgentFailure] = {
+        ok_id: AgentResult(
+            agent_name=ok_id, status="success",
+            findings=[Finding(source="src", timestamp="2025-01-15T14:31:00Z",
+                              content="found it", severity="critical")],
+            summary="ok summary",
+        ),
+        err_id: AgentResult(
+            agent_name=err_id, status="error", findings=[], summary="",
+            error_message="boom",
+        ),
+    }
+    facts = IncidentFacts.derive(
+        reg, _ctx(), results,
+        pending={pend_id}, disabled={dis_id}, skipped={skip_id: "not relevant"},
+    )
+    by_id = {e.agent_id: e for e in facts.evidence}
+    assert by_id[ok_id].status == "ok"
+    assert by_id[err_id].status == "error"
+    assert by_id[pend_id].status == "pending"
+    assert by_id[dis_id].status == "disabled"
+    assert by_id[skip_id].status == "skipped"
+    assert by_id[ok_id].lines[0].text == "found it"
+    assert "not relevant" in by_id[skip_id].lines[0].text
+
+
+def test_derive_timeline_is_clock_sorted_with_alert_and_findings():
+    reg = get_registry()
+    ok_id = next(a.id for a in reg.all(kind="specialized"))
+    results: dict[str, AgentResult | AgentFailure] = {
+        ok_id: AgentResult(
+            agent_name=ok_id, status="success",
+            findings=[Finding(source="src", timestamp="2025-01-15T14:31:00Z",
+                              content="precursor", severity="warning")],
+            summary="s",
+        ),
+    }
+    facts = IncidentFacts.derive(reg, _ctx(), results, pending=set(), disabled=set(), skipped={})
+    kinds = [e.kind for e in facts.timeline.events]
+    assert "alert" in kinds and "finding" in kinds
+    ts = [e.timestamp for e in facts.timeline.events]
+    assert ts.index("2025-01-15T14:31:00Z") < ts.index("2025-01-15T14:32:00Z")

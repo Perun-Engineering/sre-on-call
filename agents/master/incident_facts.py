@@ -1,12 +1,12 @@
 """Canonical derived view of one investigation's results (issue #66).
 
-``IncidentFacts`` is the single deterministic projection source for every
-outbound surface — the chat Incident Report, the interactive page, the PIR,
-and the trace-manifest timeline. It is derived **exactly once per report
-build** (and re-derived on each enrichment arrival, since facts are a function
-of the current result set, not an accumulator). Facts only: everything here is
-computed from ``AgentResult``s, the alert, and the Agent registry — never LLM
-output. The #27 Analysis rides alongside a projection, not inside the facts.
+``IncidentFacts`` is built once from ``AgentResult``s, the alert, and the
+Agent registry — never LLM output — and re-derived on each enrichment arrival
+since facts are a pure function of the current result set, not an accumulator.
+It is then projected into every outbound surface: the chat Incident Report
+(``ReportSections``), the interactive page (``PageModel``), the PIR
+(``PIRSections``), and the trace-manifest timeline. The #27 Analysis rides
+alongside a projection, not inside the facts.
 """
 from __future__ import annotations
 
@@ -161,7 +161,14 @@ class EvidenceFact:
 
 @dataclass
 class IncidentFacts:
-    """The deterministically-derived view of one investigation, built once."""
+    """The deterministically-derived view of one investigation, built once.
+
+    Built from ``AgentResult``s, the alert, and the Agent registry — never LLM
+    output. Re-derived on each enrichment arrival since facts are a pure
+    function of the current result set, not an accumulator. Projected into
+    ``ReportSections``, ``PageModel``, ``PIRSections``, and the
+    trace-manifest timeline.
+    """
 
     investigation_id: str
     alert_text: str
@@ -169,9 +176,9 @@ class IncidentFacts:
     severity: str
     affected_services: str
     summary: str
-    summary_parts: list[str]
+    summary_parts: list[str]  # per-agent raw summaries in render order
     root_cause: str
-    root_cause_parts: list[tuple[str, str]]
+    root_cause_parts: list[tuple[str, str]]  # (display_name, raw_summary) tuples in render order
     evidence: list[EvidenceFact]
     timeline: IncidentTimeline
     chart_ids: list[str]
@@ -179,3 +186,423 @@ class IncidentFacts:
     recommended_actions: str
     links: list[tuple[str, str]]
     totals_line: str | None
+
+    @classmethod
+    def derive(
+        cls,
+        registry: AgentRegistry,
+        alert_context: AlertContext,
+        agent_results: dict[str, AgentResult | AgentFailure],
+        *,
+        pending: set[str],
+        disabled: set[str],
+        skipped: dict[str, str],
+    ) -> "IncidentFacts":
+        """Derive the canonical facts for one investigation, exactly once."""
+        summary_parts = cls._collect_summary_parts(registry, agent_results)
+        root_cause_parts = cls._collect_root_cause_parts(registry, agent_results)
+        evidence = cls._build_evidence(
+            registry, agent_results, pending, disabled, skipped
+        )
+        chart_ids: list[str] = []
+        for ev in evidence:
+            if ev.chart_id and ev.chart_id not in chart_ids:
+                chart_ids.append(ev.chart_id)
+        return cls(
+            investigation_id=alert_context.investigation_id,
+            alert_text=alert_context.alert_text,
+            time_of_detection=alert_context.alert_timestamp,
+            severity=cls._determine_severity(agent_results),
+            affected_services=cls._extract_affected_services(agent_results),
+            summary=cls._joined_summary_or_fallback(alert_context, summary_parts),
+            summary_parts=summary_parts,
+            root_cause=cls._joined_root_cause_or_fallback(root_cause_parts),
+            root_cause_parts=root_cause_parts,
+            evidence=evidence,
+            timeline=cls._build_timeline(registry, alert_context, agent_results),
+            chart_ids=chart_ids,
+            impact_assessment=cls._build_impact_assessment(agent_results),
+            recommended_actions=cls._build_recommended_actions(
+                registry, agent_results, pending
+            ),
+            links=cls._build_links(agent_results),
+            totals_line=_format_totals_line(agent_results),
+        )
+
+    # --- registry helpers ---
+
+    @staticmethod
+    def _display(registry: AgentRegistry, agent_id: str) -> tuple[str, str]:
+        try:
+            a = registry.lookup(agent_id)
+            return a.emoji, a.display_name
+        except KeyError:
+            return "📌", agent_id
+
+    @staticmethod
+    def _ordered_specialized_ids(registry: AgentRegistry) -> list[str]:
+        return [a.id for a in registry.all(kind="specialized")]
+
+    # --- private static helpers (ported verbatim from report_formatter.py) ---
+
+    @staticmethod
+    def _build_evidence(
+        registry: AgentRegistry,
+        agent_results: dict[str, AgentResult | AgentFailure],
+        pending_agents: set[str],
+        disabled_agents: set[str],
+        skipped_agents: dict[str, str],
+    ) -> list[EvidenceFact]:
+        """Build one EvidenceFact per agent the orchestrator considered.
+
+        Includes agents that returned a result, agents still pending, agents
+        deployed-but-inactive, and agents the router deliberately skipped.
+        Order follows the registry's specialized agent order; unknown ids fall
+        to the end alphabetically.
+        """
+        configured = (
+            set(agent_results.keys())
+            | pending_agents
+            | disabled_agents
+            | set(skipped_agents)
+        )
+        ordered_known = [
+            a for a in IncidentFacts._ordered_specialized_ids(registry) if a in configured
+        ]
+        ordered = ordered_known + sorted(configured - set(ordered_known))
+
+        facts: list[EvidenceFact] = []
+        for agent_key in ordered:
+            emoji, display_name = IncidentFacts._display(registry, agent_key)
+            result = agent_results.get(agent_key)
+            lines, status, metadata_line = IncidentFacts._render_evidence_lines(
+                agent_key,
+                result,
+                pending_agents,
+                disabled_agents,
+                skipped_agents,
+                display_name,
+            )
+            chart_id: str | None = None
+            if status == "ok" and isinstance(result, AgentResult):
+                for f in result.findings:
+                    if f.chart is not None and f.chart.chart_id in result.chart_series:
+                        chart_id = f.chart.chart_id
+                        break
+            facts.append(
+                EvidenceFact(
+                    agent_id=agent_key,
+                    emoji=emoji,
+                    display_name=display_name,
+                    status=status,
+                    lines=lines,
+                    metadata_line=metadata_line,
+                    chart_id=chart_id,
+                )
+            )
+        return facts
+
+    @staticmethod
+    def _render_evidence_lines(
+        agent_key: str,
+        result: AgentResult | AgentFailure | None,
+        pending_agents: set[str],
+        disabled_agents: set[str],
+        skipped_agents: dict[str, str],
+        display_name: str,
+    ) -> tuple[list[EvidenceLine], EvidenceStatus, str | None]:
+        if result is None and agent_key in skipped_agents:
+            reason = skipped_agents[agent_key] or "router judged it not relevant to this alert"
+            return (
+                [
+                    EvidenceLine(
+                        f"➖ {display_name} not investigated — {reason}"
+                    )
+                ],
+                "skipped",
+                None,
+            )
+        if result is None and agent_key in disabled_agents:
+            return (
+                [
+                    EvidenceLine(
+                        f"🚫 {display_name} is disabled in this deployment "
+                        f"— investigate manually if relevant"
+                    )
+                ],
+                "disabled",
+                None,
+            )
+        if result is None and agent_key in pending_agents:
+            return (
+                [
+                    EvidenceLine(
+                        f"⏳ {display_name} still investigating — results will arrive "
+                        f"in a follow-up update"
+                    )
+                ],
+                "pending",
+                None,
+            )
+        if isinstance(result, AgentFailure):
+            return (
+                [EvidenceLine(f"⚠️ {display_name} data unavailable: {result.error_message}")],
+                "error",
+                _format_metadata_line(result.metadata),
+            )
+        if isinstance(result, AgentResult) and result.status == "unhealthy":
+            reason = result.error_message or "agent reported unhealthy"
+            return (
+                [
+                    EvidenceLine(
+                        f"🚫 {display_name} reported unhealthy: {reason} "
+                        f"— investigate agent configuration"
+                    )
+                ],
+                "disabled",
+                _format_metadata_line(result.metadata),
+            )
+        if isinstance(result, AgentResult) and result.status == "error":
+            error_detail = result.error_message or "unknown error"
+            return (
+                [EvidenceLine(f"⚠️ {display_name} data unavailable: {error_detail}")],
+                "error",
+                _format_metadata_line(result.metadata),
+            )
+        if isinstance(result, AgentResult) and result.status == "success":
+            lines = (
+                [EvidenceLine(f.content, f.link) for f in result.findings]
+                if result.findings
+                else [EvidenceLine(f"No notable findings from {display_name}")]
+            )
+            return lines, "ok", _format_metadata_line(result.metadata)
+        return [EvidenceLine(f"⚠️ {display_name} data unavailable")], "error", None
+
+    @staticmethod
+    def _build_timeline(
+        registry: AgentRegistry,
+        alert_context: AlertContext,
+        agent_results: dict[str, AgentResult | AgentFailure],
+    ) -> IncidentTimeline:
+        """Assemble the ordered incident timeline (#34), deterministically.
+
+        Events come purely from timestamps already on the evidence — the alert
+        time, each successful agent's finding timestamps, and each agent's
+        completion (the enrichment arrival). Nothing is LLM-synthesized, so a
+        time is never invented. A finding event carries ``chart_id`` only when
+        its descriptor's series was harvested, so the page can focus the linked
+        graph window on click. Events are sorted by parsed wall-clock; any
+        unparseable timestamp keeps stable insertion order rather than
+        misordering the narrative.
+        """
+        events: list[TimelineEvent] = [
+            TimelineEvent(
+                timestamp=alert_context.alert_timestamp,
+                source="alert",
+                kind="alert",
+                label=_first_line(alert_context.alert_text),
+            )
+        ]
+        for agent_key in IncidentFacts._ordered_specialized_ids(registry):
+            result = agent_results.get(agent_key)
+            if not isinstance(result, AgentResult) or result.status != "success":
+                continue
+            _, display_name = IncidentFacts._display(registry, agent_key)
+            for f in result.findings:
+                chart_id = (
+                    f.chart.chart_id
+                    if f.chart is not None and f.chart.chart_id in result.chart_series
+                    else None
+                )
+                events.append(
+                    TimelineEvent(
+                        timestamp=f.timestamp,
+                        source=f.source or display_name,
+                        kind="finding",
+                        label=_first_line(f.content),
+                        severity=f.severity,
+                        chart_id=chart_id,
+                    )
+                )
+            completed_at = result.metadata.completed_at if result.metadata else None
+            if completed_at:
+                events.append(
+                    TimelineEvent(
+                        timestamp=completed_at,
+                        source=display_name,
+                        kind="action",
+                        label=f"{display_name} reported",
+                    )
+                )
+
+        events.sort(
+            key=lambda e: (
+                _timeline_sort_epoch(e.timestamp) is None,
+                _timeline_sort_epoch(e.timestamp) or 0.0,
+            )
+        )
+        return IncidentTimeline(events=events)
+
+    @staticmethod
+    def _determine_severity(
+        agent_results: dict[str, AgentResult | AgentFailure],
+    ) -> str:
+        highest = "low"
+        severity_rank = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+        for result in agent_results.values():
+            if isinstance(result, AgentResult) and result.status == "success":
+                for finding in result.findings:
+                    sev = finding.severity.lower()
+                    if severity_rank.get(sev, 0) > severity_rank.get(highest, 0):
+                        highest = sev
+        return SEVERITY_EMOJI.get(highest, SEVERITY_EMOJI["low"])
+
+    @staticmethod
+    def _extract_affected_services(
+        agent_results: dict[str, AgentResult | AgentFailure],
+    ) -> str:
+        services: list[str] = []
+        for result in agent_results.values():
+            if isinstance(result, AgentResult) and result.status == "success":
+                for finding in result.findings:
+                    if finding.source and finding.source not in services:
+                        services.append(finding.source)
+        return ", ".join(services) if services else "Unknown (insufficient data)"
+
+    @staticmethod
+    def _collect_summary_parts(
+        registry: AgentRegistry,
+        agent_results: dict[str, AgentResult | AgentFailure],
+    ) -> list[str]:
+        """Per-agent raw summaries in render order. Renderer normalizes each."""
+        parts: list[str] = []
+        for agent_key in IncidentFacts._ordered_specialized_ids(registry):
+            result = agent_results.get(agent_key)
+            if (
+                isinstance(result, AgentResult)
+                and result.status == "success"
+                and result.summary
+            ):
+                parts.append(result.summary)
+        return parts
+
+    @staticmethod
+    def _joined_summary_or_fallback(
+        alert_context: AlertContext,
+        summary_parts: list[str],
+    ) -> str:
+        """Backward-compat fallback string for ``ReportSections.summary``.
+
+        Renderers that consult ``summary_parts`` ignore this; older callers
+        that read ``.summary`` still get a usable joined string. The fallback
+        prose is also surfaced here when no agent reported a summary.
+        """
+        if summary_parts:
+            return " ".join(summary_parts)
+        return (
+            f"Alert detected: {alert_context.alert_text}. "
+            "Insufficient agent data to provide a detailed summary."
+        )
+
+    @staticmethod
+    def _collect_root_cause_parts(
+        registry: AgentRegistry,
+        agent_results: dict[str, AgentResult | AgentFailure],
+    ) -> list[tuple[str, str]]:
+        """Per-agent (display_name, raw_summary) tuples in render order."""
+        parts: list[tuple[str, str]] = []
+        for agent_key in IncidentFacts._ordered_specialized_ids(registry):
+            result = agent_results.get(agent_key)
+            if (
+                isinstance(result, AgentResult)
+                and result.status == "success"
+                and result.summary
+            ):
+                _, display_name = IncidentFacts._display(registry, agent_key)
+                parts.append((display_name, result.summary))
+        return parts
+
+    @staticmethod
+    def _joined_root_cause_or_fallback(
+        root_cause_parts: list[tuple[str, str]],
+    ) -> str:
+        """Backward-compat fallback string for ``ReportSections.root_cause``."""
+        if root_cause_parts:
+            return "Based on available evidence:\n" + "\n".join(
+                f"- {display}: {raw}" for display, raw in root_cause_parts
+            )
+        return "Insufficient data to determine root cause. See agent availability in Evidence section."
+
+    @staticmethod
+    def _build_impact_assessment(
+        agent_results: dict[str, AgentResult | AgentFailure],
+    ) -> str:
+        critical_findings: list[str] = []
+        for result in agent_results.values():
+            if isinstance(result, AgentResult) and result.status == "success":
+                for finding in result.findings:
+                    if finding.severity.lower() in ("critical", "high"):
+                        critical_findings.append(finding.content)
+        if critical_findings:
+            return (
+                "High-impact findings detected:\n"
+                + "\n".join(f"- {f}" for f in critical_findings)
+            )
+        return "Impact assessment requires further investigation based on available data."
+
+    @staticmethod
+    def _build_recommended_actions(
+        registry: AgentRegistry,
+        agent_results: dict[str, AgentResult | AgentFailure],
+        pending_agents: set[str],
+    ) -> str:
+        actions: list[str] = []
+        action_num = 1
+
+        has_critical = False
+        for result in agent_results.values():
+            if isinstance(result, AgentResult) and result.status == "success":
+                for finding in result.findings:
+                    if finding.severity.lower() == "critical":
+                        has_critical = True
+                        break
+
+        if has_critical:
+            actions.append(f"{action_num}. Immediately investigate critical findings listed in Evidence section")
+            action_num += 1
+
+        for agent_key, result in agent_results.items():
+            if agent_key in pending_agents:
+                continue
+            _, display_name = IncidentFacts._display(registry, agent_key)
+            if isinstance(result, AgentResult) and result.status == "unhealthy":
+                actions.append(
+                    f"{action_num}. Investigate {display_name} configuration "
+                    f"— agent reported unhealthy"
+                )
+                action_num += 1
+                continue
+            if isinstance(result, AgentFailure) or (
+                isinstance(result, AgentResult) and result.status == "error"
+            ):
+                actions.append(f"{action_num}. Manually check {display_name} — automated data collection failed")
+                action_num += 1
+
+        if not actions:
+            actions.append("1. Review evidence sections and correlate findings")
+            actions.append("2. Monitor affected services for further anomalies")
+
+        return "\n".join(actions)
+
+    @staticmethod
+    def _build_links(
+        agent_results: dict[str, AgentResult | AgentFailure],
+    ) -> list[tuple[str, str]]:
+        links: list[tuple[str, str]] = []
+        for result in agent_results.values():
+            if isinstance(result, AgentResult) and result.status == "success":
+                for finding in result.findings:
+                    url = finding.metadata.get("url")
+                    if url:
+                        links.append((url, finding.source))
+        return links
