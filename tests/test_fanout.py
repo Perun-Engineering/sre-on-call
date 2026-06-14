@@ -15,7 +15,8 @@ import pytest
 from shared.a2a_client import RoutingHTTPClient
 from shared.agents import AgentRegistry
 from shared.config import AgentConfig, Defaults, ProjectConfig
-from shared.fanout import Fanout
+from shared.fanout import Fanout, merge_settled
+from shared.models import AgentFailure, AgentResult
 
 
 @pytest.fixture(autouse=True)
@@ -211,3 +212,26 @@ class TestFanoutHarvest:
         task = asyncio.create_task(forever())
         await Fanout.cancel({"a": task})
         assert task.cancelled()
+
+
+class TestMergeSettled:
+    """The harvest()-output → domain-union mapping (companion to harvest)."""
+
+    def test_result_passes_through(self):
+        ok = AgentResult(agent_name="a", status="ok", findings=[], summary="")
+        assert merge_settled({"a": ok}) == {"a": ok}
+
+    def test_exception_value_becomes_failure(self):
+        merged = merge_settled({"a": ValueError("kaboom")})
+        failure = merged["a"]
+        assert isinstance(failure, AgentFailure)
+        assert failure.agent_name == "a"
+        assert failure.error_message == "kaboom"
+
+    def test_pure_does_not_mutate_input(self):
+        settled: dict[str, AgentResult | BaseException] = {"a": ValueError("x")}
+        merge_settled(settled)
+        assert isinstance(settled["a"], ValueError)
+
+    def test_empty(self):
+        assert merge_settled({}) == {}
