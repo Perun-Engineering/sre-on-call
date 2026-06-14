@@ -142,6 +142,12 @@ locals {
     for name in ["slack_scanner", "discord_scanner", "cloudwatch_logs", "eks", "incident_history"] :
     name => contains(keys(local.config_yaml.agents), name) && lookup(local.config_yaml.agents[name], "enabled", true)
   }
+
+  # Discord is wired only when its scanner agent is enabled in config.yaml. This
+  # gates the whole Discord footprint — secrets, ECR repo, and the chat-out env/
+  # IAM on the Lambda adapter + master — not just the scanner runtime, so a repo
+  # with Discord off carries no orphaned Discord resources.
+  discord_enabled = local.agent_enabled["discord_scanner"]
 }
 
 # ── Guardrail (opt-in) ────────────────────────────────────────────────────
@@ -245,7 +251,7 @@ resource "aws_bedrockagentcore_agent_runtime" "discord_scanner" {
   environment_variables = merge(local.base_env, {
     AWS_REGION        = var.aws_region
     MODEL_ID          = var.model_id
-    DISCORD_BOT_TOKEN = aws_secretsmanager_secret.discord_bot_token.arn
+    DISCORD_BOT_TOKEN = aws_secretsmanager_secret.discord_bot_token[0].arn
   })
 
   tags = {
@@ -385,7 +391,6 @@ resource "aws_bedrockagentcore_agent_runtime" "master" {
       AWS_REGION         = var.aws_region
       MODEL_ID           = var.model_id
       SLACK_BOT_TOKEN    = aws_secretsmanager_secret.slack_bot_token.arn
-      DISCORD_BOT_TOKEN  = aws_secretsmanager_secret.discord_bot_token.arn
       TRACES_BUCKET_NAME = aws_s3_bucket.traces.bucket
       TRACES_TABLE_NAME  = aws_dynamodb_table.traces.name
       # The master writes per-variant A/B results here. Normally its own,
@@ -409,6 +414,9 @@ resource "aws_bedrockagentcore_agent_runtime" "master" {
     } : {},
     var.followup_model_id != "" ? {
       FOLLOWUP_MODEL_ID = var.followup_model_id
+    } : {},
+    local.discord_enabled ? {
+      DISCORD_BOT_TOKEN = aws_secretsmanager_secret.discord_bot_token[0].arn
     } : {},
     local.agent_enabled["slack_scanner"] ? {
       SLACK_SCANNER_AGENT_RUNTIME_ARN = aws_bedrockagentcore_agent_runtime.slack_scanner[0].agent_runtime_arn

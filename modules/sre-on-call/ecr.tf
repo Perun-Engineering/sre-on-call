@@ -3,14 +3,16 @@
 ###############################################################################
 
 locals {
-  agent_image_names = [
-    "${var.project_name}-master",
-    "${var.project_name}-slack-scanner",
-    "${var.project_name}-discord-scanner",
-    "${var.project_name}-cloudwatch-logs",
-    "${var.project_name}-eks",
-    "${var.project_name}-incident-history",
-  ]
+  agent_image_names = concat(
+    [
+      "${var.project_name}-master",
+      "${var.project_name}-slack-scanner",
+      "${var.project_name}-cloudwatch-logs",
+      "${var.project_name}-eks",
+      "${var.project_name}-incident-history",
+    ],
+    local.discord_enabled ? ["${var.project_name}-discord-scanner"] : [],
+  )
 }
 
 resource "aws_ecr_repository" "agents" {
