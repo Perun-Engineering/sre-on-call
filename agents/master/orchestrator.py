@@ -31,7 +31,7 @@ from shared.agent_telemetry import AGENT_METADATA
 from shared.agents import AgentRegistry, get_registry
 from shared.constants import HARD_CUTOFF_SECONDS, INITIAL_DEADLINE_SECONDS
 from shared.embeddings import EmbeddingClient
-from shared.fanout import Fanout
+from shared.fanout import Fanout, merge_settled
 from shared.incident_history_store import IncidentHistoryStore
 from shared.model_call import drain_usage as drain_decision_usage
 from shared.model_call import reset_usage as reset_decision_usage
@@ -404,7 +404,7 @@ class InvestigationOrchestrator:
             0, self.INITIAL_DEADLINE_SECONDS - elapsed - synthesis_budget
         )
         settled, pending = await self._fanout.harvest(pending, initial_timeout)
-        self._merge(settled, results)
+        results.update(merge_settled(settled))
 
         # --- Phase 3: synthesize and post initial report ---------------------
         # Agents still pending at the deadline are reported as in-progress;
@@ -459,7 +459,8 @@ class InvestigationOrchestrator:
                 break
 
             settled, pending = await self._fanout.harvest(pending, remaining)
-            late_results = self._merge(settled, results)
+            late_results = merge_settled(settled)
+            results.update(late_results)
 
             for agent_id, result in late_results.items():
                 # Late results post regardless of status — a failure that
@@ -842,26 +843,3 @@ class InvestigationOrchestrator:
                 alert_context.variant_id,
             )
 
-    @staticmethod
-    def _merge(
-        settled: dict[str, "AgentResult | BaseException"],
-        results: dict[str, AgentResult | AgentFailure],
-    ) -> dict[str, AgentResult | AgentFailure]:
-        """Fold harvested results into *results* and return the new entries.
-
-        ``_invoke_agent_safe`` already maps errors to ``AgentResult(status=
-        "error")``, so a value is normally an :class:`AgentResult`. A raised
-        exception handed back by :meth:`Fanout.harvest` (e.g. a cancellation)
-        is mapped to an :class:`AgentFailure`.
-        """
-        new_entries: dict[str, AgentResult | AgentFailure] = {}
-        for agent_id, value in settled.items():
-            if isinstance(value, BaseException):
-                mapped: AgentResult | AgentFailure = AgentFailure(
-                    agent_name=agent_id, error_message=str(value), timestamp="",
-                )
-            else:
-                mapped = value
-            results[agent_id] = mapped
-            new_entries[agent_id] = mapped
-        return new_entries

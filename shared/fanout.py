@@ -22,8 +22,33 @@ from typing import Any, Callable, Coroutine, TypeVar
 
 from shared.a2a_client import A2AClient, AsyncHTTPClient, RoutingHTTPClient
 from shared.agents import Agent, AgentRegistry, get_registry
+from shared.models import AgentFailure, AgentResult
 
 R = TypeVar("R")
+
+
+def merge_settled(
+    settled: dict[str, AgentResult | BaseException],
+) -> dict[str, AgentResult | AgentFailure]:
+    """Map a :meth:`Fanout.harvest` ``settled`` dict onto the domain union.
+
+    Companion to ``harvest``: a task result is already an
+    :class:`~shared.models.AgentResult` (the orchestrator's
+    ``_invoke_agent_safe`` maps agent-level errors to ``status="error"``),
+    while an exception handed back *as a value* — e.g. a task cancellation —
+    becomes an :class:`~shared.models.AgentFailure`.
+
+    Pure: the caller folds the returned entries into its running results map
+    (``results.update(merge_settled(settled))``).
+    """
+    return {
+        agent_id: (
+            AgentFailure(agent_name=agent_id, error_message=str(value), timestamp="")
+            if isinstance(value, BaseException)
+            else value
+        )
+        for agent_id, value in settled.items()
+    }
 
 
 class Fanout:
