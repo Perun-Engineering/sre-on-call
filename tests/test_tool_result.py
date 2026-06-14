@@ -9,10 +9,35 @@ from shared.models import (
 )
 from shared.tool_result import (
     AGENT_RESULT,
+    SEVERITY_RANK,
     SNAPSHOT_RESULT,
     format_result,
     format_snapshot_result,
+    pick_top_by_severity,
 )
+
+
+def test_pick_top_by_severity_orders_critical_first_and_caps_n():
+    items = [
+        ("a", "info"),
+        ("b", "critical"),
+        ("c", "warning"),
+        ("d", "critical"),
+    ]
+
+    picked = pick_top_by_severity(items, lambda it: it[1], 2)
+
+    # two highest-severity items, stable within equal severity (b before d)
+    assert [it[0] for it in picked] == ["b", "d"]
+
+
+def test_pick_top_by_severity_unknown_severity_ranks_last():
+    items = [("x", "bogus"), ("y", "warning")]
+
+    picked = pick_top_by_severity(items, lambda it: it[1], 1)
+
+    assert [it[0] for it in picked] == ["y"]
+    assert SEVERITY_RANK["critical"] < SEVERITY_RANK["warning"] < SEVERITY_RANK["info"]
 
 
 def test_format_result_embeds_structured_agent_result_footer():

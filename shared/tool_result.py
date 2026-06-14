@@ -36,6 +36,19 @@ class ToolResult:
     chart_series: dict[str, ChartSeries] = field(default_factory=dict)  # chart_id -> series
 
 
+SEVERITY_RANK: dict[str, int] = {"critical": 0, "warning": 1, "info": 2}
+
+
+def pick_top_by_severity(items, severity_of, n):
+    """Return the ``n`` highest-severity items (critical first), stable on ties.
+
+    ``severity_of`` maps an item to its severity string; unknown severities rank
+    last. Used by :class:`shared.digest_tier.DigestSource` adapters to choose raw
+    exemplars to keep beside per-chunk digests.
+    """
+    return sorted(items, key=lambda it: SEVERITY_RANK.get(severity_of(it), 2))[:n]
+
+
 def severity_from_text(text: str) -> str:
     """Heuristically determine severity from message/log text."""
     lower = text.lower()
