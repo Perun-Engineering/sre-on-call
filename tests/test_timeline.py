@@ -77,7 +77,7 @@ def test_incident_timeline_round_trips():
 # --- builder ---------------------------------------------------------------
 
 def test_build_timeline_starts_with_alert_event():
-    tl = ReportFormatter().build_timeline(_alert(), {})
+    tl = ReportFormatter().derive_facts(_alert(), {}).timeline
     assert len(tl.events) == 1
     ev = tl.events[0]
     assert ev.kind == "alert"
@@ -94,7 +94,7 @@ def test_build_timeline_emits_finding_and_action_events_in_time_order():
             completed_at="2025-01-15T14:34:30Z",
         ),
     }
-    tl = ReportFormatter().build_timeline(_alert(), results)
+    tl = ReportFormatter().derive_facts(_alert(), results).timeline
     kinds = [e.kind for e in tl.events]
     assert kinds == ["alert", "finding", "action"]
     # strictly increasing timestamps after the sort
@@ -112,7 +112,7 @@ def test_build_timeline_sorts_across_mixed_timestamp_formats():
             completed_at="2025-01-15T14:40:00Z",
         ),
     }
-    tl = ReportFormatter().build_timeline(_alert("2025-01-15 14:32:00 UTC"), results)
+    tl = ReportFormatter().derive_facts(_alert("2025-01-15 14:32:00 UTC"), results).timeline
     labels = [e.label for e in tl.events]
     # the 14:30 finding sorts BEFORE the 14:32 alert despite the format gap
     assert labels.index("before-alert") < labels.index("High CPU on service-api")
@@ -125,7 +125,7 @@ def test_build_timeline_ignores_failed_and_non_success_agents():
         "prometheus": AgentResult(agent_name="prometheus", status="error",
                                   findings=[_finding()], summary=""),
     }
-    tl = ReportFormatter().build_timeline(_alert(), results)
+    tl = ReportFormatter().derive_facts(_alert(), results).timeline
     assert [e.kind for e in tl.events] == ["alert"]
 
 
@@ -142,7 +142,7 @@ def test_build_timeline_carries_chart_id_only_when_series_present():
             chart_series={desc.chart_id: ChartSeries(points=[{"t": 1, "v": 2}])},
         ),
     }
-    tl = ReportFormatter().build_timeline(_alert(), results)
+    tl = ReportFormatter().derive_facts(_alert(), results).timeline
     by_label = {e.label: e for e in tl.events}
     assert by_label["charted"].chart_id == desc.chart_id
     assert by_label["plain"].chart_id is None
@@ -160,7 +160,7 @@ def test_build_timeline_drops_chart_id_when_descriptor_has_no_series():
             chart_series={},
         ),
     }
-    tl = ReportFormatter().build_timeline(_alert(), results)
+    tl = ReportFormatter().derive_facts(_alert(), results).timeline
     assert {e.label: e.chart_id for e in tl.events}["charted"] is None
 
 
@@ -172,7 +172,8 @@ def test_build_page_model_populates_timeline():
             "cloudwatch_logs", [_finding(content="spike")],
         ),
     }
-    model = ReportFormatter().build_page_model(_alert(), results)
+    fmt = ReportFormatter()
+    model = fmt.build_page_model(fmt.derive_facts(_alert(), results))
     assert model.timeline is not None
     kinds = [e["kind"] for e in model.timeline]
     assert kinds[0] == "alert"

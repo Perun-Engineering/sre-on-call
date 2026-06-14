@@ -88,8 +88,9 @@ def _make_error_result(agent_name, error_message="endpoint unreachable"):
 
 def _render_report(formatter, alert_context, results, pending_agents=None, renderer=None):
     """Helper: build incident sections then render via Slack mrkdwn."""
+    facts = formatter.derive_facts(alert_context, results, pending=pending_agents)
     sections = formatter.build_incident_sections(
-        alert_context, results, pending_agents,
+        facts, variant_label=alert_context.variant_label,
     )
     return (renderer or SlackReportRenderer()).render_report(sections)
 
@@ -475,9 +476,7 @@ class TestDisabledInConfigEvidence:
         # Discord scanner is disabled in the deployment; orchestrator passes
         # its id in `disabled_agents` (not in `agent_results`).
         sections = formatter.build_incident_sections(
-            alert_context,
-            agent_results={},
-            disabled_agents={"discord_scanner"},
+            formatter.derive_facts(alert_context, {}, disabled={"discord_scanner"})
         )
         report = SlackReportRenderer().render_report(sections)
 
@@ -510,9 +509,9 @@ class TestDisabledInConfigEvidence:
             ),
         }
         sections = formatter.build_incident_sections(
-            alert_context,
-            agent_results=results,
-            disabled_agents={"discord_scanner", "eks"},
+            formatter.derive_facts(
+                alert_context, results, disabled={"discord_scanner", "eks"},
+            )
         )
         report = SlackReportRenderer().render_report(sections)
 
@@ -530,9 +529,10 @@ class TestRouterSkippedEvidence:
 
     def test_skipped_agent_renders_as_distinct_block(self, formatter, alert_context):
         sections = formatter.build_incident_sections(
-            alert_context,
-            agent_results={},
-            skipped_agents={"discord_scanner": "no chat signal for a CPU alert"},
+            formatter.derive_facts(
+                alert_context, {},
+                skipped={"discord_scanner": "no chat signal for a CPU alert"},
+            )
         )
         report = SlackReportRenderer().render_report(sections)
 
@@ -544,9 +544,9 @@ class TestRouterSkippedEvidence:
 
     def test_skipped_renders_in_discord_dialect(self, formatter, alert_context):
         sections = formatter.build_incident_sections(
-            alert_context,
-            agent_results={},
-            skipped_agents={"discord_scanner": "out of scope"},
+            formatter.derive_facts(
+                alert_context, {}, skipped={"discord_scanner": "out of scope"},
+            )
         )
         report = DiscordReportRenderer().render_report(sections)
         assert "➖" in report
@@ -561,10 +561,11 @@ class TestRouterSkippedEvidence:
             ),
         }
         sections = formatter.build_incident_sections(
-            alert_context,
-            agent_results=results,
-            disabled_agents={"discord_scanner"},
-            skipped_agents={"eks": "alert is not k8s-related"},
+            formatter.derive_facts(
+                alert_context, results,
+                disabled={"discord_scanner"},
+                skipped={"eks": "alert is not k8s-related"},
+            )
         )
         report = SlackReportRenderer().render_report(sections)
 
@@ -576,9 +577,9 @@ class TestRouterSkippedEvidence:
         # A skipped agent must not generate a "Manually check X" recommended
         # action — that's reserved for failures.
         sections = formatter.build_incident_sections(
-            alert_context,
-            agent_results={},
-            skipped_agents={"eks": "out of scope"},
+            formatter.derive_facts(
+                alert_context, {}, skipped={"eks": "out of scope"},
+            )
         )
         assert "Manually check" not in sections.recommended_actions
 
@@ -599,7 +600,7 @@ class TestUnhealthyAgentEvidence:
             error_message="EKS cluster API unreachable from agent VPC",
         )
         sections = formatter.build_incident_sections(
-            alert_context, agent_results={"eks": unhealthy},
+            formatter.derive_facts(alert_context, {"eks": unhealthy})
         )
         report = SlackReportRenderer().render_report(sections)
 
@@ -620,7 +621,7 @@ class TestUnhealthyAgentEvidence:
             error_message="missing IAM credentials",
         )
         sections = formatter.build_incident_sections(
-            alert_context, agent_results={"eks": unhealthy},
+            formatter.derive_facts(alert_context, {"eks": unhealthy})
         )
         report = SlackReportRenderer().render_report(sections)
 
@@ -635,7 +636,7 @@ class TestUnhealthyAgentEvidence:
         # Sanity: the existing 'error' path is unchanged — still ⚠️, not 🚫.
         error = _make_error_result("cloudwatch_logs", "Connection timeout")
         sections = formatter.build_incident_sections(
-            alert_context, agent_results={"cloudwatch_logs": error},
+            formatter.derive_facts(alert_context, {"cloudwatch_logs": error})
         )
         report = SlackReportRenderer().render_report(sections)
 
@@ -683,7 +684,9 @@ class TestBuildPageModel:
                 metadata=AgentMetadata(),
             )
         }
-        model = formatter.build_page_model(alert_context, results, analysis=None)
+        model = formatter.build_page_model(
+            formatter.derive_facts(alert_context, results), analysis=None
+        )
         assert isinstance(model, PageModel)
         assert model.chart_ids == [cid]
         block = next(b for b in model.evidence if b.display_name)
@@ -701,7 +704,9 @@ class TestBuildPageModel:
                 metadata=AgentMetadata(),
             )
         }
-        model = formatter.build_page_model(alert_context, results, analysis=None)
+        model = formatter.build_page_model(
+            formatter.derive_facts(alert_context, results), analysis=None
+        )
         assert model.chart_ids == []
         assert all(b.chart_id is None for b in model.evidence)
 
@@ -710,7 +715,9 @@ class TestBuildPageModel:
             root_cause_hypothesis="rc", correlation="co",
             confidence="high", suggested_next_action="na",
         )
-        model = formatter.build_page_model(alert_context, {}, analysis=analysis)
+        model = formatter.build_page_model(
+            formatter.derive_facts(alert_context, {}), analysis=analysis
+        )
         assert model.analysis == {
             "root_cause_hypothesis": "rc", "correlation": "co",
             "confidence": "high", "suggested_next_action": "na",
@@ -719,7 +726,8 @@ class TestBuildPageModel:
 
 def test_build_incident_sections_carries_interactive_page_url(formatter, alert_context):
     sections = formatter.build_incident_sections(
-        alert_context, {}, interactive_page_url="https://d/pages/inv.html?x=1"
+        formatter.derive_facts(alert_context, {}),
+        interactive_page_url="https://d/pages/inv.html?x=1",
     )
     assert sections.interactive_page_url == "https://d/pages/inv.html?x=1"
 

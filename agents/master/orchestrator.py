@@ -32,7 +32,7 @@ from shared.agents import AgentRegistry, get_registry
 from shared.constants import HARD_CUTOFF_SECONDS, INITIAL_DEADLINE_SECONDS
 from shared.embeddings import EmbeddingClient
 from shared.fanout import Fanout
-from shared.incident_history_store import IncidentHistoryStore, IncidentOutcome
+from shared.incident_history_store import IncidentHistoryStore
 from shared.model_call import drain_usage as drain_decision_usage
 from shared.model_call import reset_usage as reset_decision_usage
 from shared.models import AgentFailure, AgentMetadata, AgentResult, AlertContext
@@ -45,14 +45,11 @@ from shared.trace_store import (
     EVENT_A2A_REQUEST,
     EVENT_A2A_RESPONSE,
     EVENT_FOLLOWUP_DECISION,
-    EVENT_INVESTIGATION_TERMINATED,
     EVENT_ROUTING_DECISION,
     SOURCE_MASTER,
-    ResultSummary,
-    TraceManifest,
     TraceStore,
-    _dt_partition_from_iso,
 )
+from agents.master.finalizer import FinalizationContext, InvestigationFinalizer
 from agents.master.followup import FollowupCandidate, FollowupPlanner
 from agents.master.report_formatter import ReportFormatter
 from agents.master.routing import AgentCandidate, AgentRouter, RoutingResult
@@ -61,10 +58,6 @@ from shared.page_signer import CloudFrontUrlSigner
 from shared.report_renderer import AnalysisSection
 
 logger = logging.getLogger(__name__)
-
-# Cap on the outcome record's free-text summary when no synthesis correlation
-# is available to fall back on — keeps the history item compact.
-_OUTCOME_SUMMARY_CHARS = 600
 
 # Stage 2 follow-up only runs when at least this much of the hard-cutoff budget
 # remains after the initial report — enough to plan and land a refined dispatch.
@@ -318,6 +311,18 @@ class InvestigationOrchestrator:
             history_store if history_store is not None else IncidentHistoryStore.from_env()
         )
 
+        # Post-report persistence (Phase 7 + 8) is owned by the finalizer:
+        # the trace manifest + terminating event, the results archive, the
+        # chart snapshots, the page model, and the incident outcome — written
+        # in a load-bearing order, each step fail-open. Composed from the same
+        # optional stores; a step is a no-op when its store is unconfigured.
+        self._finalizer = InvestigationFinalizer(
+            self.report_formatter,
+            trace_store=self._trace_store,
+            history_store=self._history_store,
+            embedding_client=self._embedding_client,
+        )
+
     @property
     def registry(self) -> AgentRegistry:
         return self._registry
@@ -413,13 +418,14 @@ class InvestigationOrchestrator:
             if self._page_signer is not None
             else None
         )
+        report_facts = self.report_formatter.derive_facts(
+            alert_context, results,
+            pending=pending_ids, disabled=self.disabled_agents, skipped=skipped_agents,
+        )
         report_sections = self.report_formatter.build_incident_sections(
-            alert_context,
-            results,
-            pending_agents=pending_ids,
-            disabled_agents=self.disabled_agents,
+            report_facts,
+            variant_label=alert_context.variant_label,
             analysis=analysis,
-            skipped_agents=skipped_agents,
             interactive_page_url=page_url,
         )
 
@@ -495,47 +501,30 @@ class InvestigationOrchestrator:
                 alert_context, results, initial_report_summary, start_time,
             )
 
-        # --- Phase 7: finalize the trace archive (manifest + DDB index) ------
-        # Fail-open: an error here is logged inside the trace store and
-        # never raises into the surrounding investigation.
-        self._finalize_trace(
-            alert_context=alert_context,
+        # --- Phase 7 + 8: persist the investigation record -------------------
+        # Derive the canonical facts once over the final result set, then hand
+        # the record off to the finalizer (manifest + terminating event,
+        # results archive, chart snapshots, page model, incident outcome). The
+        # finalizer owns the load-bearing write order and is fail-open per step,
+        # so this never raises into the investigation.
+        final_facts = self.report_formatter.derive_facts(
+            alert_context, results,
+            pending=pending_ids, disabled=self.disabled_agents, skipped=skipped_agents,
+        )
+        total_duration = asyncio.get_event_loop().time() - start_time
+        self._finalizer.finalize(
+            final_facts,
             results=results,
-            dispatched_agents=dispatched_agents,
-            pending_ids=pending_ids,
-            started_at_iso=started_at_iso,
-            start_time=start_time,
-            routing=routing.manifest_record,
-        )
-
-        self._persist_results(
-            alert_context=alert_context,
-            results=results,
-            started_at_iso=started_at_iso,
-        )
-
-        # Snapshot the series behind chart-carrying findings (#32). Same
-        # fail-open contract as the manifest write above.
-        self._snapshot_charts(alert_context=alert_context, results=results)
-
-        # Write the #33 page model last in Phase 7 — after the manifest and the
-        # chart series — so its S3 ObjectCreated event triggers the renderer only
-        # once the charts it references already exist. Fail-open.
-        self._write_page_model(
-            alert_context=alert_context, results=results, analysis=analysis,
-            pending_agents=pending_ids, disabled_agents=self.disabled_agents,
-            skipped_agents=skipped_agents,
-        )
-
-        # --- Phase 8: record the incident outcome for similar-incident lookup ---
-        # Embeds the alert + stores a compact record (issue #30) so a future,
-        # similar alert can surface this one. Fail-open and skipped entirely
-        # when history isn't configured. Runs after the report is posted, so
-        # the embedding call never delays the user-facing report.
-        self._record_incident_outcome(
-            alert_context=alert_context,
             analysis=analysis,
-            report_summary=initial_report_summary,
+            trace_meta=FinalizationContext(
+                alert_context=alert_context,
+                dispatched_agents=dispatched_agents,
+                pending_ids=pending_ids,
+                started_at_iso=started_at_iso,
+                total_duration_seconds=total_duration,
+                routing=routing.manifest_record,
+                report_summary=initial_report_summary,
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -851,241 +840,6 @@ class InvestigationOrchestrator:
                 "Failed to store experiment result for %s variant %s",
                 alert_context.investigation_id,
                 alert_context.variant_id,
-            )
-
-    def _finalize_trace(
-        self,
-        *,
-        alert_context: AlertContext,
-        results: dict[str, AgentResult | AgentFailure],
-        dispatched_agents: list[str],
-        pending_ids: set[str],
-        started_at_iso: str,
-        start_time: float,
-        routing: dict | None = None,
-    ) -> None:
-        """Emit the investigation_terminated event + write the manifest.
-
-        Fail-open. ``self._trace_store`` may be ``None`` (tracing
-        disabled); both writes inside :class:`TraceStore` are themselves
-        wrapped in try/except, so this method should never raise.
-        """
-        if self._trace_store is None:
-            return
-
-        ended_at_iso = now_iso()
-        total_duration = asyncio.get_event_loop().time() - start_time
-
-        # Emit a terminating event so the events folder has a tombstone
-        # even if the manifest write fails. ``pending_ids`` is the set of
-        # agents that didn't return before the hard cutoff.
-        self._trace_store.put_event(
-            investigation_id=alert_context.investigation_id,
-            source=SOURCE_MASTER,
-            event_type=EVENT_INVESTIGATION_TERMINATED,
-            payload={
-                "pending_agents": sorted(pending_ids),
-                "elapsed_seconds": total_duration,
-            },
-        )
-
-        # Build the per-agent rollup. Anything in `results` that's not an
-        # AgentResult is an AgentFailure (timeout / cancellation); count
-        # it as an error in the manifest.
-        results_summary: dict[str, ResultSummary] = {}
-        error_count = 0
-        for aid in dispatched_agents:
-            r = results.get(aid)
-            if isinstance(r, AgentResult):
-                if r.status != "success":
-                    error_count += 1
-                results_summary[aid] = ResultSummary(
-                    status=r.status,
-                    findings_count=len(r.findings),
-                    duration_seconds=r.duration_seconds,
-                )
-            elif isinstance(r, AgentFailure):
-                error_count += 1
-                results_summary[aid] = ResultSummary(
-                    status="error",
-                    findings_count=0,
-                    duration_seconds=0.0,
-                )
-            else:
-                # Pending — never returned before the hard cutoff.
-                error_count += 1
-                results_summary[aid] = ResultSummary(
-                    status="timeout",
-                    findings_count=0,
-                    duration_seconds=0.0,
-                )
-
-        if error_count == 0:
-            status = "completed"
-        elif error_count == len(dispatched_agents):
-            status = "failed"
-        else:
-            status = "partial"
-
-        manifest = TraceManifest(
-            investigation_id=alert_context.investigation_id,
-            alert_context=asdict(alert_context),
-            started_at=started_at_iso,
-            ended_at=ended_at_iso,
-            total_duration_seconds=total_duration,
-            dispatched_agents=list(dispatched_agents),
-            results_summary=results_summary,
-            status=status,
-            error_count=error_count,
-            routing=routing,
-            timeline=self.report_formatter.build_timeline(
-                alert_context, results
-            ).to_json_dict()["events"],
-        )
-        self._trace_store.put_manifest(manifest)
-
-    def _snapshot_charts(
-        self,
-        alert_context: AlertContext,
-        results: dict[str, AgentResult | AgentFailure],
-    ) -> None:
-        """Write the series behind every descriptor-carrying finding to S3.
-
-        Approach A (#32): specialized agents ship the rows they already
-        harvested on :attr:`AgentResult.chart_series`; the master persists each
-        once under ``charts/<chart_id>.json`` so the interactive incident page
-        (#33) can draw graphs from an immutable record. Runs in Phase 7, after
-        the report is posted, so it never delays the user-facing report.
-
-        Fail-open: ``self._trace_store`` may be ``None`` (tracing disabled),
-        and every store write swallows its own errors — this never raises.
-        """
-        if self._trace_store is None:
-            return
-
-        seen: set[str] = set()
-        for result in results.values():
-            if not isinstance(result, AgentResult):
-                continue
-            descriptors = {
-                f.chart.chart_id: f.chart
-                for f in result.findings
-                if f.chart is not None
-            }
-            for chart_id, series in result.chart_series.items():
-                if chart_id in seen:
-                    continue
-                seen.add(chart_id)
-                desc = descriptors.get(chart_id)
-                payload = {
-                    "schema_version": 1,
-                    "chart_id": chart_id,
-                    "investigation_id": alert_context.investigation_id,
-                    "source": desc.source if desc else "",
-                    "descriptor": {
-                        "log_groups": desc.log_groups,
-                        "query": desc.query,
-                        "start_epoch": desc.start_epoch,
-                        "end_epoch": desc.end_epoch,
-                    } if desc else {},
-                    "series_kind": series.series_kind,
-                    "truncated": series.truncated,
-                    "points": series.points,
-                    "captured_at": now_iso(),
-                }
-                self._trace_store.put_chart_series(
-                    investigation_id=alert_context.investigation_id,
-                    chart_id=chart_id,
-                    payload=payload,
-                )
-
-    def _persist_results(
-        self,
-        *,
-        alert_context: AlertContext,
-        results: dict[str, AgentResult | AgentFailure],
-        started_at_iso: str,
-    ) -> None:
-        """Archive the full results map so /postmortem can rebuild the PIR (#56).
-
-        Fail-open: ``self._trace_store`` may be ``None`` (tracing disabled).
-        The ``dt`` partition is derived from ``started_at`` so results.json
-        lands in the same prefix as the manifest written this run.
-        """
-        if self._trace_store is None:
-            return
-        self._trace_store.put_results(
-            investigation_id=alert_context.investigation_id,
-            results=results,
-            dt=_dt_partition_from_iso(started_at_iso),
-        )
-
-    def _write_page_model(
-        self,
-        *,
-        alert_context: AlertContext,
-        results: dict[str, AgentResult | AgentFailure],
-        analysis: AnalysisSection | None,
-        pending_agents: set[str],
-        disabled_agents: set[str],
-        skipped_agents: dict[str, str],
-    ) -> None:
-        """Build + persist the #33 page model (render trigger). Fail-open."""
-        if self._trace_store is None:
-            return
-        model = self.report_formatter.build_page_model(
-            alert_context, results, analysis=analysis,
-            pending_agents=pending_agents, disabled_agents=disabled_agents,
-            skipped_agents=skipped_agents,
-        )
-        self._trace_store.put_page_model(
-            investigation_id=alert_context.investigation_id,
-            payload=model.to_json_dict(),
-        )
-
-    def _record_incident_outcome(
-        self,
-        *,
-        alert_context: AlertContext,
-        analysis: AnalysisSection | None,
-        report_summary: str,
-    ) -> None:
-        """Embed the alert and store a compact outcome record (issue #30).
-
-        Fail-open and a no-op unless both the embedding client and the history
-        store are configured. The root cause comes from the synthesized
-        Analysis section (#27); the summary prefers the analysis correlation,
-        falling back to a truncated report. A vector that can't be produced
-        means the record would never be searchable, so the write is skipped.
-        """
-        if self._embedding_client is None or self._history_store is None:
-            return
-        try:
-            embedding = self._embedding_client.embed(alert_context.alert_text)
-            if embedding is None:
-                return
-            root_cause = analysis.root_cause_hypothesis if analysis else None
-            summary = (
-                (analysis.correlation if analysis else "")
-                or report_summary[:_OUTCOME_SUMMARY_CHARS]
-            )
-            self._history_store.put_outcome(
-                IncidentOutcome(
-                    investigation_id=alert_context.investigation_id,
-                    alert_text=alert_context.alert_text,
-                    summary=summary,
-                    embedding=embedding,
-                    platform=alert_context.platform,
-                    channel_id=alert_context.channel_id,
-                    message_id=alert_context.message_id,
-                    alert_timestamp=alert_context.alert_timestamp,
-                    root_cause=root_cause,
-                )
-            )
-        except Exception:
-            logger.exception(
-                "Failed to record incident outcome for investigation %s",
-                alert_context.investigation_id,
             )
 
     @staticmethod

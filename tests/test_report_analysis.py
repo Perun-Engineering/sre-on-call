@@ -84,8 +84,9 @@ class TestFormatterPassThrough:
             alert_timestamp="2026-06-11T10:00:00Z",
             investigation_window=("a", "b"),
         )
-        sections = ReportFormatter().build_incident_sections(
-            alert, {}, analysis=_analysis()
+        fmt = ReportFormatter()
+        sections = fmt.build_incident_sections(
+            fmt.derive_facts(alert, {}), analysis=_analysis()
         )
         assert sections.analysis is _analysis() or sections.analysis == _analysis()
 
@@ -102,7 +103,8 @@ class TestFormatterPassThrough:
             alert_timestamp="2026-06-11T10:00:00Z",
             investigation_window=("a", "b"),
         )
-        sections = ReportFormatter().build_incident_sections(alert, {})
+        fmt = ReportFormatter()
+        sections = fmt.build_incident_sections(fmt.derive_facts(alert, {}))
         assert sections.analysis is None
 
     def test_build_enrichment_sections_threads_analysis(self):

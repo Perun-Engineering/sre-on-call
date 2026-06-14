@@ -94,10 +94,11 @@ class TimelineEvent:
 class IncidentTimeline:
     """The ordered incident narrative: alert → findings → agent enrichments.
 
-    Purely deterministic — assembled by :meth:`ReportFormatter.build_timeline`
-    from timestamps already present on the evidence. Stored in the trace
-    manifest and carried into the #33 page model for rendering. ``resolution``
-    events are appended later by the PIR flow (#55).
+    Purely deterministic — assembled by :meth:`IncidentFacts.derive` (exposed
+    via :meth:`ReportFormatter.derive_facts`) from timestamps already present on
+    the evidence, and carried on :attr:`IncidentFacts.timeline`. Stored in the
+    trace manifest and carried into the #33 page model for rendering.
+    ``resolution`` events are appended later by the PIR flow (#55).
     """
 
     events: list[TimelineEvent] = field(default_factory=list)
