@@ -16,6 +16,8 @@
 # ── Slack Secrets ────────────────────────────────────────────────────────────
 
 resource "aws_secretsmanager_secret" "slack_bot_token" {
+  count = local.slack_enabled ? 1 : 0
+
   name        = "${var.project_name}-${var.environment}-slack-bot-token"
   description = "Slack Bot OAuth token (used by Lambda_Adapter, Master_Agent, Slack_Scanner_Agent)"
 
@@ -25,6 +27,8 @@ resource "aws_secretsmanager_secret" "slack_bot_token" {
 }
 
 resource "aws_secretsmanager_secret" "slack_signing_secret" {
+  count = local.slack_enabled ? 1 : 0
+
   name        = "${var.project_name}-${var.environment}-slack-signing-secret"
   description = "Slack Signing Secret for verifying webhook signatures (used by Lambda_Adapter)"
 
@@ -60,13 +64,13 @@ resource "aws_secretsmanager_secret" "discord_bot_token" {
 # ── Outputs ──────────────────────────────────────────────────────────────────
 
 output "slack_bot_token_secret_arn" {
-  description = "ARN of the Slack Bot Token secret"
-  value       = aws_secretsmanager_secret.slack_bot_token.arn
+  description = "ARN of the Slack Bot Token secret (null when Slack is disabled)"
+  value       = try(aws_secretsmanager_secret.slack_bot_token[0].arn, null)
 }
 
 output "slack_signing_secret_arn" {
-  description = "ARN of the Slack Signing Secret"
-  value       = aws_secretsmanager_secret.slack_signing_secret.arn
+  description = "ARN of the Slack Signing Secret (null when Slack is disabled)"
+  value       = try(aws_secretsmanager_secret.slack_signing_secret[0].arn, null)
 }
 
 output "discord_public_key_secret_arn" {
