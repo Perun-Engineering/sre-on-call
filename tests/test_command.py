@@ -432,7 +432,7 @@ class TestPIRFormatting:
         }
         from shared.report_renderer import SlackReportRenderer
         pir = SlackReportRenderer().render_pir(
-            formatter.build_pir_sections(ctx, results)
+            formatter.build_pir_sections(formatter.derive_facts(ctx, results))
         )
         assert "Post-Incident Report" in pir
         assert "Timeline" in pir
@@ -477,7 +477,7 @@ class TestPIRFormatting:
         }
         from shared.report_renderer import SlackReportRenderer
         pir = SlackReportRenderer().render_pir(
-            formatter.build_pir_sections(ctx, results)
+            formatter.build_pir_sections(formatter.derive_facts(ctx, results))
         )
         assert "Disk warning" in pir
         assert "14:31:00" in pir

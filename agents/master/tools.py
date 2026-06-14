@@ -323,7 +323,10 @@ async def _run_postmortem(
             return
 
         alert_context = _alert_context_from_payload(manifest["alert_context"])
-        sections = ReportFormatter().build_pir_sections(alert_context, results)
+        formatter = ReportFormatter()
+        sections = formatter.build_pir_sections(
+            formatter.derive_facts(alert_context, results)
+        )
 
         chat = for_platform(platform)
         target = DeliveryTarget(

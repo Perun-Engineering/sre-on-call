@@ -62,7 +62,7 @@ def test_timeline_carries_the_alert_and_is_clock_ordered(results):
         alert_timestamp="2025-01-15 14:32:00 UTC",  # human form, not ISO-T
         investigation_window=("2025-01-15 14:27:00 UTC", "2025-01-15 14:37:00 UTC"),
     )
-    events = ReportFormatter().build_timeline(alert, results).events
+    events = ReportFormatter().derive_facts(alert, results).timeline.events
 
     # The alert is always present exactly once, and parses to a real instant.
     # (It need not be *first*: a finding timestamped before the alert — a

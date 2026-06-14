@@ -171,7 +171,9 @@ def test_failure_notices_for_non_successful_agents(
     agent_results, status_map = data
     formatter = ReportFormatter()
     report = SlackReportRenderer().render_report(
-        formatter.build_incident_sections(ALERT_CONTEXT, agent_results)
+        formatter.build_incident_sections(
+            formatter.derive_facts(ALERT_CONTEXT, agent_results)
+        )
     )
 
     for agent_key in AGENT_ORDER:
@@ -220,7 +222,9 @@ def test_incident_report_contains_all_required_sections(
     agent_results, _status_map = data
     formatter = ReportFormatter()
     report = SlackReportRenderer().render_report(
-        formatter.build_incident_sections(ALERT_CONTEXT, agent_results)
+        formatter.build_incident_sections(
+            formatter.derive_facts(ALERT_CONTEXT, agent_results)
+        )
     )
 
     for header in REQUIRED_SECTION_HEADERS:
@@ -275,7 +279,9 @@ def test_agent_findings_appear_in_evidence_section(
     formatter = ReportFormatter()
     renderer = SlackReportRenderer()
     report = renderer.render_report(
-        formatter.build_incident_sections(ALERT_CONTEXT, agent_results)
+        formatter.build_incident_sections(
+            formatter.derive_facts(ALERT_CONTEXT, agent_results)
+        )
     )
 
     # Extract the Evidence section from the report

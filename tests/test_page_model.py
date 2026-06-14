@@ -74,10 +74,14 @@ def test_build_page_model_mirrors_all_five_evidence_states():
         err_id: AgentResult(agent_name=err_id, status="error", findings=[],
                             summary="", error_message="boom"),
     }
-    model = ReportFormatter().build_page_model(
-        ctx, results, analysis=None,
-        pending_agents={pend_id}, disabled_agents={dis_id},
-        skipped_agents={skip_id: "not relevant"},
+    fmt = ReportFormatter()
+    model = fmt.build_page_model(
+        fmt.derive_facts(
+            ctx, results,
+            pending={pend_id}, disabled={dis_id},
+            skipped={skip_id: "not relevant"},
+        ),
+        analysis=None,
     )
     statuses = {b.status for b in model.evidence}
     assert {"ok", "error", "pending", "disabled", "skipped"} <= statuses

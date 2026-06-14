@@ -20,7 +20,6 @@ from agents.master.incident_facts import (
     format_metadata_line,
     render_pir_timeline_markdown,
 )
-from agents.master.synthesis import IncidentTimeline
 from shared.agents import AgentRegistry, get_registry
 from shared.models import AgentResult, AgentFailure, AlertContext
 from shared.page_model import (
@@ -63,40 +62,21 @@ class ReportFormatter:
 
     def build_incident_sections(
         self,
-        alert_context: AlertContext,
-        agent_results: dict[str, AgentResult | AgentFailure],
-        pending_agents: set[str] | None = None,
-        disabled_agents: set[str] | None = None,
+        facts: IncidentFacts,
+        *,
+        variant_label: str | None = None,
         analysis: AnalysisSection | None = None,
-        skipped_agents: dict[str, str] | None = None,
         interactive_page_url: str | None = None,
     ) -> ReportSections:
-        """Build the structured Incident Report sections.
+        """Project pre-derived :class:`IncidentFacts` into Incident Report sections.
 
-        ``pending_agents`` are agents that were dispatched but hadn't
-        responded by the 60-second deadline. They render with a ⏳
-        marker and trigger a late enrichment update if they respond
-        before the hard cutoff.
-
-        ``disabled_agents`` are agents the orchestrator deliberately did
-        not dispatch because they are deployed-but-inactive in
-        ``config.yaml`` (``enabled: false``). They render as 🚫 disabled
-        evidence blocks for transparency. Their ids must be in the
-        registry; otherwise ``KeyError`` propagates.
-
-        ``skipped_agents`` (issue #28) maps an agent the master's router
-        deliberately did *not* dispatch for *this* alert onto the router's
-        reason. They render as a distinct ➖ "not investigated" block —
-        never as a failure — so a deliberate skip reads differently from an
-        agent that errored or timed out.
-
-        Agents not in any of these sets are treated as not configured
-        for this investigation and omitted entirely.
+        The five-state evidence (ok / error / pending / disabled / skipped) is
+        already resolved on ``facts`` — the caller derives once via
+        :meth:`derive_facts` with the appropriate pending / disabled / skipped
+        inputs. ``variant_label`` (A/B), the #27 ``analysis`` block, and the #33
+        ``interactive_page_url`` ride alongside the facts and are set on the
+        returned sections.
         """
-        facts = self._facts(
-            alert_context, agent_results,
-            pending_agents or set(), disabled_agents or set(), skipped_agents or {},
-        )
         sections = ReportSections(
             severity=facts.severity,
             affected_services=facts.affected_services,
@@ -111,7 +91,7 @@ class ReportFormatter:
             summary_parts=facts.summary_parts,
             root_cause_parts=facts.root_cause_parts,
         )
-        sections.variant_label = alert_context.variant_label
+        sections.variant_label = variant_label
         sections.analysis = analysis
         sections.interactive_page_url = interactive_page_url
         return sections
@@ -177,13 +157,13 @@ class ReportFormatter:
             analysis=analysis,
         )
 
-    def build_pir_sections(
-        self,
-        alert_context: AlertContext,
-        agent_results: dict[str, AgentResult | AgentFailure],
-    ) -> PIRSections:
-        """Build the structured Post-Incident Report sections."""
-        facts = self._facts(alert_context, agent_results, set(), set(), {})
+    def build_pir_sections(self, facts: IncidentFacts) -> PIRSections:
+        """Project pre-derived :class:`IncidentFacts` into PIR sections.
+
+        The PIR is built from the archived results at ``/postmortem`` time, so
+        the caller derives ``facts`` with empty pending / disabled / skipped
+        sets — only the settled findings inform the post-incident report.
+        """
         return PIRSections(
             incident_summary=facts.summary,
             timeline=render_pir_timeline_markdown(facts.timeline),
@@ -195,22 +175,17 @@ class ReportFormatter:
 
     def build_page_model(
         self,
-        alert_context: AlertContext,
-        agent_results: dict[str, AgentResult | AgentFailure],
+        facts: IncidentFacts,
+        *,
         analysis: AnalysisSection | None = None,
-        pending_agents: set[str] | None = None,
-        disabled_agents: set[str] | None = None,
-        skipped_agents: dict[str, str] | None = None,
     ) -> PageModel:
-        """Build the #33 interactive-page model as a projection of IncidentFacts.
+        """Project pre-derived :class:`IncidentFacts` into the #33 page model.
 
         Emits all five evidence states (full mirror of the chat report) — the
-        page no longer drops error/pending/disabled/skipped agents (#66).
+        page no longer drops error/pending/disabled/skipped agents (#66). The
+        caller derives ``facts`` with the same pending / disabled / skipped
+        inputs it used for the chat report, so the page mirrors it exactly.
         """
-        facts = self._facts(
-            alert_context, agent_results,
-            pending_agents or set(), disabled_agents or set(), skipped_agents or {},
-        )
         evidence = [
             PageEvidenceBlock(
                 emoji=e.emoji, display_name=e.display_name, status=e.status,
@@ -284,42 +259,30 @@ class ReportFormatter:
             "timeline": timeline,
         }
 
-    def build_timeline(
+    # --- Facts derivation ---
+
+    def derive_facts(
         self,
         alert_context: AlertContext,
         agent_results: dict[str, AgentResult | AgentFailure],
-    ) -> IncidentTimeline:
-        """Assemble the ordered incident timeline (#34), deterministically.
-
-        Events come purely from timestamps already on the evidence — the alert
-        time, each successful agent's finding timestamps, and each agent's
-        completion (the enrichment arrival). Nothing is LLM-synthesized, so a
-        time is never invented. A finding event carries ``chart_id`` only when
-        its descriptor's series was harvested, so the page can focus the linked
-        graph window on click. Events are sorted by parsed wall-clock; any
-        unparseable timestamp keeps stable insertion order rather than
-        misordering the narrative.
-        """
-        # Timeline draws only from successful results; pending/disabled/skipped
-        # agents contribute no timeline events, so empty sets are correct here.
-        return IncidentFacts.derive(
-            self.registry, alert_context, agent_results,
-            pending=set(), disabled=set(), skipped={},
-        ).timeline
-
-    # --- Facts helpers ---
-
-    def _facts(
-        self,
-        alert_context: AlertContext,
-        agent_results: dict[str, AgentResult | AgentFailure],
-        pending_agents: set[str],
-        disabled_agents: set[str],
-        skipped_agents: dict[str, str],
+        *,
+        pending: set[str] | None = None,
+        disabled: set[str] | None = None,
+        skipped: dict[str, str] | None = None,
     ) -> IncidentFacts:
+        """Derive the canonical :class:`IncidentFacts` for one investigation.
+
+        The single derivation seam: every outbound surface (chat report, PIR,
+        interactive page, trace manifest timeline) is a projection of the facts
+        this returns. Callers derive once over their current result set and
+        thread the result into the ``build_*`` projections. ``pending`` /
+        ``disabled`` / ``skipped`` default to empty (the PIR's case); the live
+        report passes the real sets. The included :attr:`IncidentFacts.timeline`
+        draws only from settled results, so it is invariant to those inputs.
+        """
         return IncidentFacts.derive(
             self.registry, alert_context, agent_results,
-            pending=pending_agents, disabled=disabled_agents, skipped=skipped_agents,
+            pending=pending or set(), disabled=disabled or set(), skipped=skipped or {},
         )
 
     @staticmethod

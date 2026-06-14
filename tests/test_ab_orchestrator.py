@@ -115,7 +115,9 @@ class TestReportFormatterVariantLabel:
         ctx = _alert(variant_label="A: Claude Sonnet")
         results: dict[str, AgentResult | AgentFailure] = {k: _success_result(k) for k in ["slack_scanner", "prometheus", "cloudwatch_logs", "eks"]}
         report = SlackReportRenderer().render_report(
-            fmt.build_incident_sections(ctx, results)
+            fmt.build_incident_sections(
+                fmt.derive_facts(ctx, results), variant_label=ctx.variant_label
+            )
         )
         assert "[A: Claude Sonnet]" in report
         assert "Incident Report" in report
@@ -125,7 +127,9 @@ class TestReportFormatterVariantLabel:
         ctx = _alert()
         results: dict[str, AgentResult | AgentFailure] = {k: _success_result(k) for k in ["slack_scanner", "prometheus", "cloudwatch_logs", "eks"]}
         report = SlackReportRenderer().render_report(
-            fmt.build_incident_sections(ctx, results)
+            fmt.build_incident_sections(
+                fmt.derive_facts(ctx, results), variant_label=ctx.variant_label
+            )
         )
         assert "📊 *[" not in report
         assert "Incident Report" in report
@@ -135,7 +139,9 @@ class TestReportFormatterVariantLabel:
         ctx = _alert(variant_label="B: Nova Pro")
         results: dict[str, AgentResult | AgentFailure] = {k: _success_result(k) for k in ["slack_scanner", "prometheus", "cloudwatch_logs", "eks"]}
         report = DiscordReportRenderer().render_report(
-            fmt.build_incident_sections(ctx, results)
+            fmt.build_incident_sections(
+                fmt.derive_facts(ctx, results), variant_label=ctx.variant_label
+            )
         )
         assert "[B: Nova Pro]" in report
 
