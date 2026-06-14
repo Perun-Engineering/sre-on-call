@@ -33,8 +33,10 @@ mapfile -t SPECIALIZED < <(
 import sys, yaml
 with open("config.yaml") as f:
     cfg = yaml.safe_load(f)
-for name in cfg.get("agents", {}):
+for name, spec in cfg.get("agents", {}).items():
     if name == "master":
+        continue
+    if not (spec or {}).get("enabled", True):
         continue
     print(name)
 '

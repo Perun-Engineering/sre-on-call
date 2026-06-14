@@ -63,12 +63,16 @@ resource "aws_iam_role_policy" "lambda_adapter_secrets" {
         Action = [
           "secretsmanager:GetSecretValue"
         ]
-        Resource = [
-          aws_secretsmanager_secret.slack_bot_token.arn,
-          aws_secretsmanager_secret.slack_signing_secret.arn,
-          aws_secretsmanager_secret.discord_public_key.arn,
-          aws_secretsmanager_secret.discord_bot_token.arn,
-        ]
+        Resource = concat(
+          [
+            aws_secretsmanager_secret.slack_bot_token.arn,
+            aws_secretsmanager_secret.slack_signing_secret.arn,
+          ],
+          local.discord_enabled ? [
+            aws_secretsmanager_secret.discord_public_key[0].arn,
+            aws_secretsmanager_secret.discord_bot_token[0].arn,
+          ] : [],
+        )
       }
     ]
   })
@@ -304,10 +308,14 @@ resource "aws_iam_role_policy" "master_agent_secrets" {
         Action = [
           "secretsmanager:GetSecretValue"
         ]
-        Resource = [
-          aws_secretsmanager_secret.slack_bot_token.arn,
-          aws_secretsmanager_secret.discord_bot_token.arn,
-        ]
+        Resource = concat(
+          [
+            aws_secretsmanager_secret.slack_bot_token.arn,
+          ],
+          local.discord_enabled ? [
+            aws_secretsmanager_secret.discord_bot_token[0].arn,
+          ] : [],
+        )
       }
     ]
   })
@@ -431,7 +439,7 @@ resource "aws_iam_role_policy" "discord_scanner_agent_secrets" {
           "secretsmanager:GetSecretValue"
         ]
         Resource = [
-          aws_secretsmanager_secret.discord_bot_token.arn
+          aws_secretsmanager_secret.discord_bot_token[0].arn
         ]
       }
     ]

@@ -36,6 +36,8 @@ resource "aws_secretsmanager_secret" "slack_signing_secret" {
 # ── Discord Secrets ──────────────────────────────────────────────────────────
 
 resource "aws_secretsmanager_secret" "discord_public_key" {
+  count = local.discord_enabled ? 1 : 0
+
   name        = "${var.project_name}-${var.environment}-discord-public-key"
   description = "Discord application public key for Ed25519 signature verification (used by Lambda_Adapter)"
 
@@ -45,6 +47,8 @@ resource "aws_secretsmanager_secret" "discord_public_key" {
 }
 
 resource "aws_secretsmanager_secret" "discord_bot_token" {
+  count = local.discord_enabled ? 1 : 0
+
   name        = "${var.project_name}-${var.environment}-discord-bot-token"
   description = "Discord Bot token (used by Lambda_Adapter, Master_Agent, Discord_Scanner_Agent)"
 
@@ -66,11 +70,11 @@ output "slack_signing_secret_arn" {
 }
 
 output "discord_public_key_secret_arn" {
-  description = "ARN of the Discord Public Key secret"
-  value       = aws_secretsmanager_secret.discord_public_key.arn
+  description = "ARN of the Discord Public Key secret (null when Discord is disabled)"
+  value       = try(aws_secretsmanager_secret.discord_public_key[0].arn, null)
 }
 
 output "discord_bot_token_secret_arn" {
-  description = "ARN of the Discord Bot Token secret"
-  value       = aws_secretsmanager_secret.discord_bot_token.arn
+  description = "ARN of the Discord Bot Token secret (null when Discord is disabled)"
+  value       = try(aws_secretsmanager_secret.discord_bot_token[0].arn, null)
 }
