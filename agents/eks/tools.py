@@ -14,18 +14,21 @@ from datetime import datetime, timedelta, timezone
 from kubernetes.client.exceptions import ApiException
 from strands import tool
 
+from shared.digest_tier import execute_digest
 from shared.log_summarizer import (
-    SUMMARIZER_MIN_LINES,
     BedrockLogSummarizer,
+    Digest,
     SummarizeChunk,
     Summarizer,
 )
 from shared.models import Finding, SnapshotReport, SnapshotSection
 from shared.tool_result import (
+    SEVERITY_RANK,
     ToolResult,
     build_agent_result,
     format_result,
     format_snapshot_result,
+    pick_top_by_severity,
 )
 
 logger = logging.getLogger(__name__)
@@ -34,7 +37,6 @@ _LOG_TAIL_LINES: int = 50
 
 # How many top-severity raw events survive a pod digest as exemplars (issue #49).
 _SUMMARIZER_POD_EXEMPLARS: int = 1
-_SEVERITY_RANK: dict[str, int] = {"critical": 0, "warning": 1, "info": 2}
 
 
 def _get_eks_bearer_token(cluster_name: str, region: str) -> str:
@@ -375,19 +377,63 @@ def _max_finding_severity(findings: list[Finding]) -> str:
     """Highest severity (critical > warning > info) across a set of findings."""
     best = "info"
     for f in findings:
-        if _SEVERITY_RANK.get(f.severity, 2) < _SEVERITY_RANK.get(best, 2):
+        if SEVERITY_RANK.get(f.severity, 2) < SEVERITY_RANK.get(best, 2):
             best = f.severity
     return best
 
 
-def _pod_event_exemplars(findings: list[Finding], n: int = _SUMMARIZER_POD_EXEMPLARS) -> list[Finding]:
-    """Keep the top-``n`` events by severity as raw exemplars beside the digest."""
-    events = [f for f in findings if f.metadata.get("kind") == "event"]
-    events.sort(key=lambda f: _SEVERITY_RANK.get(f.severity, 2))
-    picked = events[:n]
-    for f in picked:
-        f.metadata["exemplar"] = True
-    return picked
+class EksPodDigestSource:
+    """:class:`shared.digest_tier.DigestSource` over one pod's events + log tail.
+
+    A single chunk per pod (events + log-tail findings joined); the digest
+    finding carries no deep link / chart. Exemplars are the top-severity raw
+    *events* kept beside the digest when the chunk was digested away.
+    """
+
+    def __init__(self, pod_name: str, bulk_findings: list[Finding]) -> None:
+        self._pod_name = pod_name
+        self._bulk = bulk_findings
+        self._key = f"pod/{pod_name}"
+
+    def volume(self) -> int:
+        return _pod_bulk_volume(self._bulk)
+
+    def raw_findings(self) -> list[Finding]:
+        return list(self._bulk)
+
+    def chunks(self) -> list[SummarizeChunk]:
+        return [
+            SummarizeChunk(
+                key=self._key,
+                text="\n".join(f.content for f in self._bulk),
+                severity=_max_finding_severity(self._bulk),
+            )
+        ]
+
+    def chunk_raw_findings(self, chunk_key: str) -> list[Finding]:
+        return list(self._bulk)
+
+    def digest_finding(self, digest: Digest, chunk: SummarizeChunk) -> Finding:
+        return Finding(
+            source=self._key,
+            timestamp=_iso_now(),
+            content=digest.text or "",
+            severity=chunk.severity,
+            metadata={
+                "kind": "pod_digest",
+                "pod": self._pod_name,
+                "covered": len(self._bulk),
+            },
+        )
+
+    def exemplars(self, kept_raw: set[str]) -> list[Finding]:
+        if self._key in kept_raw:
+            return []  # chunk fell back to raw — events already shown literally
+        events = [f for f in self._bulk if f.metadata.get("kind") == "event"]
+        picked = pick_top_by_severity(events, lambda f: f.severity, _SUMMARIZER_POD_EXEMPLARS)
+        for f in picked:
+            f.metadata["exemplar"] = True
+        return picked
 
 
 def _gather_pod_bulk(
@@ -410,35 +456,8 @@ def _gather_pod_bulk(
     _gather_pod_logs(core_v1, namespace, pod_name, bulk)
     result.errors.extend(bulk.errors)
 
-    if summarizer is None or _pod_bulk_volume(bulk.findings) < SUMMARIZER_MIN_LINES:
-        result.findings.extend(bulk.findings)
-        return
-
-    chunk = SummarizeChunk(
-        key=f"pod/{pod_name}",
-        text="\n".join(f.content for f in bulk.findings),
-        severity=_max_finding_severity(bulk.findings),
-    )
-    digests = summarizer.summarize([chunk])
-    digest = digests[0] if digests else None
-    if digest is None or not digest.text:
-        result.findings.extend(bulk.findings)  # fail-open: raw
-        return
-
-    result.findings.append(
-        Finding(
-            source=f"pod/{pod_name}",
-            timestamp=_iso_now(),
-            content=digest.text,
-            severity=chunk.severity,
-            metadata={
-                "kind": "pod_digest",
-                "pod": pod_name,
-                "covered": len(bulk.findings),
-            },
-        )
-    )
-    result.findings.extend(_pod_event_exemplars(bulk.findings))
+    source = EksPodDigestSource(pod_name, bulk.findings)
+    result.findings.extend(execute_digest(source, summarizer))
 
 
 @tool
