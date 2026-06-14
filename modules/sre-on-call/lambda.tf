@@ -142,8 +142,6 @@ resource "aws_lambda_function" "lambda_adapter" {
   environment {
     variables = merge(
       {
-        SLACK_SIGNING_SECRET         = aws_secretsmanager_secret.slack_signing_secret.arn
-        SLACK_BOT_TOKEN              = aws_secretsmanager_secret.slack_bot_token.arn
         DEDUP_TABLE_NAME             = aws_dynamodb_table.dedup.name
         EXPERIMENTS_TABLE_NAME       = aws_dynamodb_table.experiments.name
         MASTER_AGENT_RUNTIME_ARN     = aws_bedrockagentcore_agent_runtime.master.agent_runtime_arn
@@ -152,6 +150,10 @@ resource "aws_lambda_function" "lambda_adapter" {
         ALERT_CLASSIFICATION_ENABLED = var.enable_alert_classification ? "true" : "false"
         CLASSIFIER_LLM_ENABLED       = var.enable_classifier_llm ? "true" : "false"
       },
+      local.slack_enabled ? {
+        SLACK_SIGNING_SECRET = aws_secretsmanager_secret.slack_signing_secret[0].arn
+        SLACK_BOT_TOKEN      = aws_secretsmanager_secret.slack_bot_token[0].arn
+      } : {},
       local.discord_enabled ? {
         DISCORD_PUBLIC_KEY = aws_secretsmanager_secret.discord_public_key[0].arn
         DISCORD_BOT_TOKEN  = aws_secretsmanager_secret.discord_bot_token[0].arn

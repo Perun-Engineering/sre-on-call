@@ -143,11 +143,31 @@ locals {
     name => contains(keys(local.config_yaml.agents), name) && lookup(local.config_yaml.agents[name], "enabled", true)
   }
 
-  # Discord is wired only when its scanner agent is enabled in config.yaml. This
-  # gates the whole Discord footprint — secrets, ECR repo, and the chat-out env/
-  # IAM on the Lambda adapter + master — not just the scanner runtime, so a repo
-  # with Discord off carries no orphaned Discord resources.
+  # A chat platform is wired only when its scanner agent is enabled in
+  # config.yaml. This gates the whole per-platform footprint — secrets, ECR repo,
+  # and the chat-out env/IAM on the Lambda adapter + master — not just the
+  # scanner runtime, so a repo with a platform off carries no orphaned resources.
+  # Either platform may be disabled independently (e.g. Discord-only deployments).
+  slack_enabled   = local.agent_enabled["slack_scanner"]
   discord_enabled = local.agent_enabled["discord_scanner"]
+
+  # Chat-secret ARNs the Lambda adapter and master may read, scoped to the
+  # enabled platforms. Empty when every platform is disabled — the consuming
+  # IAM policies are then skipped entirely (an empty IAM Resource is invalid).
+  lambda_chat_secret_arns = concat(
+    local.slack_enabled ? [
+      aws_secretsmanager_secret.slack_bot_token[0].arn,
+      aws_secretsmanager_secret.slack_signing_secret[0].arn,
+    ] : [],
+    local.discord_enabled ? [
+      aws_secretsmanager_secret.discord_public_key[0].arn,
+      aws_secretsmanager_secret.discord_bot_token[0].arn,
+    ] : [],
+  )
+  master_chat_secret_arns = concat(
+    local.slack_enabled ? [aws_secretsmanager_secret.slack_bot_token[0].arn] : [],
+    local.discord_enabled ? [aws_secretsmanager_secret.discord_bot_token[0].arn] : [],
+  )
 }
 
 # ── Guardrail (opt-in) ────────────────────────────────────────────────────
@@ -219,7 +239,7 @@ resource "aws_bedrockagentcore_agent_runtime" "slack_scanner" {
   environment_variables = merge(local.base_env, {
     AWS_REGION      = var.aws_region
     MODEL_ID        = var.model_id
-    SLACK_BOT_TOKEN = aws_secretsmanager_secret.slack_bot_token.arn
+    SLACK_BOT_TOKEN = aws_secretsmanager_secret.slack_bot_token[0].arn
   })
 
   tags = {
@@ -390,7 +410,6 @@ resource "aws_bedrockagentcore_agent_runtime" "master" {
     {
       AWS_REGION         = var.aws_region
       MODEL_ID           = var.model_id
-      SLACK_BOT_TOKEN    = aws_secretsmanager_secret.slack_bot_token.arn
       TRACES_BUCKET_NAME = aws_s3_bucket.traces.bucket
       TRACES_TABLE_NAME  = aws_dynamodb_table.traces.name
       # The master writes per-variant A/B results here. Normally its own,
@@ -414,6 +433,9 @@ resource "aws_bedrockagentcore_agent_runtime" "master" {
     } : {},
     var.followup_model_id != "" ? {
       FOLLOWUP_MODEL_ID = var.followup_model_id
+    } : {},
+    local.slack_enabled ? {
+      SLACK_BOT_TOKEN = aws_secretsmanager_secret.slack_bot_token[0].arn
     } : {},
     local.discord_enabled ? {
       DISCORD_BOT_TOKEN = aws_secretsmanager_secret.discord_bot_token[0].arn

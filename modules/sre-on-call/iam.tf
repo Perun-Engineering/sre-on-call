@@ -51,6 +51,8 @@ resource "aws_iam_role" "lambda_adapter" {
 }
 
 resource "aws_iam_role_policy" "lambda_adapter_secrets" {
+  count = length(local.lambda_chat_secret_arns) > 0 ? 1 : 0
+
   name = "secrets-access"
   role = aws_iam_role.lambda_adapter.id
 
@@ -58,21 +60,12 @@ resource "aws_iam_role_policy" "lambda_adapter_secrets" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid    = "ReadSlackAndDiscordSecrets"
+        Sid    = "ReadChatSecrets"
         Effect = "Allow"
         Action = [
           "secretsmanager:GetSecretValue"
         ]
-        Resource = concat(
-          [
-            aws_secretsmanager_secret.slack_bot_token.arn,
-            aws_secretsmanager_secret.slack_signing_secret.arn,
-          ],
-          local.discord_enabled ? [
-            aws_secretsmanager_secret.discord_public_key[0].arn,
-            aws_secretsmanager_secret.discord_bot_token[0].arn,
-          ] : [],
-        )
+        Resource = local.lambda_chat_secret_arns
       }
     ]
   })
@@ -296,6 +289,8 @@ resource "aws_iam_role_policy" "master_agent_dynamodb_describe" {
 }
 
 resource "aws_iam_role_policy" "master_agent_secrets" {
+  count = length(local.master_chat_secret_arns) > 0 ? 1 : 0
+
   name = "secrets-access"
   role = aws_iam_role.master_agent.id
 
@@ -308,14 +303,7 @@ resource "aws_iam_role_policy" "master_agent_secrets" {
         Action = [
           "secretsmanager:GetSecretValue"
         ]
-        Resource = concat(
-          [
-            aws_secretsmanager_secret.slack_bot_token.arn,
-          ],
-          local.discord_enabled ? [
-            aws_secretsmanager_secret.discord_bot_token[0].arn,
-          ] : [],
-        )
+        Resource = local.master_chat_secret_arns
       }
     ]
   })
@@ -387,7 +375,7 @@ resource "aws_iam_role_policy" "slack_scanner_agent_secrets" {
           "secretsmanager:GetSecretValue"
         ]
         Resource = [
-          aws_secretsmanager_secret.slack_bot_token.arn
+          aws_secretsmanager_secret.slack_bot_token[0].arn
         ]
       }
     ]
