@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import boto3
@@ -75,6 +76,126 @@ def _get_existing_log_groups(
             missing.append(name)
 
     return existing, missing
+
+
+_DISCOVER_LIMIT: int = 25
+_DISCOVER_MAX_GROUPS_SCANNED: int = 500
+
+
+@dataclass
+class LogGroupDiscovery:
+    """Result of discovering real log groups for an investigation.
+
+    ``names`` are actual log group names (ranked, capped) the agent should
+    query; ``total_scanned`` / ``total_matched`` let the agent reason about
+    coverage and report an honest "no relevant log groups exist" when matched
+    is zero, instead of guessing names that don't exist.
+    """
+
+    names: list[str]
+    total_scanned: int
+    total_matched: int
+    error: str | None = None
+
+
+def _execute_discover_log_groups(
+    client,
+    keywords: list[str],
+    *,
+    limit: int = _DISCOVER_LIMIT,
+    max_groups_scanned: int = _DISCOVER_MAX_GROUPS_SCANNED,
+) -> LogGroupDiscovery:
+    """Discover real log groups matching alert keywords. All I/O via *client*.
+
+    Enumerates the account's log groups (paginated, capped) and keeps those
+    whose name contains any keyword (case-insensitive). Results are ranked by
+    the number of distinct keywords matched (most relevant first), then by
+    name for determinism, and capped at *limit*. Empty/blank keywords disable
+    filtering (return the scanned groups, capped). Fail-open: a
+    ``describe_log_groups`` error yields an empty discovery carrying the error
+    message rather than raising.
+    """
+    try:
+        groups = _list_log_groups(client, max_groups=max_groups_scanned)
+    except ClientError as exc:
+        return LogGroupDiscovery(
+            names=[], total_scanned=0, total_matched=0,
+            error=_client_error_message(exc),
+        )
+
+    kws = [k.strip().lower() for k in keywords if k.strip()]
+    if not kws:
+        return LogGroupDiscovery(
+            names=groups[:limit],
+            total_scanned=len(groups),
+            total_matched=len(groups),
+        )
+
+    scored = [
+        (sum(1 for k in kws if k in name.lower()), name)
+        for name in groups
+    ]
+    matched = [(score, name) for score, name in scored if score > 0]
+    matched.sort(key=lambda sn: (-sn[0], sn[1]))
+
+    return LogGroupDiscovery(
+        names=[name for _, name in matched[:limit]],
+        total_scanned=len(groups),
+        total_matched=len(matched),
+    )
+
+
+def _format_discovery(discovery: LogGroupDiscovery, keywords: list[str]) -> str:
+    """Render a :class:`LogGroupDiscovery` for the planner to read.
+
+    Lists the real log group names to query, or — when nothing matches —
+    states so plainly so the agent reports "no relevant CloudWatch log groups"
+    instead of inventing names. Errors are surfaced verbatim (fail-open).
+    """
+    kw_label = ", ".join(k for k in keywords if k.strip()) or "(no keywords)"
+
+    if discovery.error:
+        return f"Log group discovery failed: {discovery.error}"
+
+    if not discovery.names:
+        return (
+            f"No CloudWatch log groups match [{kw_label}] "
+            f"(scanned {discovery.total_scanned}). The logs for this resource "
+            f"are likely not in CloudWatch — report this rather than guessing "
+            f"log group names."
+        )
+
+    header = (
+        f"Discovered {len(discovery.names)} log group(s) "
+        f"(of {discovery.total_matched} matched, {discovery.total_scanned} scanned) "
+        f"for [{kw_label}] — query these real names:"
+    )
+    return header + "\n" + "\n".join(f"- {name}" for name in discovery.names)
+
+
+@tool
+def discover_log_groups(keywords: list[str]) -> str:
+    """Discover real CloudWatch log groups relevant to an alert.
+
+    Lists the account's actual log groups and returns those whose names match
+    the given keywords (ranked by relevance, capped), so the investigation
+    queries log groups that exist instead of guessing conventional names.
+
+    Args:
+        keywords: Tokens from the alert — service/application names, cluster
+            name, namespace, resource identifiers. Used as case-insensitive
+            substring filters against real log group names.
+
+    Returns:
+        A human-readable list of real log group names to query, or a clear
+        statement that no relevant log groups exist.
+    """
+    try:
+        client = boto3.client("logs")
+    except Exception as exc:  # noqa: BLE001 — fail-open like capture_snapshot
+        return f"Log group discovery failed: could not construct AWS client: {exc}"
+    discovery = _execute_discover_log_groups(client, keywords)
+    return _format_discovery(discovery, keywords)
 
 
 def _poll_query_results(

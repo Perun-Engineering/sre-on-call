@@ -1,11 +1,11 @@
 ---
 name: query_cloudwatch_logs
-description: Execute a CloudWatch Logs Insights query against derived log groups within an investigation window. Validates group existence, skips missing ones, returns structured findings.
+description: Execute a CloudWatch Logs Insights query against log groups returned by discover_log_groups within an investigation window. Validates group existence, skips missing ones, returns structured findings.
 tool: agents.cloudwatch_logs.tools:query_cloudwatch_logs
 ---
 # When to use
 
-Derive log group names from the `AlertContext` (service, application identifier, environment prefix), then run an initial query. If the results look suspicious — an error spike, an unexpected pattern, a gap — drill in with a focused follow-up call (a tighter window around the spike, an added filter, or a `stats … by bin()` to quantify it) rather than reporting the first pass as-is. Stop once you can explain the alert or your budget is spent.
+Run **after** `discover_log_groups` — query only the real log group names it returned; never guess names here. Run an initial query, then if the results look suspicious — an error spike, an unexpected pattern, a gap — drill in with a focused follow-up call (a tighter window around the spike, an added filter, or a `stats … by bin()` to quantify it) rather than reporting the first pass as-is. Stop once you can explain the alert or your budget is spent.
 
 # Inputs
 
