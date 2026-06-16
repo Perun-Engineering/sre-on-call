@@ -58,6 +58,24 @@ variable "model_id" {
   default     = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 }
 
+variable "routing_model_id" {
+  description = "Bedrock model ID for the master's pre-dispatch routing call (#28). Empty falls back to MODEL_ID. Set to a Sonnet-class model for better triage judgment."
+  type        = string
+  default     = ""
+}
+
+variable "synthesis_model_id" {
+  description = "Bedrock model ID for the master's Analysis synthesis call (#27). Empty falls back to MODEL_ID. Set to a Sonnet-class model for higher-quality root-cause reasoning."
+  type        = string
+  default     = ""
+}
+
+variable "followup_model_id" {
+  description = "Bedrock model ID for the master's Stage 2 follow-up planning call (#28). Empty falls back to MODEL_ID."
+  type        = string
+  default     = ""
+}
+
 variable "enable_bedrock_guardrail" {
   description = "Attach a Bedrock Guardrail (prompt-attack filtering) to every agent's model invocations. Defence-in-depth; adds per-call latency and cost. Opt-in."
   type        = bool

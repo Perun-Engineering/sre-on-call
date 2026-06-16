@@ -51,6 +51,9 @@ module "sre_on_call" {
   agent_container_registry  = var.agent_container_registry
   agent_image_tag           = var.agent_image_tag
   model_id                  = var.model_id
+  routing_model_id          = var.routing_model_id
+  synthesis_model_id        = var.synthesis_model_id
+  followup_model_id         = var.followup_model_id
   enable_bedrock_guardrail  = var.enable_bedrock_guardrail
   alarm_email_subscriptions = var.alarm_email_subscriptions
 

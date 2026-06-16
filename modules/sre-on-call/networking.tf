@@ -88,8 +88,9 @@ resource "aws_security_group_rule" "cluster_ingress_from_agent" {
 
 # ── EKS Access Entry for the agent's IAM role ───────────────────────────────
 # eks-uat uses authenticationMode=API (no aws-auth ConfigMap). Grant the
-# agent's IAM principal cluster-scoped read access via the standard
-# AmazonEKSViewPolicy.
+# agent's IAM principal cluster-scoped read access via AmazonEKSAdminViewPolicy
+# (read-only, but unlike AmazonEKSViewPolicy it covers cluster-scoped resources
+# such as nodes — the agent's gather_eks_state lists nodes for capacity/health).
 
 resource "aws_eks_access_entry" "eks_agent" {
   count = local.eks_enabled ? 1 : 0
@@ -104,7 +105,7 @@ resource "aws_eks_access_policy_association" "eks_agent_view" {
 
   cluster_name  = var.eks_cluster_name
   principal_arn = aws_iam_role.eks_agent[0].arn
-  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSViewPolicy"
+  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSAdminViewPolicy"
 
   access_scope {
     type = "cluster"
