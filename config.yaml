@@ -23,13 +23,6 @@ agents:
       - capture_snapshot
     mcps: []
 
-  discord_scanner:
-    enabled: false
-    skills:
-      - scan_discord_channels
-      - capture_snapshot
-    mcps: []
-
   cloudwatch_logs:
     enabled: true
     # Bounded iterative investigator (issue #58): a Sonnet-class model runs a
@@ -38,6 +31,7 @@ agents:
     model_id: us.anthropic.claude-sonnet-4-6
     max_tool_cycles: 4
     skills:
+      - discover_log_groups
       - query_cloudwatch_logs
       - capture_snapshot
     mcps:

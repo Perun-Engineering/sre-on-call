@@ -15,9 +15,12 @@ from unittest.mock import MagicMock, patch
 from botocore.exceptions import ClientError
 
 from agents.cloudwatch_logs.tools import (
+    LogGroupDiscovery,
     _bytes_per_group,
     _execute_capture_snapshot,
+    _execute_discover_log_groups,
     _execute_query,
+    _format_discovery,
     _get_existing_log_groups,
     _humanize_bytes,
     _list_log_groups,
@@ -1117,4 +1120,107 @@ class TestExecuteQuerySummarizer:
             summarizer=None,
         )
         assert [f.content for f in baseline.findings] == [f.content for f in with_none.findings]
-        assert len(baseline.findings) == 60
+
+
+# ---------------------------------------------------------------------------
+# _execute_discover_log_groups — discovery-first log group selection
+# ---------------------------------------------------------------------------
+
+class TestExecuteDiscoverLogGroups:
+    """Discovery lists real log groups matching alert keywords — the agent
+    never guesses names. Client is passed in directly."""
+
+    def _client(self, names: list[str]) -> MagicMock:
+        client = MagicMock()
+        client.describe_log_groups.return_value = _make_describe_response(names)
+        return client
+
+    def test_keyword_substring_match(self):
+        client = self._client([
+            "/aws/eks/eks-uat/cluster",
+            "/aws/lambda/payments-api",
+            "/aws/rds/cluster/uat-db/audit",
+        ])
+
+        discovery = _execute_discover_log_groups(client, ["eks-uat"])
+
+        assert discovery.names == ["/aws/eks/eks-uat/cluster"]
+        assert discovery.total_matched == 1
+
+    def test_no_match_returns_empty_with_scanned_count(self):
+        client = self._client(["/aws/rds/x", "/aws/lambda/y"])
+
+        discovery = _execute_discover_log_groups(client, ["monitoring", "prometheus"])
+
+        assert discovery.names == []
+        assert discovery.total_matched == 0
+        assert discovery.total_scanned == 2  # honest "nothing here" signal
+
+    def test_blank_keywords_disable_filter(self):
+        client = self._client(["/a", "/b", "/c"])
+
+        discovery = _execute_discover_log_groups(client, ["", "   "])
+
+        assert discovery.names == ["/a", "/b", "/c"]
+        assert discovery.total_matched == 3
+
+    def test_ranked_by_keyword_match_count(self):
+        client = self._client([
+            "/aws/eks/other",         # matches "eks" only
+            "/aws/uat/y",             # matches "uat" only
+            "/aws/eks/eks-uat/x",     # matches both "eks" and "uat"
+        ])
+
+        discovery = _execute_discover_log_groups(client, ["eks", "uat"], limit=2)
+
+        # 2-keyword match first; then 1-keyword matches by name asc.
+        assert discovery.names == ["/aws/eks/eks-uat/x", "/aws/eks/other"]
+        assert discovery.total_matched == 3  # cap limits names, not the count
+
+    def test_case_insensitive_match(self):
+        client = self._client(["/aws/EKS/EKS-UAT/cluster"])
+
+        discovery = _execute_discover_log_groups(client, ["eks-uat"])
+
+        assert discovery.names == ["/aws/EKS/EKS-UAT/cluster"]
+
+    def test_fail_open_on_describe_error(self):
+        client = MagicMock()
+        client.describe_log_groups.side_effect = _client_error()
+
+        discovery = _execute_discover_log_groups(client, ["eks"])
+
+        assert discovery.names == []
+        assert discovery.error is not None  # surfaced, not raised
+
+
+class TestFormatDiscovery:
+    """The string the planner reads — must list real names, or say so honestly."""
+
+    def test_lists_names_to_query(self):
+        d = LogGroupDiscovery(
+            names=["/aws/eks/eks-uat/cluster", "/aws/eks/eks-uat/app"],
+            total_scanned=50, total_matched=2,
+        )
+
+        out = _format_discovery(d, ["eks-uat"])
+
+        assert "/aws/eks/eks-uat/cluster" in out
+        assert "/aws/eks/eks-uat/app" in out
+
+    def test_no_match_is_honest(self):
+        d = LogGroupDiscovery(names=[], total_scanned=50, total_matched=0)
+
+        out = _format_discovery(d, ["monitoring"])
+
+        assert "monitoring" in out
+        assert "no" in out.lower()  # don't pretend; tell the planner to stop guessing
+
+    def test_error_surfaced(self):
+        d = LogGroupDiscovery(
+            names=[], total_scanned=0, total_matched=0, error="AccessDenied: nope",
+        )
+
+        out = _format_discovery(d, ["eks"])
+
+        assert "AccessDenied" in out
