@@ -16,8 +16,13 @@ subscription. A manual click-through is in [Appendix A](#appendix-a--manual-setu
 | Bot scope `chat:write` | OAuth | Post the incident report / PIR back in the alert thread |
 | Bot scope `channels:history` | OAuth | Slack Scanner reads history of **public** channels the bot is in |
 | Bot scope `groups:history` | OAuth | Slack Scanner reads history of **private** channels the bot is in |
+| Bot scope `reactions:read` | OAuth | Receive the `reaction_added` event so the trigger emoji can start an investigation |
+| Bot scope `channels:read` | OAuth | Slack Scanner enumerates **public** channels (fixes `users.conversations failed: missing_scope`) |
+| Bot scope `groups:read` | OAuth | Slack Scanner enumerates **private** channels |
+| Bot scope `users:read` | OAuth | Resolve user IDs to names in scanner output |
 | Bot scope `commands` | OAuth | Required to register/run the `/postmortem` and `/sre-snapshot` slash commands |
 | Event subscription `app_mention` | Events API | Delivers the triggering mention to the Lambda function URL |
+| Event subscription `reaction_added` | Events API | Delivers an emoji reaction; a reaction with the configured trigger emoji (`SLACK_TRIGGER_EMOJI`, default `:sre-on-call:`) starts an investigation on the reacted message |
 | Slash command `/postmortem` | Commands | Generates a Post-Incident Report from an incident thread |
 | Slash command `/sre-snapshot` | Commands | Captures a read-only snapshot of the infrastructure observed by SRE agents (cluster state, top log groups by ingestion, chat platform reachability). Posts at top-level — not a thread reply |
 | Signing secret | Credentials | Lambda verifies every request's HMAC signature (`SLACK_SIGNING_SECRET`) |
@@ -106,9 +111,9 @@ is `SLACK_BOT_TOKEN`.
 
 ![Bot User OAuth Token](slack-app/images/07-bot-token.png)
 
-Scroll down to **Scopes → Bot Token Scopes** and confirm all five are present
+Scroll down to **Scopes → Bot Token Scopes** and confirm all are present
 (`app_mentions:read`, `chat:write`, `channels:history`, `groups:history`,
-`commands`).
+`reactions:read`, `channels:read`, `groups:read`, `users:read`, `commands`).
 
 ![Bot token scopes](slack-app/images/07b-scopes.png)
 
@@ -136,7 +141,7 @@ redeploy.
 On **Event Subscriptions**, toggle **Enable Events** on and paste your function
 URL into **Request URL**. Slack sends the challenge; once the Lambda answers it,
 the field shows a green **Verified ✓**. Under **Subscribe to bot events**,
-confirm `app_mention` is listed, then **Save Changes**.
+confirm `app_mention` and `reaction_added` are listed, then **Save Changes**.
 
 ![Event subscriptions](slack-app/images/09-event-subscriptions.png)
 
@@ -199,7 +204,8 @@ Use this if you'd rather click through each screen.
 1. **Create New App → From scratch.** Name it `SRE On-Call Investigator`, pick
    the workspace, **Create App**.
 2. **OAuth & Permissions → Scopes → Bot Token Scopes.** Add `app_mentions:read`,
-   `chat:write`, `channels:history`, `groups:history`, `commands`. (Adding the
+   `chat:write`, `channels:history`, `groups:history`, `reactions:read`,
+   `channels:read`, `groups:read`, `users:read`, `commands`. (Adding the
    slash command in step 4 also adds `commands` automatically.)
 3. **App Home → App Display Name.** Set the bot username to `sre-on-call` and
    toggle the bot user on if prompted.
@@ -213,6 +219,17 @@ Use this if you'd rather click through each screen.
 6. **Basic Information → App Credentials.** Copy the Signing Secret
    (`SLACK_SIGNING_SECRET`). Run `hydrate_secrets.sh` (step 8 above).
 7. **Event Subscriptions → Enable Events.** Request URL = your function URL;
-   wait for **Verified ✓**. Under **Subscribe to bot events**, add `app_mention`.
-   **Save Changes**.
+   wait for **Verified ✓**. Under **Subscribe to bot events**, add `app_mention`
+   and `reaction_added`. **Save Changes**.
 8. **Invite the bot** to each channel: `/invite @sre-on-call`.
+
+### Triggering an investigation
+
+Once installed, an investigation starts from any of:
+- **@mention** the bot on an alert message, or inside an alert thread (the
+  thread's parent message becomes the alert; your reply text rides along as an
+  operator note).
+- **React** to an alert message with the trigger emoji (`:sre-on-call:` by
+  default; change it with the `SLACK_TRIGGER_EMOJI` Lambda env var /
+  `slack_trigger_emoji` Terraform variable).
+- Run `/postmortem` in an incident thread, or `/sre-snapshot` anywhere.

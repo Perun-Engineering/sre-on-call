@@ -39,12 +39,17 @@ oauth_config:
       - chat:write          # post the incident report / PIR back in-thread
       - channels:history    # scanner reads history of public channels the bot is in
       - groups:history      # scanner reads history of private channels the bot is in
+      - reactions:read      # receive the reaction_added that triggers an investigation
+      - channels:read       # scanner enumerates public channels (fixes users.conversations missing_scope)
+      - groups:read         # scanner enumerates private channels
+      - users:read          # resolve user IDs to names in scanner output
       - commands            # required for the /postmortem slash command
 settings:
   event_subscriptions:
     request_url: https://your-function-url.lambda-url.us-east-1.on.aws/
     bot_events:
       - app_mention
+      - reaction_added
   org_deploy_enabled: false
   socket_mode_enabled: false
   token_rotation_enabled: false

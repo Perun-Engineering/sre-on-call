@@ -29,6 +29,7 @@ from shared.platforms import (
     ChatPlatform,
     CommandWebhook,
     DeliveryTarget,
+    IgnoredWebhook,
     InvalidWebhook,
 )
 from shared.time_utils import now_iso
@@ -117,6 +118,11 @@ def process_webhook(
 
     if isinstance(webhook_event, ChallengeWebhook):
         return _http_response(200, webhook_event.response)
+
+    if isinstance(webhook_event, IgnoredWebhook):
+        # A valid event that is not an investigation trigger (e.g. a non-trigger
+        # reaction). Ack with 200 so the platform does not retry; no dispatch.
+        return _http_response(webhook_event.status_code)
 
     if isinstance(webhook_event, CommandWebhook):
         return _process_command(webhook_event.command, platform, dispatch)
