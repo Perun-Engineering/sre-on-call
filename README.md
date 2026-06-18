@@ -1,6 +1,12 @@
-# sre-on-call
+<div align="center">
+  <img src="docs/assets/sre-on-call-logo.png" alt="sre-on-call logo" width="180" height="180">
 
-A multi-agent bot that automatically investigates infrastructure alerts across Slack and Discord. When an alert is posted to a channel, the system acknowledges it, fans out investigation work to specialized agents in parallel, and posts a structured incident analysis as a thread reply.
+  <h1>sre-on-call</h1>
+
+  <p><em>A multi-agent bot that automatically investigates infrastructure alerts across Slack and Discord.</em></p>
+</div>
+
+When an alert is posted to a channel — or an operator reacts to one with the trigger emoji or `@mentions` the bot in its thread — the system acknowledges it, fans out investigation work to specialized agents in parallel, and posts a structured incident analysis as a thread reply.
 
 ## Architecture
 
@@ -14,26 +20,26 @@ Slack/Discord webhook
         ▼
    Master Agent  ── investigate_alert tool ──▶ Orchestrator
                                                    │
-                            ┌──────────────────────┼──────────────────────┐
-                            ▼                      ▼                      ▼
-                     Slack Scanner   Discord Scanner
-                     CloudWatch Logs  EKS              (4 specialized agents,
-                                                        configured via config.yaml)
+                  ┌──────────────────┬────────────┼────────────────┐
+                  ▼                  ▼            ▼                  ▼
+            Slack Scanner     CloudWatch Logs    EKS         Incident History
+                                                      (4 specialized agents,
+                                                       configured via config.yaml)
 ```
 
 - **Lambda Adapter** — receives Slack/Discord webhooks, verifies signatures, deduplicates via DynamoDB, **classifies the mention** (suppresses non-alert chatter before the fan-out — see below), then invokes the Master Agent runtime.
-- **Master Agent** — orchestrates the investigation: fans out to specialized agents, enforces deadlines, posts the Incident Report. See [`agents/master/README.md`](agents/master/README.md).
+- **Master Agent** — orchestrates the investigation: routes the alert to the relevant agents, fans out, enforces deadlines, synthesizes an Analysis section, and posts the Incident Report. See [`agents/master/README.md`](agents/master/README.md).
 - **Specialized agents** — one per data source. Each has its own README:
   - [Slack Scanner](agents/slack_scanner/README.md) — Slack channel history correlation.
-  - [Discord Scanner](agents/discord_scanner/README.md) — Discord channel history correlation.
-  - [CloudWatch Logs](agents/cloudwatch_logs/README.md) — Logs Insights queries.
+  - [CloudWatch Logs](agents/cloudwatch_logs/README.md) — discovers real log groups, then runs bounded Logs Insights queries.
   - [EKS](agents/eks/README.md) — Kubernetes cluster state.
+  - [Incident History](agents/incident_history/README.md) — finds similar past incidents via embedding search.
 
-A Prometheus agent (`agents/prometheus/`) is checked-in but **not deployed and not in the orchestrator fan-out** — it isn't listed in `config.yaml` and has no terraform plumbing.
+The five agents (master + four specialists) each run as their own AgentCore runtime. A [Discord Scanner](agents/discord_scanner/README.md) (`agents/discord_scanner/`) and a Prometheus agent (`agents/prometheus/`) are checked-in but **not deployed and not in the orchestrator fan-out** — neither is listed in `config.yaml` and they have no terraform plumbing for this deployment.
 
 For the full docs index (deployment, testing, architecture, design specs), see [`docs/README.md`](docs/README.md).
 
-All agents run on AWS Bedrock AgentCore Runtime, communicate via the A2A protocol (JSON-RPC 2.0 over the runtime's `/invocations` endpoint), and use the Strands Agents SDK with Claude Haiku 4.5. Each agent's tool surface is described declaratively: [`config.yaml`](config.yaml) lists the agent's enabled skills and MCP servers, every skill is a `SKILL.md` bundle under `agents/<name>/skills/<skill>/`, and `shared.a2a_factory` is the single entry point that loads the config, resolves skills, opens MCP connections, and starts the A2A server.
+All agents run on AWS Bedrock AgentCore Runtime, communicate via the A2A protocol (JSON-RPC 2.0 over the runtime's `/invocations` endpoint), and use the Strands Agents SDK. The model is chosen per agent in [`config.yaml`](config.yaml): the master and the iterative drill-down agents (CloudWatch Logs, EKS) run a Sonnet-class model for routing/synthesis judgment, while the scanners stay on the default Claude Haiku 4.5 (precedence: per-call override → per-agent `model_id` → `MODEL_ID` env → `defaults.model_id`). Each agent's tool surface is described declaratively: `config.yaml` lists the agent's enabled skills and MCP servers, every skill is a `SKILL.md` bundle under `agents/<name>/skills/<skill>/`, and `shared.a2a_factory` is the single entry point that loads the config, resolves skills, opens MCP connections, and starts the A2A server.
 
 ## Project Structure
 
@@ -48,37 +54,54 @@ All agents run on AWS Bedrock AgentCore Runtime, communicate via the A2A protoco
 │   ├── master/                     # Master orchestration agent
 │   │   ├── tools.py                # investigate_alert (single tool, fire-and-forget)
 │   │   ├── orchestrator.py         # InvestigationOrchestrator: fan-out + deadlines
+│   │   ├── routing.py              # LLM alert routing (which agents to dispatch)
+│   │   ├── followup.py             # Bounded second-round follow-up planner
+│   │   ├── synthesis.py            # LLM Analysis section + incident timeline
 │   │   ├── report_formatter.py     # Incident report assembly
 │   │   ├── skills/<skill>/SKILL.md # Skill bundles (frontmatter -> tool symbol)
 │   │   ├── tests/test_tools.py     # Per-agent unit tests
 │   │   └── agent_card.json
 │   ├── slack_scanner/              # tools.py + skills/ + tests/ + agent_card.json
-│   ├── discord_scanner/            # same layout
-│   ├── cloudwatch_logs/            # same layout (also wires the aws_docs MCP)
+│   ├── cloudwatch_logs/            # same layout (discover-then-query; wires the aws_docs MCP)
 │   ├── eks/                        # same layout (network_mode: VPC)
-│   └── prometheus/                 # Not deployed; not in config.yaml
+│   ├── incident_history/           # same layout (embedding similarity search)
+│   ├── discord_scanner/            # Checked-in; not in config.yaml
+│   └── prometheus/                 # Checked-in; not in config.yaml
 ├── shared/                         # Cross-agent utilities
 │   ├── models.py                   # AlertContext, AgentResult, Finding, AgentFailure, AgentMetadata, CommandRequest
 │   ├── constants.py
 │   ├── a2a_factory.py              # Loads config + skills + MCPs; A2AServer + uvicorn + /ping
 │   ├── a2a_protocol.py             # JSON-RPC envelope build/extract helpers
+│   ├── model_call.py               # StructuredModelCall seam (routing/synthesis/followup/judge)
 │   ├── agent_telemetry.py          # Per-agent metadata footer (model, tokens, cost)
 │   ├── config.py                   # ProjectConfig (Pydantic) + loader for config.yaml
 │   ├── skill_loader.py             # SKILL.md parser + tool-symbol resolver
 │   ├── mcp_loader.py               # Context-managed MCPConnections handle
 │   ├── platforms/                  # ChatPlatform per chat platform (Slack, Discord)
 │   │   ├── __init__.py             # Protocol, WebhookEvent tagged union, deliver_with_retry, registry
-│   │   ├── slack.py                # SlackChatPlatform: signature, parse, ack, deliver
+│   │   ├── slack.py                # SlackChatPlatform: signature, parse, ack, deliver, reaction/thread triggers
 │   │   └── discord.py              # DiscordChatPlatform: signature, parse, ack, deliver
+│   ├── fanout.py                   # Parallel agent dispatch helper
+│   ├── bounded_loop.py             # Tool-cycle cap for iterative agents
+│   ├── digest_tier.py              # DigestSource seam (eks/cloudwatch summarizer integration)
+│   ├── log_summarizer.py           # Haiku map-reduce log summarizer tier
+│   ├── embeddings.py               # Titan embedding seam (incident history)
+│   ├── incident_history_store.py   # Compact IncidentOutcome store + cosine search
+│   ├── deep_links.py               # Console/dashboard deep-link builders
 │   ├── channel_scan.py             # Shared channel-scanning algorithm
 │   ├── channel_utils.py
 │   ├── report_renderer.py          # MarkupDialect-driven section renderer (Slack mrkdwn, Discord MD)
+│   ├── page_model.py               # Interactive incident page model
+│   ├── page_signer.py              # CloudFront signed-URL signer for the page
 │   ├── secrets.py                  # Secrets Manager ARN -> plaintext resolver (cached)
+│   ├── busy_state.py               # Shared busy_state seam for HealthyBusy /ping
 │   ├── time_utils.py               # Investigation window + ISO timestamp helpers
 │   ├── tool_result.py
 │   ├── experiment.py
 │   ├── experiment_store.py
 │   ├── experiment_results_store.py
+│   ├── experiment_judge.py         # Offline LLM pairwise A/B judge
+│   ├── experiment_report.py        # A/B scorecard projection
 │   └── trace_store.py              # S3 + DDB per-investigation trace archive (fail-open)
 ├── tests/                          # Cross-cutting / shared unit tests
 │   ├── integration/                # Handler, orchestrator, A2A factory, synthetic webhook
@@ -96,22 +119,29 @@ All agents run on AWS Bedrock AgentCore Runtime, communicate via the A2A protoco
 │   ├── iam_agentcore.tf            # AgentCore-specific IAM
 │   ├── agentcore.tf                # 5 aws_bedrockagentcore_agent_runtime resources
 │   ├── traces.tf                   # S3 trace bucket + DDB index + KMS CMK + IAM grants
+│   ├── pages.tf                    # Interactive incident page (CloudFront + renderer Lambda, opt-in)
 │   └── observability.tf            # CloudWatch alarms + SNS topic for AgentCore
 ├── examples/complete/             # Reference root: provider + backend + module call
 │   ├── main.tf                     # provider + module "sre_on_call"
 │   ├── outputs.tf                  # Re-exports module outputs
 │   └── moved.tf                    # State re-keying for the old flat root
+├── page_renderer/                  # Lambda: renders the static interactive incident page (opt-in)
 ├── scripts/
 │   ├── build_and_push_agents.sh    # Build 5 linux/arm64 images and push to ECR
 │   ├── hydrate_secrets.sh          # Push Slack/Discord secret values
 │   ├── enable_observability.sh     # One-time CloudWatch Transaction Search enablement
+│   ├── define_experiment.py        # Configure an A/B experiment
+│   ├── judge_experiments.py        # Offline LLM-judge over stored A/B results
 │   └── synthetic_slack_webhook.py  # Send a signed synthetic alert to the Lambda URL
 ├── docs/
 │   ├── README.md                   # Docs index
 │   ├── deployment.md               # Build, deploy, scoped testing
 │   ├── testing.md                  # Synthetic + real Slack alert procedures
+│   ├── slack-app-setup.md          # Slack app creation (manifest + manual)
+│   ├── slack-app/                  # Slack app manifest + setup screenshots
 │   ├── architecture.d2             # Source for architecture.svg
 │   ├── architecture.svg
+│   ├── assets/                     # Logo + other repo image assets
 │   ├── icons/                      # AWS + vendor icons used by the diagram
 │   └── superpowers/                # Living design specs and implementation plans
 ├── CONTEXT.md                      # Domain vocabulary
@@ -146,7 +176,7 @@ pytest tests/integration/test_orchestrator.py       # one integration test
 pytest tests/property/                              # property-based tests only
 ```
 
-Current count: **582 collected**, 582 passing. (Prometheus tests run and pass even though the agent isn't deployed.)
+Current count: **1170 collected**, all passing. (Prometheus and Discord Scanner tests run and pass even though those agents aren't deployed.)
 
 ### Test layout
 
@@ -187,12 +217,20 @@ Optional:
 
 ### Configure Slack
 
-See **[docs/testing.md](docs/testing.md)** for the full Slack App + bot setup. Quick version:
+See **[docs/slack-app-setup.md](docs/slack-app-setup.md)** for the full Slack App + bot setup (manifest paste or manual click-through, with screenshots). Quick version:
 
 1. Set the Event Subscriptions URL to the deployed Lambda function URL.
-2. Subscribe to the **`app_mention`** bot event only. The intake [classification gate](#alert-classification-gate) suppresses obvious non-alert chatter, but subscribing to broader events still wastes classifier work — keep it to `app_mention`.
-3. Bot scopes: `app_mentions:read`, `chat:write`, `channels:history`.
+2. Subscribe to the **`app_mention`** and **`reaction_added`** bot events. The intake [classification gate](#alert-classification-gate) suppresses obvious non-alert chatter, so don't subscribe to broader events.
+3. Bot scopes: `app_mentions:read`, `chat:write`, `channels:history`, `groups:history`, `reactions:read`, `channels:read`, `groups:read`, `users:read`, `commands`.
 4. Hydrate secrets with the real Bot Token (`xoxb-…`) and Signing Secret.
+
+### Triggering an investigation
+
+An investigation starts from any of:
+
+- **@mention** the bot on an alert message, or inside an alert thread — the thread's parent message becomes the alert and your reply text rides along as an operator note.
+- **React** to an alert message with the trigger emoji (`:sre-on-call:` by default; change it with the `SLACK_TRIGGER_EMOJI` Lambda env var / `slack_trigger_emoji` Terraform variable).
+- Run **`/postmortem`** in an incident thread to generate a Post-Incident Report, or **`/sre-snapshot`** anywhere for a read-only status snapshot.
 
 ## Alert classification gate
 
@@ -231,6 +269,7 @@ These are set on the Lambda function and the AgentCore runtimes by Terraform; yo
 |----------|-----------|-------------|
 | `SLACK_SIGNING_SECRET` | Lambda | Secrets Manager ARN holding the Slack signing secret |
 | `SLACK_BOT_TOKEN` | Lambda, Master, Slack Scanner | Secrets Manager ARN holding the Slack bot OAuth token |
+| `SLACK_TRIGGER_EMOJI` | Lambda | Reaction emoji that starts an investigation on the reacted message (default `:sre-on-call:`) |
 | `DISCORD_PUBLIC_KEY` | Lambda | Secrets Manager ARN holding the Discord application public key |
 | `DISCORD_BOT_TOKEN` | Lambda, Master, Discord Scanner | Secrets Manager ARN holding the Discord bot token |
 | `DEDUP_TABLE_NAME` | Lambda | DynamoDB deduplication table name |
@@ -245,6 +284,8 @@ These are set on the Lambda function and the AgentCore runtimes by Terraform; yo
 | `DISCORD_SCANNER_AGENT_RUNTIME_ARN` | Master | AgentCore runtime ARN of the Discord Scanner |
 | `CLOUDWATCH_LOGS_AGENT_RUNTIME_ARN` | Master | AgentCore runtime ARN of CloudWatch Logs |
 | `EKS_AGENT_RUNTIME_ARN` | Master | AgentCore runtime ARN of EKS |
+| `INCIDENT_HISTORY_AGENT_RUNTIME_ARN` | Master | AgentCore runtime ARN of Incident History |
+| `INCIDENT_HISTORY_ENABLED` | Master | Record incident outcomes + enable similar-incident search (requires `TRACES_TABLE_NAME`) |
 | `MODEL_ID` | All agents | Bedrock model ID or cross-region inference profile |
 | `EKS_CLUSTER_NAME` | EKS agent | Cluster the EKS agent inspects |
 | `A2A_PORT` / `A2A_HOST` | All agents | A2A server bind port (9000) / host (0.0.0.0) |
