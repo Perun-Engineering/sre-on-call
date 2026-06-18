@@ -357,6 +357,18 @@ class TestAck:
             platform.ack(cmd, "hello")
         mock_open.assert_not_called()
 
+    def test_slack_ack_is_fail_open(self) -> None:
+        """A failing response_url POST must not raise — it would 502 the command."""
+        from unittest.mock import patch as _patch
+        platform = SlackChatPlatform(signing_secret="x", bot_token="y")
+        cmd = CommandRequest(
+            platform="slack", command="/sre-snapshot", text="",
+            channel_id="C1", user_id="U1", thread_ts=None,
+            response_url="https://hooks/cb",
+        )
+        with _patch("urllib.request.urlopen", side_effect=OSError("boom")):
+            platform.ack(cmd, "hello")  # must not raise
+
 
 class TestDiscordSmoke:
     """Light smoke checks for Discord ChatPlatform — full parser/signature

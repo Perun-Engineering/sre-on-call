@@ -13,7 +13,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from lambda_adapter.master_dispatch import AgentCoreMasterDispatch
+from lambda_adapter.master_dispatch import (
+    DISPATCH_EVENT_KEY,
+    AgentCoreMasterDispatch,
+    AsyncMasterDispatch,
+    DispatchedTask,
+    run_dispatched_task,
+)
 from shared.models import AlertContext, CommandRequest
 
 
@@ -119,3 +125,141 @@ class TestStatus:
 def test_boto3_client_is_lazy() -> None:
     """Constructing the adapter must not build a boto3 client (free default)."""
     assert AgentCoreMasterDispatch()._client is None
+
+
+# ---------------------------------------------------------------------------
+# DispatchedTask serialization — the async self-invoke payload round-trips.
+# ---------------------------------------------------------------------------
+
+
+class TestDispatchedTaskRoundTrip:
+    def test_investigate_round_trips_alert_and_window_tuple(self) -> None:
+        task = DispatchedTask(
+            "investigate", alert_context=_alert(investigation_id="inv-rt"), master_arn="ARN_B"
+        )
+        restored = DispatchedTask.from_event(json.loads(json.dumps(task.to_event())))
+        assert restored.kind == "investigate"
+        assert restored.master_arn == "ARN_B"
+        assert restored.command is None
+        assert restored.alert_context is not None
+        assert restored.alert_context.investigation_id == "inv-rt"
+        # JSON has no tuples; from_event must restore the (start, end) tuple shape.
+        assert restored.alert_context.investigation_window == (
+            "2025-01-15T14:27:00+00:00",
+            "2025-01-15T14:37:00+00:00",
+        )
+
+    def test_status_round_trips_command_and_requested_at(self) -> None:
+        task = DispatchedTask(
+            "status", command=_command(channel_id="C9"), requested_at="2026-01-01T00:00:00+00:00"
+        )
+        restored = DispatchedTask.from_event(json.loads(json.dumps(task.to_event())))
+        assert restored.kind == "status"
+        assert restored.alert_context is None
+        assert restored.command is not None
+        assert restored.command.channel_id == "C9"
+        assert restored.requested_at == "2026-01-01T00:00:00+00:00"
+
+
+# ---------------------------------------------------------------------------
+# AsyncMasterDispatch — defers the blocking master invoke to a fire-and-forget
+# Lambda self-invocation so the webhook returns within Slack's 3s deadline.
+# ---------------------------------------------------------------------------
+
+
+def _enqueued_task(lambda_client: MagicMock) -> DispatchedTask:
+    kw = lambda_client.invoke.call_args.kwargs
+    assert kw["InvocationType"] == "Event"
+    payload = json.loads(kw["Payload"].decode("utf-8"))
+    return DispatchedTask.from_event(payload[DISPATCH_EVENT_KEY])
+
+
+class TestAsyncMasterDispatch:
+    @pytest.fixture
+    def lambda_client(self) -> MagicMock:
+        return MagicMock()
+
+    @pytest.fixture
+    def async_dispatch(self, lambda_client: MagicMock) -> AsyncMasterDispatch:
+        return AsyncMasterDispatch(client=lambda_client, function_name="self-fn")
+
+    def test_investigate_enqueues_event_invoke(self, lambda_client, async_dispatch) -> None:
+        async_dispatch.investigate(_alert(investigation_id="inv-a"), master_arn="ARN_A")
+        kw = lambda_client.invoke.call_args.kwargs
+        assert kw["FunctionName"] == "self-fn"
+        assert kw["InvocationType"] == "Event"
+        task = _enqueued_task(lambda_client)
+        assert task.kind == "investigate"
+        assert task.master_arn == "ARN_A"
+        assert task.alert_context is not None
+        assert task.alert_context.investigation_id == "inv-a"
+
+    def test_status_enqueues_event_invoke(self, lambda_client, async_dispatch) -> None:
+        async_dispatch.status(_command(channel_id="C3"), "2026-01-01T00:00:00+00:00")
+        task = _enqueued_task(lambda_client)
+        assert task.kind == "status"
+        assert task.requested_at == "2026-01-01T00:00:00+00:00"
+        assert task.command is not None and task.command.channel_id == "C3"
+
+    def test_postmortem_enqueues_event_invoke(self, lambda_client, async_dispatch) -> None:
+        async_dispatch.postmortem(_command(command="/postmortem", thread_ts="t-1"))
+        task = _enqueued_task(lambda_client)
+        assert task.kind == "postmortem"
+        assert task.command is not None and task.command.thread_ts == "t-1"
+
+    def test_target_resolves_from_env_when_unset(self, lambda_client, monkeypatch) -> None:
+        monkeypatch.delenv("SELF_INVOKE_TARGET", raising=False)
+        monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "fn-from-env")
+        AsyncMasterDispatch(client=lambda_client).status(_command(), "2026-01-01T00:00:00+00:00")
+        assert lambda_client.invoke.call_args.kwargs["FunctionName"] == "fn-from-env"
+
+    def test_self_invoke_target_env_takes_precedence(self, lambda_client, monkeypatch) -> None:
+        monkeypatch.setenv("SELF_INVOKE_TARGET", "fn-alias:live")
+        monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "fn-from-env")
+        AsyncMasterDispatch(client=lambda_client).status(_command(), "2026-01-01T00:00:00+00:00")
+        assert lambda_client.invoke.call_args.kwargs["FunctionName"] == "fn-alias:live"
+
+    def test_missing_target_raises(self, lambda_client, monkeypatch) -> None:
+        monkeypatch.delenv("SELF_INVOKE_TARGET", raising=False)
+        monkeypatch.delenv("AWS_LAMBDA_FUNCTION_NAME", raising=False)
+        with pytest.raises(EnvironmentError):
+            AsyncMasterDispatch(client=lambda_client).status(_command(), "2026-01-01T00:00:00+00:00")
+
+    def test_boto3_client_is_lazy(self) -> None:
+        assert AsyncMasterDispatch()._client is None
+
+
+# ---------------------------------------------------------------------------
+# run_dispatched_task — the async (Event) worker replays a serialized task
+# through the synchronous AgentCoreMasterDispatch (off the Slack deadline).
+# ---------------------------------------------------------------------------
+
+
+class TestRunDispatchedTask:
+    def test_replays_investigate(self) -> None:
+        inner = MagicMock()
+        task = DispatchedTask("investigate", alert_context=_alert(investigation_id="inv-w"), master_arn="ARN_W")
+        run_dispatched_task({DISPATCH_EVENT_KEY: task.to_event()}, dispatch=inner)
+        inner.investigate.assert_called_once()
+        ctx = inner.investigate.call_args.args[0]
+        assert ctx.investigation_id == "inv-w"
+        assert inner.investigate.call_args.kwargs["master_arn"] == "ARN_W"
+
+    def test_replays_status(self) -> None:
+        inner = MagicMock()
+        task = DispatchedTask("status", command=_command(channel_id="C5"), requested_at="2026-02-02T00:00:00+00:00")
+        run_dispatched_task({DISPATCH_EVENT_KEY: task.to_event()}, dispatch=inner)
+        inner.status.assert_called_once()
+        assert inner.status.call_args.args[0].channel_id == "C5"
+        assert inner.status.call_args.args[1] == "2026-02-02T00:00:00+00:00"
+
+    def test_replays_postmortem(self) -> None:
+        inner = MagicMock()
+        task = DispatchedTask("postmortem", command=_command(command="/postmortem", thread_ts="t-9"))
+        run_dispatched_task({DISPATCH_EVENT_KEY: task.to_event()}, dispatch=inner)
+        inner.postmortem.assert_called_once()
+        assert inner.postmortem.call_args.args[0].thread_ts == "t-9"
+
+    def test_unknown_kind_raises(self) -> None:
+        with pytest.raises(ValueError):
+            run_dispatched_task({DISPATCH_EVENT_KEY: {"kind": "bogus"}}, dispatch=MagicMock())
