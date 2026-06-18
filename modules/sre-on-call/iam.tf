@@ -128,6 +128,32 @@ resource "aws_iam_role_policy" "lambda_adapter_agentcore" {
   })
 }
 
+# Async self-invoke: the webhook returns HTTP 200 within Slack's 3s deadline by
+# firing the blocking master dispatch as a fire-and-forget Lambda invocation at
+# this same function (see AsyncMasterDispatch / SELF_INVOKE_TARGET). Scoped to
+# the function and its live alias only.
+resource "aws_iam_role_policy" "lambda_adapter_self_invoke" {
+  name = "self-invoke"
+  role = aws_iam_role.lambda_adapter.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "InvokeSelfForAsyncDispatch"
+        Effect = "Allow"
+        Action = [
+          "lambda:InvokeFunction"
+        ]
+        Resource = [
+          aws_lambda_function.lambda_adapter.arn,
+          aws_lambda_alias.lambda_adapter_live.arn,
+        ]
+      }
+    ]
+  })
+}
+
 # Tier 2 intake classifier (one Bedrock Converse turn). Only attached when the
 # LLM classifier is enabled, so the Lambda role stays least-privilege otherwise.
 resource "aws_iam_role_policy" "lambda_adapter_bedrock_classifier" {

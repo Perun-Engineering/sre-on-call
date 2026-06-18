@@ -12,9 +12,16 @@ import boto3
 import pytest
 from moto import mock_aws
 
+from unittest.mock import patch
+
 from lambda_adapter.handler import lambda_handler
 from lambda_adapter.intake import process_webhook
-from lambda_adapter.master_dispatch import RecordingMasterDispatch
+from lambda_adapter.master_dispatch import (
+    DISPATCH_EVENT_KEY,
+    DispatchedTask,
+    RecordingMasterDispatch,
+)
+from shared.models import CommandRequest
 from shared.platforms import detect_platform
 
 
@@ -226,6 +233,33 @@ def _create_traces_resources():
         BillingMode="PAY_PER_REQUEST",
     )
     return s3
+
+
+class TestSelfDispatchRouting:
+    """An async self-invoke event routes to the worker, never the webhook path."""
+
+    def test_dispatch_event_runs_worker_not_webhook(self):
+        command = CommandRequest(
+            platform="slack", command="/sre-snapshot", text="", channel_id="C1",
+            user_id="U1", thread_ts=None, response_url="",
+        )
+        task = DispatchedTask("status", command=command, requested_at="2026-01-01T00:00:00+00:00")
+        event = {DISPATCH_EVENT_KEY: task.to_event()}
+
+        with patch("lambda_adapter.handler.process_webhook") as webhook, \
+                patch("lambda_adapter.handler.run_dispatched_task") as worker:
+            result = lambda_handler(event, None)
+
+        worker.assert_called_once_with(event)
+        webhook.assert_not_called()
+        assert result == {"ok": True}
+
+    def test_webhook_event_does_not_run_worker(self):
+        event = _build_event({"type": "url_verification", "challenge": "x"})
+        with patch("lambda_adapter.handler.run_dispatched_task") as worker:
+            result = lambda_handler(event, None)
+        worker.assert_not_called()
+        assert result["statusCode"] == 200
 
 
 class TestTraceArchive:

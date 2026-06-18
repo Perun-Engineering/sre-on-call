@@ -28,6 +28,15 @@ variable "classifier_model_id" {
   default     = ""
 }
 
+# ── Naming: shared between the function, its live alias, and the async
+# self-invoke target env var. Kept as a local so the SELF_INVOKE_TARGET env
+# cannot create a resource self-reference / function↔alias dependency cycle.
+
+locals {
+  lambda_adapter_name = "${var.project_name}-${var.environment}-lambda-adapter"
+  lambda_live_alias   = "live"
+}
+
 # ── Build: Function package (lambda_adapter/ + shared/) ─────────────────────
 # The runtime needs both packages; archive_file alone can only zip a single
 # directory, so a small build step assembles the staging directory first.
@@ -122,7 +131,7 @@ resource "aws_cloudwatch_log_group" "lambda_adapter" {
 # ── Lambda Function ─────────────────────────────────────────────────────────
 
 resource "aws_lambda_function" "lambda_adapter" {
-  function_name = "${var.project_name}-${var.environment}-lambda-adapter"
+  function_name = local.lambda_adapter_name
   description   = "Slack/Discord webhook adapter — verifies signatures, deduplicates, and invokes Master Agent"
 
   filename         = data.archive_file.lambda_adapter.output_path
@@ -149,6 +158,9 @@ resource "aws_lambda_function" "lambda_adapter" {
         TRACES_TABLE_NAME            = aws_dynamodb_table.traces.name
         ALERT_CLASSIFICATION_ENABLED = var.enable_alert_classification ? "true" : "false"
         CLASSIFIER_LLM_ENABLED       = var.enable_classifier_llm ? "true" : "false"
+        # Async self-invoke target (live alias) — the webhook re-invokes this to
+        # run the blocking master dispatch off Slack's 3s slash-command deadline.
+        SELF_INVOKE_TARGET = "${local.lambda_adapter_name}:${local.lambda_live_alias}"
       },
       local.slack_enabled ? {
         SLACK_SIGNING_SECRET = aws_secretsmanager_secret.slack_signing_secret[0].arn
@@ -174,7 +186,7 @@ resource "aws_lambda_function" "lambda_adapter" {
 # ── Lambda Alias (for provisioned concurrency) ──────────────────────────────
 
 resource "aws_lambda_alias" "lambda_adapter_live" {
-  name             = "live"
+  name             = local.lambda_live_alias
   description      = "Live alias for provisioned concurrency"
   function_name    = aws_lambda_function.lambda_adapter.function_name
   function_version = aws_lambda_function.lambda_adapter.version
@@ -211,6 +223,18 @@ resource "null_resource" "clear_alias_weights" {
   }
 
   depends_on = [aws_lambda_alias.lambda_adapter_live]
+}
+
+# ── Async invoke policy (self-dispatch) ─────────────────────────────────────
+# The webhook fires the master dispatch as an async (Event) self-invocation.
+# Lambda retries failed async invokes up to twice by default, which would
+# double-fire a snapshot/investigation on a transient master error. The old
+# synchronous path never retried — pin retries to 0 to keep that semantics.
+resource "aws_lambda_function_event_invoke_config" "lambda_adapter_live" {
+  function_name                = aws_lambda_function.lambda_adapter.function_name
+  qualifier                    = aws_lambda_alias.lambda_adapter_live.name
+  maximum_retry_attempts       = 0
+  maximum_event_age_in_seconds = 60
 }
 
 # ── Provisioned Concurrency ─────────────────────────────────────────────────

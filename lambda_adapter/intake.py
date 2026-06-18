@@ -19,7 +19,7 @@ from dataclasses import asdict, replace
 
 from lambda_adapter.classifier import classify_alert, llm_classifier_from_env
 from lambda_adapter.dedup import DeduplicationStore
-from lambda_adapter.master_dispatch import AgentCoreMasterDispatch, MasterDispatch
+from lambda_adapter.master_dispatch import AsyncMasterDispatch, MasterDispatch
 from shared.env import truthy
 from shared.experiment_store import ExperimentStore
 from shared.models import AlertContext, CommandRequest
@@ -94,10 +94,12 @@ def process_webhook(
         5. Return HTTP 200.
 
     *dispatch* is the :class:`MasterDispatch` seam; production defaults to
-    :class:`AgentCoreMasterDispatch` (lazy boto3), tests inject a recording
-    adapter and assert on the dispatched tasks.
+    :class:`AsyncMasterDispatch` (lazy boto3) — it fires the master invoke via
+    a fire-and-forget Lambda self-invocation so this webhook returns within
+    Slack's 3-second deadline. Tests inject a recording adapter and assert on
+    the dispatched tasks.
     """
-    dispatch = dispatch or AgentCoreMasterDispatch()
+    dispatch = dispatch or AsyncMasterDispatch()
     raw_body = _decode_body(event)
     headers = event.get("headers", {})
 
