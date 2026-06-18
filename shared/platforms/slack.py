@@ -181,6 +181,14 @@ class SlackChatPlatform:
     # --- ack --------------------------------------------------------------
 
     def ack(self, command: CommandRequest, text: str) -> None:
+        """Post the slash-command "working on it" message to ``response_url``, fail-open.
+
+        The command's HTTP 200 is the real acknowledgement; this ephemeral
+        message is best-effort feedback. A failing or slow ``response_url`` must
+        never raise (it would 502 the command) or block past the intake
+        deadline, so the POST is bounded by a short timeout and all errors are
+        swallowed — same fail-open contract as :meth:`notice`.
+        """
         if not command.response_url:
             return
         data = json.dumps({"response_type": "ephemeral", "text": text}).encode()
@@ -190,7 +198,10 @@ class SlackChatPlatform:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        urllib.request.urlopen(req)
+        try:
+            urllib.request.urlopen(req, timeout=2)
+        except Exception:
+            logger.warning("Slack ack post to response_url failed; continuing.", exc_info=True)
 
     # --- notice -----------------------------------------------------------
 
