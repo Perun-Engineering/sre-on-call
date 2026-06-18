@@ -13,11 +13,13 @@ import hashlib
 import hmac
 import json
 import logging
+import os
+import re
 import time
 import urllib.request
 import uuid
 from datetime import datetime, timedelta, timezone
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlencode
 
 from shared.constants import INVESTIGATION_WINDOW_MINUTES
 from shared.models import AlertContext, CommandRequest
@@ -27,6 +29,7 @@ from shared.platforms import (
     CommandWebhook,
     DeliverPayload,
     DeliveryTarget,
+    IgnoredWebhook,
     InvalidWebhook,
     WebhookEvent,
 )
@@ -34,6 +37,15 @@ from shared.report_renderer import SlackReportRenderer
 from shared.secrets import resolve_secret
 
 logger = logging.getLogger(__name__)
+
+# Default emoji whose reaction triggers an investigation. Overridable via the
+# ``SLACK_TRIGGER_EMOJI`` env var (or the constructor). Stored without the
+# surrounding colons, matching the bare name Slack puts in ``reaction_added``.
+_DEFAULT_TRIGGER_EMOJI = "sre-on-call"
+
+# Matches a Slack user-mention token, e.g. ``<@U0B9QDFB1D2>`` — stripped from an
+# operator's in-thread reply before it is carried as a steering note.
+_MENTION_TOKEN = re.compile(r"<@[A-Z0-9]+>")
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +97,37 @@ def verify_slack_signature(
 # ---------------------------------------------------------------------------
 
 
+def _build_alert_context(
+    *,
+    channel_id: str,
+    message_id: str,
+    alert_text: str,
+    window_ts: str,
+) -> AlertContext:
+    """Assemble an :class:`AlertContext`, centring the ±window on *window_ts*.
+
+    ``message_id`` is both the dedup key and the thread anchor the report
+    replies under; ``window_ts`` is the Slack ``ts`` whose epoch the
+    investigation window is centred on (the alert's own time).
+    """
+    alert_dt = datetime.fromtimestamp(float(window_ts), tz=timezone.utc)
+    half_window = timedelta(minutes=INVESTIGATION_WINDOW_MINUTES / 2)
+
+    return AlertContext(
+        investigation_id=str(uuid.uuid4()),
+        platform="slack",
+        channel_id=channel_id,
+        message_id=message_id,
+        alert_text=alert_text,
+        alert_timestamp=alert_dt.isoformat(),
+        investigation_window=(
+            (alert_dt - half_window).isoformat(),
+            (alert_dt + half_window).isoformat(),
+        ),
+        platform_metadata={"thread_ts": message_id},
+    )
+
+
 def parse_alert_context(event_payload: dict) -> AlertContext:
     """Extract :class:`AlertContext` from a Slack Events API event_callback payload.
 
@@ -92,29 +135,95 @@ def parse_alert_context(event_payload: dict) -> AlertContext:
     """
     event = event_payload["event"]
 
-    channel_id = event["channel"]
     message_ts = event["ts"]
-    alert_text = event["text"]
-
-    event_ts = event.get("event_ts", event["ts"])
-    epoch_seconds = float(event_ts)
-    alert_dt = datetime.fromtimestamp(epoch_seconds, tz=timezone.utc)
-    alert_timestamp = alert_dt.isoformat()
-
-    half_window = timedelta(minutes=INVESTIGATION_WINDOW_MINUTES / 2)
-    window_start = (alert_dt - half_window).isoformat()
-    window_end = (alert_dt + half_window).isoformat()
-
-    return AlertContext(
-        investigation_id=str(uuid.uuid4()),
-        platform="slack",
-        channel_id=channel_id,
+    return _build_alert_context(
+        channel_id=event["channel"],
         message_id=message_ts,
-        alert_text=alert_text,
-        alert_timestamp=alert_timestamp,
-        investigation_window=(window_start, window_end),
-        platform_metadata={"thread_ts": message_ts},
+        alert_text=event["text"],
+        window_ts=event.get("event_ts", message_ts),
     )
+
+
+def _strip_bot_mention(text: str) -> str:
+    """Remove ``<@U…>`` mention tokens and collapse the surrounding whitespace.
+
+    Used to turn an operator's in-thread ``@sre-on-call look at this`` reply
+    into the bare steering note ``look at this``.
+    """
+    return " ".join(_MENTION_TOKEN.sub(" ", text).split())
+
+
+# ---------------------------------------------------------------------------
+# Message reads (reaction / thread-mention triggers)
+# ---------------------------------------------------------------------------
+
+
+class SlackMessageReader:
+    """Fail-open Slack Web API reads for the message behind a trigger event.
+
+    A ``reaction_added`` payload carries only the reacted message's
+    ``channel``/``ts``, and an in-thread ``app_mention`` carries the operator's
+    reply, not the alert. Both triggers must fetch the underlying message text.
+
+    Synchronous (``urllib``) so it runs inside the Lambda intake handler under
+    Slack's 3-second deadline, bounded by a short timeout. Every failure path —
+    HTTP error, ``ok=false``, or an empty result — returns ``None`` so the
+    caller can drop the event rather than raise.
+    """
+
+    _API_BASE = "https://slack.com/api"
+
+    def __init__(self, bot_token: str, *, timeout: float = 1.5) -> None:
+        self._bot_token = bot_token
+        self._timeout = timeout
+
+    def read_reacted_message(self, channel: str, ts: str) -> str | None:
+        """Return the text of the single message at *ts* in *channel*."""
+        messages = self._get(
+            "conversations.history",
+            {
+                "channel": channel,
+                "latest": ts,
+                "oldest": ts,
+                "inclusive": "true",
+                "limit": "1",
+            },
+        )
+        return self._first_text(messages)
+
+    def read_thread_parent(self, channel: str, thread_ts: str) -> str | None:
+        """Return the text of the parent message of the thread *thread_ts*."""
+        messages = self._get(
+            "conversations.replies",
+            {"channel": channel, "ts": thread_ts, "limit": "1"},
+        )
+        return self._first_text(messages)
+
+    @staticmethod
+    def _first_text(messages: list | None) -> str | None:
+        if not messages:
+            return None
+        text = messages[0].get("text")
+        return text or None
+
+    def _get(self, method: str, params: dict) -> list | None:
+        """GET a Slack Web API method, returning ``messages`` or ``None``."""
+        url = f"{self._API_BASE}/{method}?{urlencode(params)}"
+        req = urllib.request.Request(
+            url,
+            headers={"Authorization": f"Bearer {self._bot_token}"},
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+                body = json.loads(resp.read())
+        except Exception:
+            logger.warning("Slack %s read failed; treating as unreadable.", method, exc_info=True)
+            return None
+        if not body.get("ok"):
+            logger.warning("Slack %s returned ok=false: %s", method, body.get("error"))
+            return None
+        return body.get("messages", [])
 
 
 # ---------------------------------------------------------------------------
@@ -131,10 +240,18 @@ class SlackChatPlatform:
         self,
         signing_secret: str | None = None,
         bot_token: str | None = None,
+        trigger_emoji: str | None = None,
+        bot_user_id: str | None = None,
     ) -> None:
         self._signing_secret = signing_secret or resolve_secret("SLACK_SIGNING_SECRET")
         self._bot_token = bot_token or resolve_secret("SLACK_BOT_TOKEN")
         self._renderer = SlackReportRenderer()
+        emoji = trigger_emoji or os.environ.get("SLACK_TRIGGER_EMOJI") or _DEFAULT_TRIGGER_EMOJI
+        # Slack reports reactions by their bare name; tolerate a :wrapped: value.
+        self._trigger_emoji = emoji.strip().strip(":")
+        # When set, the bot's own reactions are ignored (loop guard).
+        self._bot_user_id = bot_user_id or os.environ.get("SLACK_BOT_USER_ID") or None
+        self._reader = SlackMessageReader(self._bot_token)
 
     # --- ingest -----------------------------------------------------------
 
@@ -158,7 +275,80 @@ class SlackChatPlatform:
         if payload.get("type") == "url_verification":
             return ChallengeWebhook(response={"challenge": payload.get("challenge", "")})
 
+        event = payload.get("event", {})
+        event_type = event.get("type")
+
+        if event_type == "reaction_added":
+            return self._ingest_reaction(event)
+
+        # A mention that is a reply *inside* a thread (thread_ts present and not
+        # the message's own ts) targets the parent — the alert — not the reply.
+        if event_type == "app_mention":
+            thread_ts = event.get("thread_ts")
+            if thread_ts and thread_ts != event.get("ts"):
+                return self._ingest_thread_mention(event)
+
         return AlertWebhook(context=parse_alert_context(payload))
+
+    # --- new-trigger routing ----------------------------------------------
+
+    def _ingest_reaction(self, event: dict) -> WebhookEvent:
+        """Route a ``reaction_added`` event.
+
+        Investigates only when the configured trigger emoji is added to a
+        message by someone other than the bot; every other reaction is dropped.
+        """
+        if event.get("reaction") != self._trigger_emoji:
+            return IgnoredWebhook()
+        if self._bot_user_id and event.get("user") == self._bot_user_id:
+            return IgnoredWebhook()
+
+        item = event.get("item", {})
+        if item.get("type") != "message":
+            return IgnoredWebhook()
+        channel, ts = item.get("channel"), item.get("ts")
+        if not channel or not ts:
+            return IgnoredWebhook()
+
+        text = self._reader.read_reacted_message(channel, ts)
+        if not text:
+            return IgnoredWebhook()
+
+        return AlertWebhook(
+            context=_build_alert_context(
+                channel_id=channel, message_id=ts, alert_text=text, window_ts=ts,
+            )
+        )
+
+    def _ingest_thread_mention(self, event: dict) -> WebhookEvent:
+        """Route an ``app_mention`` posted as a reply within a thread.
+
+        The thread parent is the alert; the operator's reply (minus the
+        ``@mention``) rides along as a steering note appended to the alert text.
+        """
+        channel, thread_ts = event.get("channel"), event.get("thread_ts")
+        if not channel or not thread_ts:
+            return IgnoredWebhook()
+
+        parent_text = self._reader.read_thread_parent(channel, thread_ts)
+        if not parent_text:
+            return IgnoredWebhook()
+
+        note = _strip_bot_mention(event.get("text", ""))
+        alert_text = (
+            f"{parent_text}\n\n---\nOperator note (via @mention): {note}"
+            if note
+            else parent_text
+        )
+
+        return AlertWebhook(
+            context=_build_alert_context(
+                channel_id=channel,
+                message_id=thread_ts,
+                alert_text=alert_text,
+                window_ts=thread_ts,
+            )
+        )
 
     @staticmethod
     def _is_command(headers: dict, raw_body: str) -> bool:

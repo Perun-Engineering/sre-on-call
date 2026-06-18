@@ -82,6 +82,12 @@ variable "enable_bedrock_guardrail" {
   default     = false
 }
 
+variable "slack_trigger_emoji" {
+  description = "Emoji name (without colons) whose reaction on a Slack message triggers an investigation."
+  type        = string
+  default     = "sre-on-call"
+}
+
 variable "alarm_email_subscriptions" {
   description = "Email addresses subscribed to the AgentCore CloudWatch alarm SNS topic"
   type        = list(string)

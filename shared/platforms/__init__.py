@@ -70,7 +70,23 @@ class CommandWebhook:
     command: CommandRequest
 
 
-WebhookEvent = Union[InvalidWebhook, ChallengeWebhook, AlertWebhook, CommandWebhook]
+@dataclass
+class IgnoredWebhook:
+    """A well-formed event the platform deliberately drops without acting.
+
+    Used for events that are valid but not investigation triggers — e.g. a
+    reaction with an emoji other than the configured trigger, the bot's own
+    reaction, or a trigger event whose underlying message could not be read
+    (fail-open). The caller returns ``status_code`` (HTTP 200) so the platform
+    does not retry; no investigation is dispatched.
+    """
+
+    status_code: int = 200
+
+
+WebhookEvent = Union[
+    InvalidWebhook, ChallengeWebhook, AlertWebhook, CommandWebhook, IgnoredWebhook
+]
 
 
 # ---------------------------------------------------------------------------

@@ -55,6 +55,7 @@ module "sre_on_call" {
   synthesis_model_id        = var.synthesis_model_id
   followup_model_id         = var.followup_model_id
   enable_bedrock_guardrail  = var.enable_bedrock_guardrail
+  slack_trigger_emoji       = var.slack_trigger_emoji
   alarm_email_subscriptions = var.alarm_email_subscriptions
 
   # A/B control-arm seams (#29) — empty for normal deploys.

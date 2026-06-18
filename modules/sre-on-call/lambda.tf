@@ -28,6 +28,12 @@ variable "classifier_model_id" {
   default     = ""
 }
 
+variable "slack_trigger_emoji" {
+  description = "Emoji name (without colons) whose reaction on a Slack message triggers an investigation. Reacting with any other emoji is ignored."
+  type        = string
+  default     = "sre-on-call"
+}
+
 # ── Naming: shared between the function, its live alias, and the async
 # self-invoke target env var. Kept as a local so the SELF_INVOKE_TARGET env
 # cannot create a resource self-reference / function↔alias dependency cycle.
@@ -165,6 +171,7 @@ resource "aws_lambda_function" "lambda_adapter" {
       local.slack_enabled ? {
         SLACK_SIGNING_SECRET = aws_secretsmanager_secret.slack_signing_secret[0].arn
         SLACK_BOT_TOKEN      = aws_secretsmanager_secret.slack_bot_token[0].arn
+        SLACK_TRIGGER_EMOJI  = var.slack_trigger_emoji
       } : {},
       local.discord_enabled ? {
         DISCORD_PUBLIC_KEY = aws_secretsmanager_secret.discord_public_key[0].arn
