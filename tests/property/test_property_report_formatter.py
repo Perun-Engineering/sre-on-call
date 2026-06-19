@@ -5,6 +5,7 @@ from __future__ import annotations
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from agents.master.incident_facts import clean_finding_content
 from agents.master.report_formatter import ReportFormatter
 from shared.agents import get_registry
 from shared.models import AgentFailure, AgentResult, AlertContext, Finding
@@ -332,9 +333,14 @@ def test_agent_findings_appear_in_evidence_section(
         # Verify each finding's content appears in this agent's subsection.
         # The renderer normalizes CommonMark to Slack mrkdwn (e.g. __x__ → *x*),
         # so we search for the *rendered* form of each finding's content rather
-        # than the raw value.
+        # than the raw value. Findings whose content is empty/whitespace-only are
+        # intentionally dropped before rendering (clean_finding_content), so the
+        # property only holds for findings that survive that filter.
         for finding in result.findings:
-            rendered = renderer.normalize(finding.content)
+            cleaned = clean_finding_content(finding.content)
+            if cleaned is None:
+                continue
+            rendered = renderer.normalize(cleaned)
             assert rendered in agent_subsection, (
                 f"Finding content '{rendered}' (normalized from "
                 f"{finding.content!r}) from agent '{agent_key}' "
@@ -391,9 +397,14 @@ def test_enrichment_update_identifies_source_agent_and_contains_findings(
         f"enrichment update header.\nUpdate:\n{update}"
     )
 
-    # Each finding's content must appear in the body
+    # Each finding's content must appear in the body. Empty/whitespace-only
+    # findings are intentionally dropped before rendering (clean_finding_content),
+    # so the property only holds for findings that survive that filter.
     for finding in agent_result.findings:
-        rendered_content = renderer.normalize(finding.content)
+        cleaned = clean_finding_content(finding.content)
+        if cleaned is None:
+            continue
+        rendered_content = renderer.normalize(cleaned)
         assert rendered_content in update, (
             f"Finding content '{rendered_content}' not found in enrichment update body "
             f"for agent '{agent_name}'.\nUpdate:\n{update}"
