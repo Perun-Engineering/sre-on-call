@@ -16,6 +16,7 @@ from __future__ import annotations
 from agents.master.incident_facts import (
     EvidenceFact,
     IncidentFacts,
+    clean_finding_content,
     enrichment_error,
     format_metadata_line,
     render_pir_timeline_markdown,
@@ -135,11 +136,12 @@ class ReportFormatter:
             status = "error"
         else:
             assert isinstance(new_findings, AgentResult)
-            findings_lines = (
-                [f.content for f in new_findings.findings]
-                if new_findings.findings
-                else [new_findings.summary]
-            )
+            cleaned = [
+                content
+                for f in new_findings.findings
+                if (content := clean_finding_content(f.content)) is not None
+            ]
+            findings_lines = cleaned or [new_findings.summary]
             updated_assessment = (
                 f"New data from {display_name} is now available. "
                 f"{new_findings.summary}"

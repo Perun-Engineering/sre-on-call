@@ -1,7 +1,12 @@
 """IncidentFacts — the canonical derived view of one investigation (#66)."""
 from __future__ import annotations
 
-from agents.master.incident_facts import EvidenceFact, IncidentFacts, render_pir_timeline_markdown
+from agents.master.incident_facts import (
+    EvidenceFact,
+    IncidentFacts,
+    clean_finding_content,
+    render_pir_timeline_markdown,
+)
 from agents.master.synthesis import IncidentTimeline
 from shared.agents import get_registry
 from shared.models import AgentFailure, AgentResult, AlertContext, Finding
@@ -66,6 +71,61 @@ def _ctx(
         alert_timestamp=alert_timestamp,
         investigation_window=investigation_window,
     )
+
+
+def test_clean_finding_content_drops_empty_and_whitespace():
+    assert clean_finding_content("") is None
+    assert clean_finding_content(None) is None
+    assert clean_finding_content("   \n\t ") is None
+    assert clean_finding_content("  real text  ") == "real text"
+
+
+def test_clean_finding_content_truncates_overlong():
+    blob = "x" * 5000
+    out = clean_finding_content(blob)
+    assert out is not None
+    assert out.startswith("x" * 1000)
+    assert "chars truncated" in out
+    assert len(out) < len(blob)
+
+
+def test_derive_drops_empty_findings_and_truncates_overlong():
+    reg = get_registry()
+    ok_id = next(a.id for a in reg.all(kind="specialized"))
+    huge = "LOGLINE " * 500  # well over the per-finding cap
+    results: dict[str, AgentResult | AgentFailure] = {
+        ok_id: AgentResult(
+            agent_name=ok_id, status="success",
+            findings=[
+                Finding(source="s", timestamp="2025-01-15T14:31:00Z", content="", severity="info"),
+                Finding(source="s", timestamp="2025-01-15T14:31:01Z", content="   ", severity="info"),
+                Finding(source="s", timestamp="2025-01-15T14:31:02Z", content="kept", severity="info"),
+                Finding(source="s", timestamp="2025-01-15T14:31:03Z", content=huge, severity="warning"),
+            ],
+            summary="s",
+        ),
+    }
+    facts = IncidentFacts.derive(reg, _ctx(), results, pending=set(), disabled=set(), skipped={})
+    lines = {e.agent_id: e for e in facts.evidence}[ok_id].lines
+    texts = [ln.text for ln in lines]
+    assert texts[0] == "kept"                       # both empty findings dropped
+    assert len(texts) == 2                          # only "kept" + the truncated blob
+    assert "chars truncated" in texts[1]            # huge finding elided, not flooded
+
+
+def test_derive_all_empty_findings_falls_back_to_no_notable():
+    reg = get_registry()
+    ok_id = next(a.id for a in reg.all(kind="specialized"))
+    results: dict[str, AgentResult | AgentFailure] = {
+        ok_id: AgentResult(
+            agent_name=ok_id, status="success",
+            findings=[Finding(source="s", timestamp="2025-01-15T14:31:00Z", content="", severity="info")],
+            summary="s",
+        ),
+    }
+    facts = IncidentFacts.derive(reg, _ctx(), results, pending=set(), disabled=set(), skipped={})
+    line = {e.agent_id: e for e in facts.evidence}[ok_id].lines[0].text
+    assert "No notable findings" in line
 
 
 def test_derive_emits_all_five_evidence_states_in_registry_order():
