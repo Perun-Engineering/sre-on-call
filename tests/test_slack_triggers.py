@@ -97,6 +97,50 @@ class TestSlackMessageReader:
         with patch("urllib.request.urlopen", return_value=_FakeResp({"ok": True, "messages": []})):
             assert reader.read_reacted_message("C1", "123.456") is None
 
+    def test_read_reacted_message_reads_attachment_alert(self) -> None:
+        """Alertmanager/Grafana alerts have empty ``text`` — the body is in
+        ``attachments``. The reader must surface the attachment title + text."""
+        reader = SlackMessageReader(bot_token="tok-1")
+        msg = {
+            "text": "",
+            "subtype": "bot_message",
+            "attachments": [
+                {
+                    "color": "a30200",
+                    "title": "[FIRING:1] TraefikEntrypointLatencyHigh",
+                    "text": "Cluster: eks-uat p95 latency >2s",
+                    "fallback": "[FIRING:1] TraefikEntrypointLatencyHigh | http://am",
+                }
+            ],
+        }
+        with patch("urllib.request.urlopen", return_value=_FakeResp({"ok": True, "messages": [msg]})):
+            text = reader.read_reacted_message("C1", "123.456")
+        assert text == "[FIRING:1] TraefikEntrypointLatencyHigh\nCluster: eks-uat p95 latency >2s"
+
+    def test_read_reacted_message_attachment_fallback_only(self) -> None:
+        reader = SlackMessageReader(bot_token="tok-1")
+        msg = {"text": "", "attachments": [{"fallback": "DiskFull on host-42"}]}
+        with patch("urllib.request.urlopen", return_value=_FakeResp({"ok": True, "messages": [msg]})):
+            assert reader.read_reacted_message("C1", "123.456") == "DiskFull on host-42"
+
+    def test_read_reacted_message_reads_block_kit(self) -> None:
+        reader = SlackMessageReader(bot_token="tok-1")
+        msg = {
+            "text": "",
+            "blocks": [
+                {"type": "header", "text": {"type": "plain_text", "text": "PagerDuty: DB down"}},
+                {"type": "section", "fields": [{"type": "mrkdwn", "text": "*sev:* P1"}]},
+            ],
+        }
+        with patch("urllib.request.urlopen", return_value=_FakeResp({"ok": True, "messages": [msg]})):
+            assert reader.read_reacted_message("C1", "123.456") == "PagerDuty: DB down\n*sev:* P1"
+
+    def test_read_reacted_message_no_readable_content_returns_none(self) -> None:
+        reader = SlackMessageReader(bot_token="tok-1")
+        msg = {"text": "", "attachments": [{"color": "a30200"}]}
+        with patch("urllib.request.urlopen", return_value=_FakeResp({"ok": True, "messages": [msg]})):
+            assert reader.read_reacted_message("C1", "123.456") is None
+
     def test_read_reacted_message_not_ok_returns_none(self) -> None:
         reader = SlackMessageReader(bot_token="tok-1")
         resp = _FakeResp({"ok": False, "error": "channel_not_found"})

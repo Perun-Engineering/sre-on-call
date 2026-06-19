@@ -158,6 +158,77 @@ def _strip_bot_mention(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _blocks_text(blocks: object) -> str:
+    """Concatenate human-readable text out of Slack block-kit blocks.
+
+    Pulls a ``section``/``header`` block's ``text.text``, a section's
+    ``fields[].text``, and a ``context`` block's ``elements[].text``. Deeper
+    ``rich_text`` nesting is skipped — those messages already carry a populated
+    top-level ``text``.
+    """
+    if not isinstance(blocks, list):
+        return ""
+    out: list[str] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        text_obj = block.get("text")
+        if isinstance(text_obj, dict):
+            piece = (text_obj.get("text") or "").strip()
+            if piece:
+                out.append(piece)
+        for collection in (block.get("fields"), block.get("elements")):
+            if not isinstance(collection, list):
+                continue
+            for item in collection:
+                if isinstance(item, dict):
+                    piece = (item.get("text") or "").strip()
+                    if isinstance(piece, str) and piece:
+                        out.append(piece)
+    return "\n".join(out)
+
+
+def _extract_message_text(message: dict) -> str | None:
+    """Best-effort plain text of a Slack message.
+
+    Alert integrations (Alertmanager, Grafana) post the alert body inside
+    ``attachments`` or block-kit ``blocks`` with an *empty* top-level ``text`` —
+    so reading ``text`` alone drops the very messages this bot exists to
+    investigate. Fall back through attachments (title/text, else fallback, else
+    nested blocks) and then top-level blocks, concatenating the readable
+    fragments. Returns ``None`` when nothing readable is found.
+    """
+    parts: list[str] = []
+
+    top = (message.get("text") or "").strip()
+    if top:
+        parts.append(top)
+
+    attachments = message.get("attachments")
+    if isinstance(attachments, list):
+        for att in attachments:
+            if not isinstance(att, dict):
+                continue
+            att_text = "\n".join(
+                piece
+                for piece in ((att.get("title") or "").strip(), (att.get("text") or "").strip())
+                if piece
+            )
+            if not att_text:
+                att_text = (att.get("fallback") or "").strip()
+            if not att_text:
+                att_text = _blocks_text(att.get("blocks"))
+            if att_text:
+                parts.append(att_text)
+
+    blocks_text = _blocks_text(message.get("blocks"))
+    if blocks_text:
+        parts.append(blocks_text)
+
+    combined = "\n".join(parts).strip()
+    return combined or None
+
+
 class SlackMessageReader:
     """Fail-open Slack Web API reads for the message behind a trigger event.
 
@@ -203,8 +274,7 @@ class SlackMessageReader:
     def _first_text(messages: list | None) -> str | None:
         if not messages:
             return None
-        text = messages[0].get("text")
-        return text or None
+        return _extract_message_text(messages[0])
 
     def _get(self, method: str, params: dict) -> list | None:
         """GET a Slack Web API method, returning ``messages`` or ``None``."""
@@ -277,6 +347,13 @@ class SlackChatPlatform:
 
         event = payload.get("event", {})
         event_type = event.get("type")
+        logger.info(
+            "Slack event_callback: type=%s subtype=%s thread_ts=%s ts=%s",
+            event_type,
+            event.get("subtype"),
+            event.get("thread_ts"),
+            event.get("ts"),
+        )
 
         if event_type == "reaction_added":
             return self._ingest_reaction(event)
@@ -298,21 +375,26 @@ class SlackChatPlatform:
         Investigates only when the configured trigger emoji is added to a
         message by someone other than the bot; every other reaction is dropped.
         """
-        if event.get("reaction") != self._trigger_emoji:
-            return IgnoredWebhook()
+        reaction = event.get("reaction")
+        if reaction != self._trigger_emoji:
+            return IgnoredWebhook(
+                reason=f"reaction ':{reaction}:' != trigger ':{self._trigger_emoji}:'"
+            )
         if self._bot_user_id and event.get("user") == self._bot_user_id:
-            return IgnoredWebhook()
+            return IgnoredWebhook(reason="bot's own reaction")
 
         item = event.get("item", {})
         if item.get("type") != "message":
-            return IgnoredWebhook()
+            return IgnoredWebhook(reason=f"reacted item type={item.get('type')!r}, not 'message'")
         channel, ts = item.get("channel"), item.get("ts")
         if not channel or not ts:
-            return IgnoredWebhook()
+            return IgnoredWebhook(reason="reaction event missing item channel/ts")
 
         text = self._reader.read_reacted_message(channel, ts)
         if not text:
-            return IgnoredWebhook()
+            return IgnoredWebhook(
+                reason=f"reacted message unreadable/empty (channel={channel} ts={ts})"
+            )
 
         return AlertWebhook(
             context=_build_alert_context(
@@ -328,11 +410,13 @@ class SlackChatPlatform:
         """
         channel, thread_ts = event.get("channel"), event.get("thread_ts")
         if not channel or not thread_ts:
-            return IgnoredWebhook()
+            return IgnoredWebhook(reason="thread mention missing channel/thread_ts")
 
         parent_text = self._reader.read_thread_parent(channel, thread_ts)
         if not parent_text:
-            return IgnoredWebhook()
+            return IgnoredWebhook(
+                reason=f"thread parent unreadable/empty (channel={channel} thread_ts={thread_ts})"
+            )
 
         note = _strip_bot_mention(event.get("text", ""))
         alert_text = (
