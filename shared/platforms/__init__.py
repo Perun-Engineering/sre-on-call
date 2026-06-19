@@ -79,9 +79,13 @@ class IgnoredWebhook:
     reaction, or a trigger event whose underlying message could not be read
     (fail-open). The caller returns ``status_code`` (HTTP 200) so the platform
     does not retry; no investigation is dispatched.
+
+    ``reason`` is a short, log-only string naming why the event was dropped, so
+    a silently-discarded trigger leaves a trace operators can grep.
     """
 
     status_code: int = 200
+    reason: str = ""
 
 
 WebhookEvent = Union[

@@ -122,6 +122,10 @@ def process_webhook(
     if isinstance(webhook_event, IgnoredWebhook):
         # A valid event that is not an investigation trigger (e.g. a non-trigger
         # reaction). Ack with 200 so the platform does not retry; no dispatch.
+        logger.info(
+            "Ignored webhook (no dispatch): %s",
+            webhook_event.reason or "unspecified",
+        )
         return _http_response(webhook_event.status_code)
 
     if isinstance(webhook_event, CommandWebhook):

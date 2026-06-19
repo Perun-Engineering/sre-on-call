@@ -13,9 +13,17 @@ Handles two invocation shapes:
 
 from __future__ import annotations
 
+import logging
+
 from lambda_adapter.intake import process_webhook
 from lambda_adapter.master_dispatch import DISPATCH_EVENT_KEY, run_dispatched_task
 from shared.platforms import detect_platform
+
+# The python3.12 managed runtime pins the root logger to WARNING when the
+# function uses the legacy Text log format, which drops every INFO-level
+# decision log in the intake pipeline (dispatch, dedup, ignore reason). Force
+# INFO at import so those traces reach CloudWatch without a log-format change.
+logging.getLogger().setLevel(logging.INFO)
 
 
 def lambda_handler(event: dict, context: object) -> dict:
