@@ -614,15 +614,60 @@ class TestExecuteGather:
     def test_no_pods_found(self):
         core_v1 = MagicMock()
         apps_v1 = MagicMock()
+        # Not a Deployment, DaemonSet, or StatefulSet.
         apps_v1.read_namespaced_deployment.side_effect = _api_exception(404, "Not Found")
+        apps_v1.read_namespaced_daemon_set.side_effect = _api_exception(404, "Not Found")
+        apps_v1.read_namespaced_stateful_set.side_effect = _api_exception(404, "Not Found")
 
-        result = _execute_gather(core_v1, apps_v1, "default", ["nonexistent-deploy"])
+        result = _execute_gather(core_v1, apps_v1, "default", ["nonexistent"])
 
         assert len(result.errors) >= 1
         assert "No pods found" in result.errors[-1]
 
-        assert len(result.errors) >= 1
-        assert "No pods found" in result.errors[-1]
+    def test_resolves_daemonset_when_not_a_deployment(self):
+        """A node-level DaemonSet (e.g. aws-node) must resolve to its pods."""
+        core_v1 = MagicMock()
+        apps_v1 = MagicMock()
+        apps_v1.read_namespaced_deployment.side_effect = _api_exception(404, "Not Found")
+        apps_v1.read_namespaced_daemon_set.return_value = _make_deployment({"k8s-app": "aws-node"})
+        pod = _make_pod(name="aws-node-xyz", phase="Running", node_name="node-1")
+        core_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[pod])
+        core_v1.list_namespaced_event.return_value = SimpleNamespace(items=[])
+        core_v1.read_namespaced_pod_log.return_value = "OK"
+        core_v1.read_node.return_value = _make_node("node-1")
+
+        result = _execute_gather(core_v1, apps_v1, "kube-system", ["aws-node"])
+
+        assert "pod/aws-node-xyz" in result.scanned_items
+        assert not any("No pods found" in e for e in result.errors)
+        core_v1.list_namespaced_pod.assert_called_with(
+            namespace="kube-system", label_selector="k8s-app=aws-node",
+        )
+
+    def test_resolves_statefulset_when_not_deployment_or_daemonset(self):
+        core_v1 = MagicMock()
+        apps_v1 = MagicMock()
+        apps_v1.read_namespaced_deployment.side_effect = _api_exception(404, "Not Found")
+        apps_v1.read_namespaced_daemon_set.side_effect = _api_exception(404, "Not Found")
+        apps_v1.read_namespaced_stateful_set.return_value = _make_deployment({"app": "etcd"})
+        pod = _make_pod(name="etcd-0", phase="Running", node_name="node-1")
+        core_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[pod])
+        core_v1.list_namespaced_event.return_value = SimpleNamespace(items=[])
+        core_v1.read_namespaced_pod_log.return_value = "OK"
+        core_v1.read_node.return_value = _make_node("node-1")
+
+        result = _execute_gather(core_v1, apps_v1, "default", ["etcd"])
+
+        assert "pod/etcd-0" in result.scanned_items
+
+    def test_non_404_api_error_is_recorded_not_swallowed(self):
+        core_v1 = MagicMock()
+        apps_v1 = MagicMock()
+        apps_v1.read_namespaced_deployment.side_effect = _api_exception(403, "Forbidden")
+
+        result = _execute_gather(core_v1, apps_v1, "default", ["restricted"])
+
+        assert any("restricted" in e and "Forbidden" in e for e in result.errors)
 
 
 # ---------------------------------------------------------------------------

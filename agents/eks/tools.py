@@ -137,24 +137,46 @@ def _is_label_selector(selector: str) -> bool:
     return "=" in selector
 
 
-def _get_pods_for_deployment(apps_v1, core_v1, namespace: str, deployment_name: str) -> list:
-    """Find pods belonging to a deployment by tracing the ReplicaSet chain."""
-    try:
-        deployment = apps_v1.read_namespaced_deployment(
-            name=deployment_name, namespace=namespace,
-        )
-    except ApiException:
-        logger.warning("Deployment %s not found in namespace %s", deployment_name, namespace)
-        return []
-
-    match_labels = deployment.spec.selector.match_labels or {}
+def _pods_from_match_labels(core_v1, namespace: str, match_labels: dict | None) -> list:
+    """List pods matching a controller's ``spec.selector.matchLabels``."""
     if not match_labels:
         return []
-
     label_selector = ",".join(f"{k}={v}" for k, v in match_labels.items())
     return core_v1.list_namespaced_pod(
         namespace=namespace, label_selector=label_selector,
     ).items
+
+
+def _get_pods_for_workload(apps_v1, core_v1, namespace: str, name: str) -> list:
+    """Resolve a bare workload *name* to its pods.
+
+    Tries Deployment, then DaemonSet, then StatefulSet — all three expose
+    ``spec.selector.matchLabels``, so the pod lookup is identical once the
+    controller is found. Covering DaemonSets/StatefulSets matters because the
+    workloads behind node-level ``TargetDown`` alerts (``aws-node``,
+    ``kube-proxy``, ``node-exporter``, kubelet, log shippers) are DaemonSets,
+    which a Deployment-only resolver can never find. Returns ``[]`` when no
+    controller of any kind matches the name; a non-404 API error propagates so
+    the caller can record it.
+    """
+    readers = (
+        apps_v1.read_namespaced_deployment,
+        apps_v1.read_namespaced_daemon_set,
+        apps_v1.read_namespaced_stateful_set,
+    )
+    for read in readers:
+        try:
+            workload = read(name=name, namespace=namespace)
+        except ApiException as exc:
+            if exc.status == 404:
+                continue
+            raise
+        return _pods_from_match_labels(core_v1, namespace, workload.spec.selector.match_labels)
+
+    logger.warning(
+        "No Deployment/DaemonSet/StatefulSet %s found in namespace %s", name, namespace
+    )
+    return []
 
 
 def _get_pods_by_label(core_v1, namespace: str, label_selector: str) -> list:
@@ -174,7 +196,7 @@ def _collect_pods(apps_v1, core_v1, namespace: str, resource_selectors: list[str
             if _is_label_selector(selector):
                 matched = _get_pods_by_label(core_v1, namespace, selector)
             else:
-                matched = _get_pods_for_deployment(apps_v1, core_v1, namespace, selector)
+                matched = _get_pods_for_workload(apps_v1, core_v1, namespace, selector)
         except ApiException as exc:
             msg = f"Error resolving selector '{selector}': {exc.reason}"
             logger.warning(msg)
