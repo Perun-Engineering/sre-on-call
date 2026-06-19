@@ -67,6 +67,30 @@ def _first_line(text: str, limit: int = 160) -> str:
     return line if len(line) <= limit else line[: limit - 1].rstrip() + "…"
 
 
+# A single finding's content is capped before it reaches the chat report so a
+# verbose raw dump (e.g. an un-digested log tail when the Haiku summarizer
+# fails open) can't flood the message. Generous enough to keep a normal
+# multi-line finding intact; small enough that a 30 KB log blob is elided.
+_MAX_FINDING_CONTENT_CHARS = 1000
+
+
+def clean_finding_content(text: str | None) -> str | None:
+    """Normalise a finding's content for the chat report.
+
+    Returns ``None`` for empty / whitespace-only content (so it renders no
+    bullet at all rather than a blank ``- ``), and truncates over-long content
+    with an elision marker naming how much was dropped.
+    """
+    stripped = (text or "").strip()
+    if not stripped:
+        return None
+    if len(stripped) <= _MAX_FINDING_CONTENT_CHARS:
+        return stripped
+    kept = stripped[:_MAX_FINDING_CONTENT_CHARS].rstrip()
+    dropped = len(stripped) - len(kept)
+    return f"{kept}\n… (+{dropped} chars truncated)"
+
+
 def _format_analysis_time(started_at: str | None, completed_at: str | None) -> str | None:
     """Render the elapsed duration between two ISO 8601 timestamps as mm:ss."""
     if not started_at or not completed_at:
@@ -370,11 +394,12 @@ class IncidentFacts:
                 format_metadata_line(result.metadata),
             )
         if isinstance(result, AgentResult) and result.status == "success":
-            lines = (
-                [EvidenceLine(f.content, f.link) for f in result.findings]
-                if result.findings
-                else [EvidenceLine(f"No notable findings from {display_name}")]
-            )
+            rendered = [
+                EvidenceLine(content, f.link)
+                for f in result.findings
+                if (content := clean_finding_content(f.content)) is not None
+            ]
+            lines = rendered or [EvidenceLine(f"No notable findings from {display_name}")]
             return lines, "ok", format_metadata_line(result.metadata)
         return [EvidenceLine(f"⚠️ {display_name} data unavailable")], "error", None
 
