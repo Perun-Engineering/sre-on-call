@@ -289,7 +289,9 @@ class IncidentFacts:
             alert_text=alert_context.alert_text,
             time_of_detection=alert_context.alert_timestamp,
             severity=cls._determine_severity(agent_results),
-            affected_services=cls._extract_affected_services(agent_results),
+            affected_services=cls._extract_affected_services(
+                agent_results, originating_channel_id=alert_context.channel_id
+            ),
             summary=cls._joined_summary_or_fallback(alert_context, summary_parts),
             summary_parts=summary_parts,
             root_cause=format_root_cause_fallback(root_cause_fallback),
@@ -538,13 +540,34 @@ class IncidentFacts:
     @staticmethod
     def _extract_affected_services(
         agent_results: dict[str, AgentResult | AgentFailure],
+        *,
+        originating_channel_id: str | None = None,
     ) -> str:
+        """Affected services = the real resources the agents actually inspected.
+
+        Three non-resources are filtered out: the originating chat channel
+        id (#79) — the slack_scanner emits ``source=channel_id`` for the alert
+        it read, which is where the alert came from, not an affected service;
+        any finding flagged ``metadata.skipped`` (#79, e.g. a CloudWatch log
+        group that does not exist, reported only as a "skipped" note); and the
+        eks agent's scope-resolution note (``metadata.kind == "scope"``, #90's
+        ``eks/scope`` finding), which records *how* pods were resolved, not a
+        resource. When nothing real remains, the empty fallback string is
+        returned.
+        """
         services: list[str] = []
         for result in agent_results.values():
             if isinstance(result, AgentResult) and result.status == "success":
                 for finding in result.findings:
-                    if finding.source and finding.source not in services:
-                        services.append(finding.source)
+                    if not finding.source or finding.source in services:
+                        continue
+                    if finding.source == originating_channel_id:
+                        continue
+                    if finding.metadata.get("skipped"):
+                        continue
+                    if finding.metadata.get("kind") == "scope":
+                        continue
+                    services.append(finding.source)
         return ", ".join(services) if services else "Unknown (insufficient data)"
 
     @staticmethod

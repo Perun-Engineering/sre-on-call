@@ -288,3 +288,107 @@ def test_root_cause_fallback_no_results_is_honest():
     rc = facts.root_cause
     assert "No single root cause established" in rc
     assert "healthy" not in rc.lower()
+
+
+def test_affected_services_excludes_chat_channel_and_skipped_findings():
+    """Affected Services lists only real inspected resources (#79).
+
+    The originating Slack channel id (a slack_scanner finding's ``source``) and
+    CloudWatch log groups skipped as nonexistent (``metadata.skipped`` truthy)
+    must never appear; a genuine inspected resource must.
+    """
+    reg = get_registry()
+    specialized = [a.id for a in reg.all(kind="specialized")]
+    slack_id, cw_id = specialized[0], specialized[1]
+    channel_id = "G032495J0SZ"
+    results: dict[str, AgentResult | AgentFailure] = {
+        slack_id: AgentResult(
+            agent_name=slack_id, status="success",
+            findings=[
+                Finding(source=channel_id, timestamp="2025-01-15T14:31:00Z",
+                        content="alert text", severity="warning"),
+            ],
+            summary="s",
+        ),
+        cw_id: AgentResult(
+            agent_name=cw_id, status="success",
+            findings=[
+                Finding(source="/aws/eks/cluster", timestamp="2025-01-15T14:31:00Z",
+                        content="Log group '/aws/eks/cluster' does not exist — skipped.",
+                        severity="warning", metadata={"skipped": True, "log_group": "/aws/eks/cluster"}),
+                Finding(source="/aws/containerinsights/eks-uat/application",
+                        timestamp="2025-01-15T14:31:00Z",
+                        content="100 OOMKilled events", severity="critical"),
+            ],
+            summary="s",
+        ),
+    }
+    facts = IncidentFacts.derive(
+        reg, _ctx(channel_id=channel_id), results,
+        pending=set(), disabled=set(), skipped={},
+    )
+    services = facts.affected_services
+    assert channel_id not in services                              # (a) chat channel id filtered
+    assert "/aws/eks/cluster" not in services                      # (b) skipped group filtered
+    assert "/aws/containerinsights/eks-uat/application" in services  # (c) real resource kept
+
+
+def test_affected_services_falls_back_when_nothing_real_remains():
+    """When every finding is the channel id or skipped, keep the empty fallback."""
+    reg = get_registry()
+    specialized = [a.id for a in reg.all(kind="specialized")]
+    slack_id, cw_id = specialized[0], specialized[1]
+    channel_id = "G032495J0SZ"
+    results: dict[str, AgentResult | AgentFailure] = {
+        slack_id: AgentResult(
+            agent_name=slack_id, status="success",
+            findings=[Finding(source=channel_id, timestamp="2025-01-15T14:31:00Z",
+                              content="alert text", severity="warning")],
+            summary="s",
+        ),
+        cw_id: AgentResult(
+            agent_name=cw_id, status="success",
+            findings=[Finding(source="/aws/missing", timestamp="2025-01-15T14:31:00Z",
+                              content="Log group '/aws/missing' does not exist — skipped.",
+                              severity="warning", metadata={"skipped": True})],
+            summary="s",
+        ),
+    }
+    facts = IncidentFacts.derive(
+        reg, _ctx(channel_id=channel_id), results,
+        pending=set(), disabled=set(), skipped={},
+    )
+    assert facts.affected_services == "Unknown (insufficient data)"
+
+
+def test_affected_services_excludes_eks_scope_resolution_note():
+    """The eks scope-resolution note (#90, ``metadata.kind == "scope"``) records
+    how pods were resolved, not a resource, so it must not pollute the list."""
+    reg = get_registry()
+    specialized = [a.id for a in reg.all(kind="specialized")]
+    eks_id = specialized[0]
+    results: dict[str, AgentResult | AgentFailure] = {
+        eks_id: AgentResult(
+            agent_name=eks_id, status="success",
+            findings=[
+                Finding(
+                    source="eks/scope", timestamp="2025-01-15T14:31:00Z",
+                    content="Selector 'web-rv5md' did not match a workload; "
+                            "resolved to owning workload web.",
+                    severity="info",
+                    metadata={"kind": "scope", "selector": "web-rv5md",
+                              "scope": "owning workload web"},
+                ),
+                Finding(source="pod/web-abcde", timestamp="2025-01-15T14:31:00Z",
+                        content="Pod web-abcde: phase=Running", severity="info",
+                        metadata={"kind": "pod_status"}),
+            ],
+            summary="s",
+        ),
+    }
+    facts = IncidentFacts.derive(
+        reg, _ctx(), results, pending=set(), disabled=set(), skipped={},
+    )
+    services = facts.affected_services
+    assert "eks/scope" not in services        # scope note filtered
+    assert "pod/web-abcde" in services         # real inspected pod kept
