@@ -14,6 +14,20 @@ agents:
       - investigate_alert
       - capture_status_snapshot
       - finalize_postmortem
+    # Change-correlation source (rec #6, "what changed?") — default OFF. The
+    # deployment-annotator posts deploy annotations to Grafana; the master can
+    # read them via the Grafana MCP to correlate cross-system (RDS/ASG/non-k8s)
+    # changes the EKS rollout reads can't see. To enable:
+    #   1. terraform var enable_grafana_change_source=true (provisions the token
+    #      secret + master IAM grant + the GRAFANA_CHANGE_SOURCE_TOKEN env var),
+    #   2. fill in the Grafana MCP endpoint below and uncomment the block.
+    # mcp_loader honors `api_key:<ENV>` auth via resolve_secret() (the same
+    # literal-or-ARN dual-mode seam as SLACK_BOT_TOKEN).
+    # mcps:
+    #   - name: grafana
+    #     transport: streamable_http
+    #     endpoint: https://<grafana-host>/mcp
+    #     auth: api_key:GRAFANA_CHANGE_SOURCE_TOKEN
     mcps: []
 
   slack_scanner:
@@ -48,6 +62,10 @@ agents:
     model_id: us.anthropic.claude-sonnet-4-6
     max_tool_cycles: 4
     skills:
+      # Change-correlation ("what changed?") — called first, once, as a cheap
+      # read before broad state-gathering. Gated by CHANGE_CORRELATION_ENABLED
+      # (terraform var enable_change_correlation, default on); fail-open.
+      - detect_recent_changes
       - gather_eks_state
       - capture_snapshot
     mcps: []

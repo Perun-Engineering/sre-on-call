@@ -427,6 +427,25 @@ class TestComposeSystemPrompt:
         assert composed.index("## alpha") < composed.index("## beta")
 
 
+class TestIterativeInvestigationPrompt:
+    """The bounded-loop addendum encodes the gather-don't-guess methodology."""
+
+    def test_keeps_bounded_stop_when_explained_guidance(self):
+        from shared.a2a_factory import ITERATIVE_INVESTIGATION_PROMPT
+        # The hard-cap / stop-when-explained contract must survive edits.
+        assert "explain the alert" in ITERATIVE_INVESTIGATION_PROMPT
+        assert "budget" in ITERATIVE_INVESTIGATION_PROMPT
+
+    def test_directs_discriminating_still_firing_followup(self):
+        from shared.a2a_factory import ITERATIVE_INVESTIGATION_PROMPT
+        prompt = ITERATIVE_INVESTIGATION_PROMPT.lower()
+        # Rec #8: when ambiguous, gather a discriminating "still firing now?"
+        # query rather than reporting a stale first pass.
+        assert "gather" in prompt and "guess" in prompt
+        assert "still" in prompt and "firing" in prompt
+        assert "stats count(*) by bin" in prompt
+
+
 class TestSkillsFromBundles:
     """A2A skill catalog is generated from resolved SKILL.md bundles."""
 

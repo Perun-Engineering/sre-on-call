@@ -145,6 +145,45 @@ def test_finalize_writes_terminating_event_then_manifest():
     assert manifest.error_count == 0
 
 
+def test_manifest_carries_analysis_when_present():
+    # Rec #5 — the #27 analysis is archived on the manifest so the PIR can use it.
+    alert = _alert()
+    results = {"eks": _success("eks")}
+    store = FakeTraceStore()
+    fin = _finalizer(trace_store=store)
+    analysis = AnalysisSection(
+        root_cause_hypothesis="bad deploy", correlation="errors after rollout",
+        confidence="high", suggested_next_action="rollback",
+        causal_chain=["deploy v2", "errors"], ruled_out=["network"],
+    )
+
+    fin.finalize(
+        _facts(alert, results), results=results, analysis=analysis,
+        trace_meta=_context(alert, dispatched=["eks"]),
+    )
+
+    manifest = next(kw["manifest"] for name, kw in store.calls if name == "put_manifest")
+    assert manifest.analysis is not None
+    assert manifest.analysis["root_cause_hypothesis"] == "bad deploy"
+    assert manifest.analysis["causal_chain"] == ["deploy v2", "errors"]
+    assert manifest.analysis["ruled_out"] == ["network"]
+
+
+def test_manifest_analysis_none_when_synthesis_off():
+    alert = _alert()
+    results = {"eks": _success("eks")}
+    store = FakeTraceStore()
+    fin = _finalizer(trace_store=store)
+
+    fin.finalize(
+        _facts(alert, results), results=results, analysis=None,
+        trace_meta=_context(alert, dispatched=["eks"]),
+    )
+
+    manifest = next(kw["manifest"] for name, kw in store.calls if name == "put_manifest")
+    assert manifest.analysis is None
+
+
 def test_manifest_status_partial_when_some_agents_fail():
     alert = _alert()
     results = {

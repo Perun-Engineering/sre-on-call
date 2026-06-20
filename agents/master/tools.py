@@ -324,8 +324,12 @@ async def _run_postmortem(
 
         alert_context = _alert_context_from_payload(manifest["alert_context"])
         formatter = ReportFormatter()
+        # Rec #5 — carry the #27 root cause archived on the manifest into the
+        # PIR so the chat post-incident review states the same conclusion the
+        # initial report posted. Absent on pre-#5 manifests → fallback (#1).
         sections = formatter.build_pir_sections(
-            formatter.derive_facts(alert_context, results)
+            formatter.derive_facts(alert_context, results),
+            analysis=manifest.get("analysis"),
         )
 
         chat = for_platform(platform)

@@ -56,7 +56,14 @@ first results as-is:
    dependency), follow up with a focused pass that drills into it — fetch that
    pod's logs and events, or refine the query around the suspicious window —
    instead of stopping at the surface.
-3. Stop as soon as you can explain the alert, or when a tool result tells you
+3. When a first pass is ambiguous, gather — don't guess. Prefer a
+   discriminating follow-up that confirms whether the condition is STILL
+   firing now versus already resolved: re-query the most recent window, or run
+   a `stats count(*) by bin(...)` to quantify whether the signal is ongoing or
+   a past spike. Reproduce the symptom before you report it — a stale first
+   pass dressed as a conclusion is worse than a confirmed "ongoing" or
+   "recovered."
+4. Stop as soon as you can explain the alert, or when a tool result tells you
    the pass budget or deadline is reached.
 
 If a tool call returns saying the budget or pass limit is reached, do not call

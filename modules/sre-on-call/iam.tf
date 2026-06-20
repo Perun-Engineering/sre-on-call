@@ -335,6 +335,32 @@ resource "aws_iam_role_policy" "master_agent_secrets" {
   })
 }
 
+# Change-correlation (rec #6): read the Grafana service-account token so the
+# master can query deploy annotations ("what changed?") via the grafana MCP.
+# Gated by the same var as the secret — no Grafana grant on a normal deploy.
+resource "aws_iam_role_policy" "master_agent_grafana_token" {
+  count = var.enable_grafana_change_source ? 1 : 0
+
+  name = "grafana-token-access"
+  role = aws_iam_role.master_agent.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "ReadGrafanaToken"
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:GetSecretValue"
+        ]
+        Resource = [
+          aws_secretsmanager_secret.grafana_token[0].arn
+        ]
+      }
+    ]
+  })
+}
+
 resource "aws_iam_role_policy" "master_agent_experiment_results" {
   name = "experiment-results-write"
   role = aws_iam_role.master_agent.id

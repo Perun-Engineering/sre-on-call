@@ -85,6 +85,11 @@ class AnalysisSection:
     correlation: str
     confidence: str  # "low" | "medium" | "high"
     suggested_next_action: str
+    # Rec #3 — optional causal-reasoning extensions (default empty; back-compat).
+    # Rendered as sub-sections only when non-empty.
+    causal_chain: list[str] = field(default_factory=list)  # upstream → downstream
+    competing_hypotheses: list[str] = field(default_factory=list)
+    ruled_out: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -111,6 +116,14 @@ class ReportSections:
     # for callers that haven't been updated.
     summary_parts: list[str] = field(default_factory=list)
     root_cause_parts: list[tuple[str, str]] = field(default_factory=list)
+    # Rec #1 — the honest synthesis-OFF root-cause breakdown (symptoms /
+    # ruled-out / next-checks), as pre-phrased lines. When any list is
+    # non-empty the renderer prefers this over the legacy ``root_cause`` string
+    # and ``root_cause_parts``. Plain lists (not the IncidentFacts dataclass) to
+    # avoid importing the agents layer into the shared renderer.
+    root_cause_symptoms: list[str] = field(default_factory=list)
+    root_cause_ruled_out: list[str] = field(default_factory=list)
+    root_cause_next_checks: list[str] = field(default_factory=list)
     # #33 — signed URL to the interactive incident page. None → no link line
     # (fail-open: the signer returns None when disabled/unconfigured/on error).
     interactive_page_url: str | None = None
@@ -446,29 +459,64 @@ class MarkupReportRenderer:
         model only supplies the values.
         """
         d = self._d
-        return "\n".join(
-            [
-                f"- {d.bold('Root Cause Hypothesis:')} "
-                f"{d.normalize(analysis.root_cause_hypothesis)}",
-                f"- {d.bold('Correlation:')} {d.normalize(analysis.correlation)}",
-                f"- {d.bold('Confidence:')} {d.normalize(analysis.confidence)}",
-                f"- {d.bold('Suggested Next Action:')} "
-                f"{d.normalize(analysis.suggested_next_action)}",
-            ]
-        )
+        lines = [
+            f"- {d.bold('Root Cause Hypothesis:')} "
+            f"{d.normalize(analysis.root_cause_hypothesis)}",
+            f"- {d.bold('Correlation:')} {d.normalize(analysis.correlation)}",
+            f"- {d.bold('Confidence:')} {d.normalize(analysis.confidence)}",
+            f"- {d.bold('Suggested Next Action:')} "
+            f"{d.normalize(analysis.suggested_next_action)}",
+        ]
+        # Optional causal-reasoning sub-sections (#3). Omitted when empty.
+        if analysis.causal_chain:
+            chain = " → ".join(d.normalize(link) for link in analysis.causal_chain)
+            lines.append(f"- {d.bold('Causal Chain:')} {chain}")
+        if analysis.competing_hypotheses:
+            lines.append(f"- {d.bold('Competing Hypotheses:')}")
+            lines.extend(
+                f"  - {d.normalize(h)}" for h in analysis.competing_hypotheses
+            )
+        if analysis.ruled_out:
+            lines.append(f"- {d.bold('Ruled Out:')}")
+            lines.extend(f"  - {d.normalize(r)}" for r in analysis.ruled_out)
+        return "\n".join(lines)
 
     def _render_root_cause(self, sections: ReportSections) -> str:
-        """Prefer per-agent root_cause_parts: each (display, raw_summary) is
-        normalized in isolation, then prefixed with ``- {display}: `` and
-        bulleted under the standard preamble.
+        """Render the honest synthesis-OFF root-cause breakdown (Rec #1).
+
+        When the structured fallback lists are present (the live report path),
+        render Symptoms observed / Ruled out / Next checks under the honest
+        "No single root cause established" header — never a fake hypothesis.
+        Falls back to the deterministic ``root_cause`` string for callers that
+        don't supply the lists (e.g. a hand-built :class:`ReportSections`).
         """
-        if sections.root_cause_parts:
-            bullets = [
-                f"- {display}: {self._d.normalize(raw)}"
-                for display, raw in sections.root_cause_parts
+        d = self._d
+        if (
+            sections.root_cause_symptoms
+            or sections.root_cause_ruled_out
+            or sections.root_cause_next_checks
+        ):
+            lines = [
+                "No single root cause established (synthesis off / "
+                "insufficient evidence)."
             ]
-            return "Based on available evidence:\n" + "\n".join(bullets)
-        return self._d.normalize(sections.root_cause)
+            if sections.root_cause_symptoms:
+                lines.append(d.bold("Symptoms observed:"))
+                lines.extend(
+                    f"- {d.escape_untrusted(s)}" for s in sections.root_cause_symptoms
+                )
+            if sections.root_cause_ruled_out:
+                lines.append(d.bold("Ruled out:"))
+                lines.extend(
+                    f"- {d.escape_untrusted(r)}" for r in sections.root_cause_ruled_out
+                )
+            if sections.root_cause_next_checks:
+                lines.append(d.bold("Next checks:"))
+                lines.extend(
+                    f"- {d.escape_untrusted(c)}" for c in sections.root_cause_next_checks
+                )
+            return "\n".join(lines)
+        return d.normalize(sections.root_cause)
 
     def render_enrichment(self, sections: EnrichmentSections) -> str:
         d = self._d

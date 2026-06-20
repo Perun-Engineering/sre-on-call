@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from agents.master.routing import (
+    _SYSTEM_PROMPT,
     AgentCandidate,
     AgentRouter,
     RoutingDecision,
@@ -46,6 +47,24 @@ class TestBuildRoutingPrompt:
         for c in _candidates():
             assert c.agent_id in prompt
             assert c.description in prompt
+
+
+class TestSystemPrompt:
+    def test_carries_boundary_dependency_guidance(self):
+        # Rec #7: the router must reason about WHERE in the dependency chain the
+        # failure originates and emit boundary-naming hints, not just surface-level
+        # routing. These anchors guard against the guidance being dropped.
+        lowered = _SYSTEM_PROMPT.lower()
+        assert "boundary" in lowered
+        assert "dependency chain" in lowered
+        assert "upstream" in lowered
+
+    def test_still_preserves_conservative_fail_open_rules(self):
+        # The boundary guidance must not displace the existing conservative
+        # contract (bias-to-dispatch, never invent agents).
+        lowered = _SYSTEM_PROMPT.lower()
+        assert "bias toward dispatching" in lowered
+        assert "never invent agents" in lowered
 
 
 def _decision(*selections: AgentSelection, rationale: str = "r") -> RoutingDecision:

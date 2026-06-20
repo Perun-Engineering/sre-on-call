@@ -135,3 +135,85 @@ def test_enrichment_carries_updated_analysis():
 
     assert "Analysis" in text
     assert "Payment pods OOMKilled under load" in text
+
+
+# ---------------------------------------------------------------------------
+# Rec #3 — causal chain / competing hypotheses / ruled out in the chat report
+# ---------------------------------------------------------------------------
+
+
+def _rich_analysis() -> AnalysisSection:
+    return AnalysisSection(
+        root_cause_hypothesis="Payment pods OOMKilled under load",
+        correlation="5xx spike aligns with exit-137 container restarts",
+        confidence="high",
+        suggested_next_action="Raise the payment deployment memory limit",
+        causal_chain=[
+            "traffic surge",
+            "memory pressure",
+            "OOMKilled",
+            "5xx spike",
+        ],
+        competing_hypotheses=[
+            "Upstream DB latency (ranked lower: no slow-query evidence)",
+        ],
+        ruled_out=[
+            "Network partition (checked: no SG changes in window)",
+        ],
+    )
+
+
+@pytest.mark.parametrize("renderer", [SlackReportRenderer(), DiscordReportRenderer()])
+class TestCausalChainRendering:
+    def test_causal_chain_rendered(self, renderer):
+        text = renderer.render_report(_sections(_rich_analysis()))
+        assert "traffic surge" in text
+        assert "5xx spike" in text
+        # Rendered as an ordered chain (arrow joins the links).
+        assert "→" in text
+
+    def test_competing_hypotheses_rendered(self, renderer):
+        text = renderer.render_report(_sections(_rich_analysis()))
+        assert "Upstream DB latency" in text
+
+    def test_ruled_out_rendered(self, renderer):
+        text = renderer.render_report(_sections(_rich_analysis()))
+        assert "Network partition" in text
+
+    def test_empty_lists_omit_subsections(self, renderer):
+        # The base _analysis() carries empty extension lists — no sub-headers.
+        text = renderer.render_report(_sections(_analysis()))
+        assert "Causal Chain" not in text
+        assert "Competing Hypotheses" not in text
+        assert "Ruled Out" not in text
+        # The original four fields still render.
+        assert "Payment pods OOMKilled under load" in text
+
+
+class TestOrchestratorAnalysisMapping:
+    """orchestrator._to_analysis_section carries the new #3 fields through."""
+
+    def test_maps_causal_chain_fields(self):
+        from agents.master.orchestrator import _to_analysis_section
+        from agents.master.synthesis import IncidentAnalysis
+
+        section = _to_analysis_section(
+            IncidentAnalysis(
+                root_cause_hypothesis="rc",
+                correlation="co",
+                confidence="high",
+                suggested_next_action="na",
+                causal_chain=["a", "b", "c"],
+                competing_hypotheses=["alt"],
+                ruled_out=["disconfirmed"],
+            )
+        )
+        assert section is not None
+        assert section.causal_chain == ["a", "b", "c"]
+        assert section.competing_hypotheses == ["alt"]
+        assert section.ruled_out == ["disconfirmed"]
+
+    def test_maps_none(self):
+        from agents.master.orchestrator import _to_analysis_section
+
+        assert _to_analysis_section(None) is None

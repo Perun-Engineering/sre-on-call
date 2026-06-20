@@ -4,6 +4,7 @@ from __future__ import annotations
 from agents.master.incident_facts import (
     EvidenceFact,
     IncidentFacts,
+    RootCauseFallback,
     clean_finding_content,
     render_pir_timeline_markdown,
 )
@@ -38,6 +39,7 @@ def test_incident_facts_is_a_dataclass_with_timeline():
         summary_parts=["s"],
         root_cause="rc",
         root_cause_parts=[("EKS", "s")],
+        root_cause_fallback=RootCauseFallback(),
         evidence=[],
         timeline=IncidentTimeline(events=[]),
         chart_ids=[],
@@ -203,3 +205,86 @@ def test_pir_timeline_markdown_lists_alert_and_findings_in_clock_order():
 def test_pir_timeline_markdown_empty_has_fallback_line():
     md = render_pir_timeline_markdown(IncidentTimeline(events=[]))
     assert "No additional timeline data" in md
+
+
+# ---------------------------------------------------------------------------
+# Rec #1 — honest "ruled out + next checks" root-cause fallback (synthesis OFF)
+# ---------------------------------------------------------------------------
+
+
+def _ok_with_finding(agent_id: str) -> AgentResult:
+    return AgentResult(
+        agent_name=agent_id, status="success",
+        findings=[Finding(source="src", timestamp="2025-01-15T14:31:00Z",
+                          content="symptom seen", severity="high")],
+        summary="found a symptom",
+    )
+
+
+def _ok_no_findings(agent_id: str) -> AgentResult:
+    return AgentResult(
+        agent_name=agent_id, status="success", findings=[], summary="all clear",
+    )
+
+
+def test_root_cause_fallback_drops_fake_hypothesis_wording():
+    reg = get_registry()
+    specialized = [a.id for a in reg.all(kind="specialized")]
+    sym_id, clean_id, err_id = specialized[:3]
+    results: dict[str, AgentResult | AgentFailure] = {
+        sym_id: _ok_with_finding(sym_id),
+        clean_id: _ok_no_findings(clean_id),
+        err_id: AgentResult(agent_name=err_id, status="error", findings=[],
+                            summary="", error_message="timeout"),
+    }
+    facts = IncidentFacts.derive(reg, _ctx(), results,
+                                 pending=set(), disabled=set(), skipped={})
+    rc = facts.root_cause
+    # No fake hypothesis dressing.
+    assert "Based on available evidence" not in rc
+    assert "Root Cause Hypothesis" not in rc
+    # Honest header.
+    assert "No single root cause established" in rc
+
+
+def test_root_cause_fallback_lists_symptoms_ruled_out_and_next_checks():
+    reg = get_registry()
+    specialized = [a.id for a in reg.all(kind="specialized")]
+    sym_id, clean_id, err_id = specialized[:3]
+    skip_id = specialized[3]
+    _, sym_name = IncidentFacts._display(reg, sym_id)
+    _, clean_name = IncidentFacts._display(reg, clean_id)
+    _, err_name = IncidentFacts._display(reg, err_id)
+    _, skip_name = IncidentFacts._display(reg, skip_id)
+
+    results: dict[str, AgentResult | AgentFailure] = {
+        sym_id: _ok_with_finding(sym_id),
+        clean_id: _ok_no_findings(clean_id),
+        err_id: AgentResult(agent_name=err_id, status="error", findings=[],
+                            summary="", error_message="timeout"),
+    }
+    facts = IncidentFacts.derive(reg, _ctx(), results,
+                                 pending=set(), disabled=set(),
+                                 skipped={skip_id: "not relevant"})
+    rc = facts.root_cause
+    assert "Symptoms observed" in rc
+    assert "Ruled out" in rc
+    assert "Next checks" in rc
+    # Symptom agent appears under symptoms.
+    assert sym_name in rc
+    # Clean agent phrased as scope-limited, never "healthy".
+    assert "no notable findings in its queried scope" in rc
+    assert clean_name in rc
+    assert "healthy" not in rc.lower()
+    # Failed + skipped agents are next checks.
+    assert err_name in rc
+    assert skip_name in rc
+
+
+def test_root_cause_fallback_no_results_is_honest():
+    reg = get_registry()
+    facts = IncidentFacts.derive(reg, _ctx(), {},
+                                 pending=set(), disabled=set(), skipped={})
+    rc = facts.root_cause
+    assert "No single root cause established" in rc
+    assert "healthy" not in rc.lower()

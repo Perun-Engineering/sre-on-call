@@ -184,6 +184,54 @@ class EvidenceFact:
 
 
 @dataclass
+class RootCauseFallback:
+    """The honest deterministic root-cause breakdown used when synthesis is OFF.
+
+    There is no LLM here, so we never assert a single cause. Instead we report
+    what the evidence actually shows (#1):
+
+    * ``symptoms`` — success agents that returned anomaly findings (display
+      names), the observable surface of the incident.
+    * ``ruled_out`` — success agents that returned *zero* findings, phrased as
+      *"X reported no notable findings in its queried scope"* — never "X is
+      healthy" (the agent's scope may be partial or wrong).
+    * ``next_checks`` — error/unhealthy agents, router-skipped agents, and the
+      un-probed boundary: the work a responder still has to do.
+
+    Each list holds rendered phrases so both the plain ``root_cause`` string
+    (PIR / page) and the chat report render from one source.
+    """
+
+    symptoms: list[str] = field(default_factory=list)
+    ruled_out: list[str] = field(default_factory=list)
+    next_checks: list[str] = field(default_factory=list)
+
+
+_ROOT_CAUSE_FALLBACK_HEADER = (
+    "No single root cause established (synthesis off / insufficient evidence)."
+)
+
+
+def format_root_cause_fallback(fallback: RootCauseFallback) -> str:
+    """Render :class:`RootCauseFallback` as the plain ``root_cause`` string.
+
+    Used for the PIR and the page model (and the back-compat ``.root_cause``
+    string). The chat report renders the same data with per-dialect bolding.
+    """
+    parts = [_ROOT_CAUSE_FALLBACK_HEADER]
+    if fallback.symptoms:
+        parts.append("Symptoms observed:")
+        parts.extend(f"- {s}" for s in fallback.symptoms)
+    if fallback.ruled_out:
+        parts.append("Ruled out:")
+        parts.extend(f"- {r}" for r in fallback.ruled_out)
+    if fallback.next_checks:
+        parts.append("Next checks:")
+        parts.extend(f"- {c}" for c in fallback.next_checks)
+    return "\n".join(parts)
+
+
+@dataclass
 class IncidentFacts:
     """The deterministically-derived view of one investigation, built once.
 
@@ -203,6 +251,7 @@ class IncidentFacts:
     summary_parts: list[str]  # per-agent raw summaries in render order
     root_cause: str
     root_cause_parts: list[tuple[str, str]]  # (display_name, raw_summary) tuples in render order
+    root_cause_fallback: RootCauseFallback  # honest synthesis-OFF breakdown (#1)
     evidence: list[EvidenceFact]
     timeline: IncidentTimeline
     chart_ids: list[str]
@@ -225,6 +274,9 @@ class IncidentFacts:
         """Derive the canonical facts for one investigation, exactly once."""
         summary_parts = cls._collect_summary_parts(registry, agent_results)
         root_cause_parts = cls._collect_root_cause_parts(registry, agent_results)
+        root_cause_fallback = cls._build_root_cause_fallback(
+            registry, agent_results, skipped
+        )
         evidence = cls._build_evidence(
             registry, agent_results, pending, disabled, skipped
         )
@@ -240,8 +292,9 @@ class IncidentFacts:
             affected_services=cls._extract_affected_services(agent_results),
             summary=cls._joined_summary_or_fallback(alert_context, summary_parts),
             summary_parts=summary_parts,
-            root_cause=cls._joined_root_cause_or_fallback(root_cause_parts),
+            root_cause=format_root_cause_fallback(root_cause_fallback),
             root_cause_parts=root_cause_parts,
+            root_cause_fallback=root_cause_fallback,
             evidence=evidence,
             timeline=cls._build_timeline(registry, alert_context, agent_results),
             chart_ids=chart_ids,
@@ -548,15 +601,50 @@ class IncidentFacts:
         return parts
 
     @staticmethod
-    def _joined_root_cause_or_fallback(
-        root_cause_parts: list[tuple[str, str]],
-    ) -> str:
-        """Backward-compat fallback string for ``ReportSections.root_cause``."""
-        if root_cause_parts:
-            return "Based on available evidence:\n" + "\n".join(
-                f"- {display}: {raw}" for display, raw in root_cause_parts
-            )
-        return "Insufficient data to determine root cause. See agent availability in Evidence section."
+    def _build_root_cause_fallback(
+        registry: AgentRegistry,
+        agent_results: dict[str, AgentResult | AgentFailure],
+        skipped_agents: dict[str, str],
+    ) -> RootCauseFallback:
+        """Build the honest synthesis-OFF root-cause breakdown (#1).
+
+        Replaces the old "Based on available evidence" concat that dressed a
+        symptom list as a cause. Partitions the agents into what was observed
+        (symptoms), what came back clean (ruled out, scope-limited), and what
+        still needs checking (failures + skips). All from state the facts
+        already carry; no LLM, no fabricated cause.
+        """
+        symptoms: list[str] = []
+        ruled_out: list[str] = []
+        next_checks: list[str] = []
+        for agent_key in IncidentFacts._ordered_specialized_ids(registry):
+            result = agent_results.get(agent_key)
+            _, display_name = IncidentFacts._display(registry, agent_key)
+            if isinstance(result, AgentResult) and result.status == "success":
+                if result.findings:
+                    symptoms.append(display_name)
+                else:
+                    # NEVER "X is healthy" — the queried scope may be partial.
+                    ruled_out.append(
+                        f"{display_name} reported no notable findings in its "
+                        f"queried scope"
+                    )
+            elif isinstance(result, AgentFailure) or (
+                isinstance(result, AgentResult)
+                and result.status in ("error", "unhealthy")
+            ):
+                next_checks.append(
+                    f"{display_name} did not return usable data — check manually"
+                )
+        # Router-skipped agents are an un-probed boundary the responder should
+        # consider next (rendered in registry order, then any unknown ids).
+        for agent_key, reason in skipped_agents.items():
+            _, display_name = IncidentFacts._display(registry, agent_key)
+            detail = reason or "not investigated"
+            next_checks.append(f"{display_name} ({detail})")
+        return RootCauseFallback(
+            symptoms=symptoms, ruled_out=ruled_out, next_checks=next_checks
+        )
 
     @staticmethod
     def _build_impact_assessment(

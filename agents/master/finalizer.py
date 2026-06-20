@@ -110,7 +110,7 @@ class InvestigationFinalizer:
         only once the ``charts/<id>.json`` it references already exist. Each
         step is independently fail-open via :meth:`_guard`.
         """
-        self._guard(self._write_trace, facts, results, trace_meta)
+        self._guard(self._write_trace, facts, results, analysis, trace_meta)
         self._guard(self._persist_results, results, trace_meta)
         self._guard(self._snapshot_charts, facts, results)
         self._guard(self._write_page_model, facts, analysis)
@@ -120,10 +120,31 @@ class InvestigationFinalizer:
     # Steps
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _analysis_dict(analysis: AnalysisSection | None) -> dict | None:
+        """Serialize the #27 analysis to a JSON-safe dict for the manifest (#5).
+
+        Mirrors the page-model analysis dict so the /postmortem PIR carries the
+        same root cause (and #3 causal-chain extensions) the report posted.
+        ``None`` when synthesis was off / fell open.
+        """
+        if analysis is None:
+            return None
+        return {
+            "root_cause_hypothesis": analysis.root_cause_hypothesis,
+            "correlation": analysis.correlation,
+            "confidence": analysis.confidence,
+            "suggested_next_action": analysis.suggested_next_action,
+            "causal_chain": list(analysis.causal_chain),
+            "competing_hypotheses": list(analysis.competing_hypotheses),
+            "ruled_out": list(analysis.ruled_out),
+        }
+
     def _write_trace(
         self,
         facts: IncidentFacts,
         results: dict[str, AgentResult | AgentFailure],
+        analysis: AnalysisSection | None,
         meta: FinalizationContext,
     ) -> None:
         """Emit the terminating event + write the trace manifest."""
@@ -162,6 +183,7 @@ class InvestigationFinalizer:
             error_count=error_count,
             routing=meta.routing,
             timeline=facts.timeline.to_json_dict()["events"],
+            analysis=self._analysis_dict(analysis),
         )
         self._trace_store.put_manifest(manifest)
 

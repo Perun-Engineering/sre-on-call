@@ -79,6 +79,9 @@ def _to_analysis_section(analysis: IncidentAnalysis | None) -> AnalysisSection |
         correlation=analysis.correlation,
         confidence=analysis.confidence,
         suggested_next_action=analysis.suggested_next_action,
+        causal_chain=list(analysis.causal_chain),
+        competing_hypotheses=list(analysis.competing_hypotheses),
+        ruled_out=list(analysis.ruled_out),
     )
 
 
