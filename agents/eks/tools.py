@@ -186,8 +186,91 @@ def _get_pods_by_label(core_v1, namespace: str, label_selector: str) -> list:
     ).items
 
 
+def _read_pod_by_name(core_v1, namespace: str, name: str) -> list:
+    """Look up a single pod by its literal name; ``[]`` when it's gone (404)."""
+    try:
+        pod = core_v1.read_namespaced_pod(name=name, namespace=namespace)
+    except ApiException as exc:
+        if exc.status == 404:
+            return []
+        raise
+    return [pod]
+
+
+def _workload_name_candidates(pod_name: str) -> list[str]:
+    """Candidate owning-workload names for an ephemeral *pod_name*.
+
+    DaemonSet/StatefulSet pods are ``<workload>-<hash>`` (one strip);
+    Deployment pods are ``<workload>-<replicaset-hash>-<pod-hash>`` (two
+    strips). We try one strip, then two, by peeling trailing ``-<segment>``
+    tokens. Returns the candidates in resolution order, deduplicated, never
+    including the full name (that's the exact-pod step) or an empty string.
+    """
+    candidates: list[str] = []
+    remaining = pod_name
+    for _ in range(2):
+        head, sep, _tail = remaining.rpartition("-")
+        if not sep or not head:
+            break
+        remaining = head
+        if remaining not in candidates:
+            candidates.append(remaining)
+    return candidates
+
+
+def _resolve_workload_fallback(apps_v1, core_v1, namespace: str, selector: str) -> tuple[list, str | None]:
+    """Resolve a bare *selector* that yielded no workload pods.
+
+    Returns ``(pods, scope)`` where *scope* is a human label of how the pods
+    were found (``"exact pod <name>"`` / ``"owning workload <name>"`` /
+    ``"namespace-wide"``) or ``None`` when nothing matched. A non-404 API
+    error propagates so the caller records it.
+    """
+    # 1. exact pod — the literal name might still exist.
+    exact = _read_pod_by_name(core_v1, namespace, selector)
+    if exact:
+        return exact, f"exact pod {selector}"
+
+    # 2. owning workload — strip the DaemonSet/ReplicaSet/Deployment hash(es).
+    for candidate in _workload_name_candidates(selector):
+        pods = _get_pods_for_workload(apps_v1, core_v1, namespace, candidate)
+        if pods:
+            return pods, f"owning workload {candidate}"
+
+    # 3. namespace-wide — last resort.
+    ns_pods = core_v1.list_namespaced_pod(namespace=namespace).items
+    if ns_pods:
+        return ns_pods, "namespace-wide"
+
+    return [], None
+
+
+def _record_scope(namespace: str, selector: str, scope: str, result: ToolResult) -> None:
+    """Surface the resolved fallback *scope* so the operator sees what was inspected."""
+    content = (
+        f"Selector '{selector}' did not match a workload; resolved to {scope} "
+        f"in namespace '{namespace}'."
+    )
+    result.findings.append(
+        Finding(
+            source="eks/scope",
+            timestamp=_iso_now(),
+            content=content,
+            severity="info",
+            metadata={"kind": "scope", "selector": selector, "scope": scope},
+        )
+    )
+    result.scanned_items.append(f"scope: {selector} → {scope}")
+
+
 def _collect_pods(apps_v1, core_v1, namespace: str, resource_selectors: list[str], result: ToolResult) -> list:
-    """Resolve *resource_selectors* to a deduplicated list of pods."""
+    """Resolve *resource_selectors* to a deduplicated list of pods.
+
+    For a label selector, pods come straight from the label query. For a bare
+    selector that resolves to no workload pods, fall back (issue #78): the
+    literal pod name, then the owning workload (hash-stripped), then the whole
+    namespace — and record which scope answered so it's visible in the output.
+    """
     seen: set[str] = set()
     pods: list = []
 
@@ -197,6 +280,12 @@ def _collect_pods(apps_v1, core_v1, namespace: str, resource_selectors: list[str
                 matched = _get_pods_by_label(core_v1, namespace, selector)
             else:
                 matched = _get_pods_for_workload(apps_v1, core_v1, namespace, selector)
+                if not matched:
+                    matched, scope = _resolve_workload_fallback(
+                        apps_v1, core_v1, namespace, selector,
+                    )
+                    if scope is not None:
+                        _record_scope(namespace, selector, scope, result)
         except ApiException as exc:
             msg = f"Error resolving selector '{selector}': {exc.reason}"
             logger.warning(msg)

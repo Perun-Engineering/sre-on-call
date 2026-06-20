@@ -524,6 +524,243 @@ class TestCollectPods:
 
 
 # ---------------------------------------------------------------------------
+# _collect_pods — literal pod-name fallback chain (issue #78)
+# ---------------------------------------------------------------------------
+
+
+class TestCollectPodsPodNameFallback:
+    """A bare selector that names an ephemeral pod (not a workload) must
+    fall back: exact pod → owning workload → namespace-wide, and report
+    which scope it resolved to."""
+
+    def test_exact_pod_match(self):
+        """Selector is a literal pod name that still exists."""
+        apps_v1 = MagicMock()
+        core_v1 = MagicMock()
+        # Not a workload of any kind.
+        apps_v1.read_namespaced_deployment.side_effect = _api_exception(404, "Not Found")
+        apps_v1.read_namespaced_daemon_set.side_effect = _api_exception(404, "Not Found")
+        apps_v1.read_namespaced_stateful_set.side_effect = _api_exception(404, "Not Found")
+        # The literal pod exists.
+        pod = _make_pod(name="node-exporter-rv5md", node_name="node-1")
+        core_v1.read_namespaced_pod.return_value = pod
+        result = ToolResult()
+
+        pods = _collect_pods(
+            apps_v1, core_v1, "kube-system", ["node-exporter-rv5md"], result,
+        )
+
+        assert [p.metadata.name for p in pods] == ["node-exporter-rv5md"]
+        core_v1.read_namespaced_pod.assert_called_once_with(
+            name="node-exporter-rv5md", namespace="kube-system",
+        )
+        # Resolved scope is reported.
+        assert any("exact pod" in s for s in result.scanned_items)
+
+    def test_fallback_to_workload_when_exact_pod_gone(self):
+        """Pod was renamed/replaced; owning workload (one strip) resolves."""
+        apps_v1 = MagicMock()
+        core_v1 = MagicMock()
+        # Literal pod is gone.
+        core_v1.read_namespaced_pod.side_effect = _api_exception(404, "Not Found")
+        # Stripping the trailing hash yields the DaemonSet name.
+        def _read_ds(name, namespace):
+            if name == "monitoring-node-exporter":
+                return _make_deployment({"app": "node-exporter"})
+            raise _api_exception(404, "Not Found")
+        apps_v1.read_namespaced_deployment.side_effect = _api_exception(404, "Not Found")
+        apps_v1.read_namespaced_daemon_set.side_effect = _read_ds
+        apps_v1.read_namespaced_stateful_set.side_effect = _api_exception(404, "Not Found")
+        fresh = _make_pod(name="monitoring-node-exporter-tz9kp", node_name="node-2")
+        core_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[fresh])
+        result = ToolResult()
+
+        pods = _collect_pods(
+            apps_v1, core_v1, "monitoring",
+            ["monitoring-node-exporter-rv5md"], result,
+        )
+
+        assert [p.metadata.name for p in pods] == ["monitoring-node-exporter-tz9kp"]
+        # Resolved to the owning workload — reported with the workload name.
+        assert any(
+            "workload" in s and "monitoring-node-exporter" in s
+            for s in result.scanned_items
+        )
+
+    def test_fallback_to_workload_two_strips_for_deployment(self):
+        """Deployment pods are <workload>-<rs-hash>-<pod-hash>: needs two strips."""
+        apps_v1 = MagicMock()
+        core_v1 = MagicMock()
+        core_v1.read_namespaced_pod.side_effect = _api_exception(404, "Not Found")
+        def _read_deploy(name, namespace):
+            if name == "web":
+                return _make_deployment({"app": "web"})
+            raise _api_exception(404, "Not Found")
+        apps_v1.read_namespaced_deployment.side_effect = _read_deploy
+        apps_v1.read_namespaced_daemon_set.side_effect = _api_exception(404, "Not Found")
+        apps_v1.read_namespaced_stateful_set.side_effect = _api_exception(404, "Not Found")
+        fresh = _make_pod(name="web-7d9c8f5b6c-qrstu", node_name="node-3")
+        core_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[fresh])
+        result = ToolResult()
+
+        pods = _collect_pods(
+            apps_v1, core_v1, "default", ["web-7d9c8f5b6c-abcde"], result,
+        )
+
+        assert [p.metadata.name for p in pods] == ["web-7d9c8f5b6c-qrstu"]
+        assert any("workload" in s and "web" in s for s in result.scanned_items)
+
+    def test_fallback_to_namespace_when_exact_and_workload_empty(self):
+        """Neither the literal pod nor any owning workload resolves — list the ns."""
+        apps_v1 = MagicMock()
+        core_v1 = MagicMock()
+        core_v1.read_namespaced_pod.side_effect = _api_exception(404, "Not Found")
+        apps_v1.read_namespaced_deployment.side_effect = _api_exception(404, "Not Found")
+        apps_v1.read_namespaced_daemon_set.side_effect = _api_exception(404, "Not Found")
+        apps_v1.read_namespaced_stateful_set.side_effect = _api_exception(404, "Not Found")
+        ns_pod = _make_pod(name="some-other-pod", node_name="node-9")
+        core_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[ns_pod])
+        result = ToolResult()
+
+        pods = _collect_pods(
+            apps_v1, core_v1, "monitoring", ["ghost-pod-xyz12"], result,
+        )
+
+        assert [p.metadata.name for p in pods] == ["some-other-pod"]
+        # Bare ns list (no label_selector) was the resolution path.
+        core_v1.list_namespaced_pod.assert_called_with(namespace="monitoring")
+        assert any("namespace" in s for s in result.scanned_items)
+
+    def test_label_selector_does_not_trigger_fallback(self):
+        """Label selectors keep the old behaviour — no exact-pod probe, no ns list."""
+        apps_v1 = MagicMock()
+        core_v1 = MagicMock()
+        core_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[])
+        result = ToolResult()
+
+        pods = _collect_pods(
+            apps_v1, core_v1, "default", ["app=missing"], result,
+        )
+
+        assert pods == []
+        core_v1.read_namespaced_pod.assert_not_called()
+        # Only the labelled list call happened — never the bare ns fallback.
+        core_v1.list_namespaced_pod.assert_called_once_with(
+            namespace="default", label_selector="app=missing",
+        )
+
+    def test_real_workload_name_does_not_trigger_fallback(self):
+        """A genuine workload name resolves via _get_pods_for_workload unchanged."""
+        apps_v1 = MagicMock()
+        core_v1 = MagicMock()
+        apps_v1.read_namespaced_deployment.return_value = _make_deployment({"app": "web"})
+        pod = _make_pod(name="web-abc", node_name="node-1")
+        core_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[pod])
+        result = ToolResult()
+
+        pods = _collect_pods(
+            apps_v1, core_v1, "default", ["web"], result,
+        )
+
+        assert [p.metadata.name for p in pods] == ["web-abc"]
+        core_v1.read_namespaced_pod.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _execute_gather — pod-name fallback reported as scope (issue #78)
+# ---------------------------------------------------------------------------
+
+
+class TestExecuteGatherPodNameFallback:
+    def test_exact_pod_scope_reported_in_findings(self):
+        core_v1 = MagicMock()
+        apps_v1 = MagicMock()
+        apps_v1.read_namespaced_deployment.side_effect = _api_exception(404, "Not Found")
+        apps_v1.read_namespaced_daemon_set.side_effect = _api_exception(404, "Not Found")
+        apps_v1.read_namespaced_stateful_set.side_effect = _api_exception(404, "Not Found")
+        pod = _make_pod(name="node-exporter-rv5md", node_name="node-1")
+        core_v1.read_namespaced_pod.return_value = pod
+        core_v1.list_namespaced_event.return_value = SimpleNamespace(items=[])
+        core_v1.read_namespaced_pod_log.return_value = "OK"
+        core_v1.read_node.return_value = _make_node("node-1")
+
+        result = _execute_gather(
+            core_v1, apps_v1, "kube-system", ["node-exporter-rv5md"],
+        )
+
+        assert "pod/node-exporter-rv5md" in result.scanned_items
+        assert not any("No pods found" in e for e in result.errors)
+        # An info finding announces the resolved scope to the operator.
+        scope = [f for f in result.findings if f.metadata.get("kind") == "scope"]
+        assert scope and "exact pod" in scope[0].content
+
+    def test_workload_scope_reported_when_pod_gone(self):
+        core_v1 = MagicMock()
+        apps_v1 = MagicMock()
+        core_v1.read_namespaced_pod.side_effect = _api_exception(404, "Not Found")
+        def _read_ds(name, namespace):
+            if name == "monitoring-node-exporter":
+                return _make_deployment({"app": "node-exporter"})
+            raise _api_exception(404, "Not Found")
+        apps_v1.read_namespaced_deployment.side_effect = _api_exception(404, "Not Found")
+        apps_v1.read_namespaced_daemon_set.side_effect = _read_ds
+        apps_v1.read_namespaced_stateful_set.side_effect = _api_exception(404, "Not Found")
+        fresh = _make_pod(name="monitoring-node-exporter-tz9kp", node_name="node-2")
+        core_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[fresh])
+        core_v1.list_namespaced_event.return_value = SimpleNamespace(items=[])
+        core_v1.read_namespaced_pod_log.return_value = "OK"
+        core_v1.read_node.return_value = _make_node("node-2")
+
+        result = _execute_gather(
+            core_v1, apps_v1, "monitoring",
+            ["monitoring-node-exporter-rv5md"],
+        )
+
+        assert "pod/monitoring-node-exporter-tz9kp" in result.scanned_items
+        scope = [f for f in result.findings if f.metadata.get("kind") == "scope"]
+        assert scope and "workload" in scope[0].content
+        assert "monitoring-node-exporter" in scope[0].content
+
+    def test_namespace_scope_reported_as_last_resort(self):
+        core_v1 = MagicMock()
+        apps_v1 = MagicMock()
+        core_v1.read_namespaced_pod.side_effect = _api_exception(404, "Not Found")
+        apps_v1.read_namespaced_deployment.side_effect = _api_exception(404, "Not Found")
+        apps_v1.read_namespaced_daemon_set.side_effect = _api_exception(404, "Not Found")
+        apps_v1.read_namespaced_stateful_set.side_effect = _api_exception(404, "Not Found")
+        ns_pod = _make_pod(name="some-other-pod", node_name="node-9")
+        core_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[ns_pod])
+        core_v1.list_namespaced_event.return_value = SimpleNamespace(items=[])
+        core_v1.read_namespaced_pod_log.return_value = "OK"
+        core_v1.read_node.return_value = _make_node("node-9")
+
+        result = _execute_gather(
+            core_v1, apps_v1, "monitoring", ["ghost-pod-xyz12"],
+        )
+
+        assert "pod/some-other-pod" in result.scanned_items
+        assert not any("No pods found" in e for e in result.errors)
+        scope = [f for f in result.findings if f.metadata.get("kind") == "scope"]
+        assert scope and "namespace" in scope[0].content
+
+    def test_still_errors_when_namespace_is_empty(self):
+        """Fallback is exhausted and the namespace has no pods → honest error."""
+        core_v1 = MagicMock()
+        apps_v1 = MagicMock()
+        core_v1.read_namespaced_pod.side_effect = _api_exception(404, "Not Found")
+        apps_v1.read_namespaced_deployment.side_effect = _api_exception(404, "Not Found")
+        apps_v1.read_namespaced_daemon_set.side_effect = _api_exception(404, "Not Found")
+        apps_v1.read_namespaced_stateful_set.side_effect = _api_exception(404, "Not Found")
+        core_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[])
+
+        result = _execute_gather(
+            core_v1, apps_v1, "monitoring", ["ghost-pod-xyz12"],
+        )
+
+        assert any("No pods found" in e for e in result.errors)
+
+
+# ---------------------------------------------------------------------------
 # _build_agent_result
 # ---------------------------------------------------------------------------
 
@@ -614,10 +851,13 @@ class TestExecuteGather:
     def test_no_pods_found(self):
         core_v1 = MagicMock()
         apps_v1 = MagicMock()
-        # Not a Deployment, DaemonSet, or StatefulSet.
+        # Not a Deployment, DaemonSet, or StatefulSet — and the #78 fallback
+        # chain is exhausted too: no literal pod and an empty namespace.
         apps_v1.read_namespaced_deployment.side_effect = _api_exception(404, "Not Found")
         apps_v1.read_namespaced_daemon_set.side_effect = _api_exception(404, "Not Found")
         apps_v1.read_namespaced_stateful_set.side_effect = _api_exception(404, "Not Found")
+        core_v1.read_namespaced_pod.side_effect = _api_exception(404, "Not Found")
+        core_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[])
 
         result = _execute_gather(core_v1, apps_v1, "default", ["nonexistent"])
 
