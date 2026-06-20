@@ -22,11 +22,12 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from typing import Any
 
 from shared.a2a_client import AsyncHTTPClient
+from shared.a2a_factory import _resolve_agent_model_id
 from shared.agents import Agent, AgentRegistry, get_registry
+from shared.config import ProjectConfig
 from shared.fanout import Fanout
 from shared.models import SnapshotReport, SnapshotSection
 from shared.platforms import ChatPlatform, DeliveryTarget, deliver_with_retry, for_platform
@@ -55,8 +56,16 @@ class MasterSnapshotBuilder:
     IAM policies catch up in Terraform.
     """
 
-    def __init__(self, registry: AgentRegistry | None = None) -> None:
+    def __init__(
+        self,
+        registry: AgentRegistry | None = None,
+        *,
+        project_config: ProjectConfig | None = None,
+    ) -> None:
         self._registry = registry or get_registry()
+        # Default to the registry's own config so the header model resolves
+        # against the same config the catalogue was folded from (issue #81).
+        self._project_config = project_config or self._registry.project_config
 
     def build(self) -> SnapshotBlock:
         master = self._registry.lookup("master")
@@ -74,9 +83,11 @@ class MasterSnapshotBuilder:
             status="ok",
         )
 
-    @staticmethod
-    def _resolve_model_id() -> str:
-        return os.environ.get("MODEL_ID") or DEFAULT_MODEL_ID
+    def _resolve_model_id(self) -> str:
+        # Reuse the dispatch precedence (per-agent config model_id > MODEL_ID env
+        # > defaults.model_id > bundled default) so the header reflects the model
+        # the master actually runs on, not the deploy-wide Haiku env (issue #81).
+        return _resolve_agent_model_id(self._project_config, "master")
 
     @staticmethod
     def _header_line(master: Agent, model_id: str) -> str:
@@ -131,10 +142,17 @@ class StatusSnapshotOrchestrator:
         chat_platform: ChatPlatform | None = None,
         registry: AgentRegistry | None = None,
         master_builder: MasterSnapshotBuilder | None = None,
+        *,
+        project_config: ProjectConfig | None = None,
     ) -> None:
         self._chat_platform = chat_platform
         self._registry = registry or get_registry()
-        self._master_builder = master_builder or MasterSnapshotBuilder(self._registry)
+        # Default to the registry's own config so header model resolution and
+        # the catalogue agree on a single config (issue #81).
+        self._project_config = project_config or self._registry.project_config
+        self._master_builder = master_builder or MasterSnapshotBuilder(
+            self._registry, project_config=self._project_config
+        )
 
         self.disabled_agents: list[Agent] = list(
             self._registry.disabled_in_config(kind="specialized")
@@ -271,17 +289,17 @@ class StatusSnapshotOrchestrator:
             status="disabled",
         )
 
-    @staticmethod
-    def _agent_header_line(agent: Agent, report: SnapshotReport | None) -> str:
-        # Prefer the model id reported by the agent itself (if surfaced via
-        # SnapshotReport.metadata) — falls back to the master's resolved env
-        # default. Skills come straight from the registry (config.yaml is the
+    def _agent_header_line(self, agent: Agent, report: SnapshotReport | None) -> str:
+        # Prefer the model id reported by the agent itself (the model it actually
+        # dispatched on, surfaced via SnapshotReport.metadata) — otherwise fall
+        # back to the agent's *resolved per-agent config model*, using the same
+        # precedence as real dispatch (per-agent config model_id > MODEL_ID env >
+        # defaults.model_id > bundled default), not the deploy-wide Haiku env
+        # (issue #81). Skills come straight from the registry (config.yaml is the
         # source of truth there).
         model_id = (
-            (report.metadata.model_id if report and report.metadata else None)
-            or os.environ.get("MODEL_ID")
-            or DEFAULT_MODEL_ID
-        )
+            report.metadata.model_id if report and report.metadata else None
+        ) or _resolve_agent_model_id(self._project_config, agent.id)
         network = agent.network_mode or "PUBLIC"
         skills = ", ".join(agent.skills or [])
         skill_part = f" · skills={skills}" if skills else ""
