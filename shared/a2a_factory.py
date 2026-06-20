@@ -267,29 +267,42 @@ def _latest_agent_result_footer(messages) -> str | None:
     return None
 
 
-def _resolve_model(
+def _resolve_model_id(
     default_model_id: str | None = None, model_id_override: str | None = None
-) -> BedrockModel:
-    """Build a BedrockModel.
+) -> str:
+    """Resolve the Bedrock model ID *string* — the single source of truth for
+    model-id precedence used by both dispatch (:func:`_resolve_model`) and the
+    ``/sre-snapshot`` header (:mod:`agents.master.snapshot_orchestrator`).
 
-    Resolution order for the model ID:
+    Resolution order:
     0. ``model_id_override`` arg — a caller-specific model that wins over the
-       deploy-time ``MODEL_ID`` (e.g. the master's synthesis call selecting a
-       Sonnet-class model via ``SYNTHESIS_MODEL_ID`` while dispatch stays cheap).
+       deploy-time ``MODEL_ID`` (e.g. a per-agent config ``model_id``, or the
+       master's synthesis call selecting a Sonnet-class model via
+       ``SYNTHESIS_MODEL_ID`` while dispatch stays cheap).
     1. ``MODEL_ID`` env var (deploy-time override).
     2. ``default_model_id`` arg (typically ``ProjectConfig.defaults.model_id``).
     3. ``DEFAULT_MODEL_ID`` module constant (last-resort fallback).
+    """
+    return (
+        model_id_override
+        or os.environ.get("MODEL_ID")
+        or default_model_id
+        or DEFAULT_MODEL_ID
+    )
+
+
+def _resolve_model(
+    default_model_id: str | None = None, model_id_override: str | None = None
+) -> BedrockModel:
+    """Build a BedrockModel from the id resolved by :func:`_resolve_model_id`.
 
     Defence-in-depth: when ``BEDROCK_GUARDRAIL_ID`` is set, the model is
     bound to that Bedrock Guardrail (prompt-attack / content filtering on
     every invocation). ``BEDROCK_GUARDRAIL_VERSION`` selects the version,
     defaulting to ``DRAFT``. Unset → no guardrail (unchanged behaviour).
     """
-    model_id = (
-        model_id_override
-        or os.environ.get("MODEL_ID")
-        or default_model_id
-        or DEFAULT_MODEL_ID
+    model_id = _resolve_model_id(
+        default_model_id=default_model_id, model_id_override=model_id_override
     )
 
     guardrail_id = os.environ.get("BEDROCK_GUARDRAIL_ID") or None
@@ -303,6 +316,22 @@ def _resolve_model(
     )
 
 
+def _resolve_agent_model_id(project_config, agent_name: str) -> str:
+    """Resolve the model-id *string* for *agent_name* with the dispatch
+    precedence (per-agent config ``model_id`` > ``MODEL_ID`` env >
+    ``defaults.model_id`` > bundled ``DEFAULT_MODEL_ID``).
+
+    The string counterpart to :func:`_resolve_agent_model`: both feed off the
+    same :func:`_resolve_model_id`, so the ``/sre-snapshot`` header label can
+    never drift from the model actually dispatched on (issue #81).
+    """
+    agent_cfg = project_config.agents.get(agent_name)
+    return _resolve_model_id(
+        default_model_id=project_config.defaults.model_id,
+        model_id_override=agent_cfg.model_id if agent_cfg else None,
+    )
+
+
 def _resolve_agent_model(project_config, agent_name: str) -> BedrockModel:
     """Build the :class:`BedrockModel` for *agent_name*.
 
@@ -310,6 +339,7 @@ def _resolve_agent_model(project_config, agent_name: str) -> BedrockModel:
     :func:`_resolve_model` as ``model_id_override`` so it wins over the
     deploy-wide ``MODEL_ID`` env (master → Sonnet while scanners stay on the
     default Haiku). Absent ``model_id`` → today's behaviour unchanged.
+    Resolves the same id string as :func:`_resolve_agent_model_id`.
     """
     agent_cfg = project_config.agents.get(agent_name)
     return _resolve_model(

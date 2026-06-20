@@ -53,37 +53,65 @@ def _clean_env(monkeypatch):
         monkeypatch.delenv(var, raising=False)
 
 
-def _build_registry(
+def _build_config(
     *,
     active_specialized: list[str] | None = None,
     disabled_specialized: list[str] | None = None,
-) -> AgentRegistry:
-    """Build a test registry with a custom deployment manifest."""
+    model_ids: dict[str, str] | None = None,
+    default_model: str = "anthropic.claude-test",
+) -> ProjectConfig:
+    """Build a test ProjectConfig with a custom deployment manifest.
+
+    ``model_ids`` maps an agent id to a per-agent ``model_id`` override (e.g.
+    master → Sonnet) so tests can assert the header reflects the resolved
+    per-agent model, not the deploy-wide ``MODEL_ID`` env.
+    """
     if active_specialized is None:
         active_specialized = ["slack_scanner"]
     if disabled_specialized is None:
         disabled_specialized = []
+    model_ids = model_ids or {}
+
+    def _model_for(aid: str) -> dict:
+        return {"model_id": model_ids[aid]} if aid in model_ids else {}
 
     agents: dict[str, AgentConfig] = {
-        "master": AgentConfig(skills=["investigate_alert", "capture_status_snapshot"]),
+        "master": AgentConfig(
+            skills=["investigate_alert", "capture_status_snapshot"],
+            **_model_for("master"),
+        ),
     }
     for aid in active_specialized:
-        kwargs: dict = {"enabled": True, "skills": ["capture_snapshot"]}
+        kwargs: dict = {"enabled": True, "skills": ["capture_snapshot"], **_model_for(aid)}
         if aid == "eks":
             kwargs["network_mode"] = "VPC"
         agents[aid] = AgentConfig(**kwargs)
     for aid in disabled_specialized:
-        kwargs = {"enabled": False, "skills": ["capture_snapshot"]}
+        kwargs = {"enabled": False, "skills": ["capture_snapshot"], **_model_for(aid)}
         if aid == "eks":
             kwargs["network_mode"] = "VPC"
         agents[aid] = AgentConfig(**kwargs)
 
+    return ProjectConfig(
+        project="test",
+        environment="dev",
+        defaults=Defaults(model_id=default_model),
+        agents=agents,
+    )
+
+
+def _build_registry(
+    *,
+    active_specialized: list[str] | None = None,
+    disabled_specialized: list[str] | None = None,
+    model_ids: dict[str, str] | None = None,
+) -> AgentRegistry:
+    """Build a test registry with a custom deployment manifest."""
     return AgentRegistry(
-        ProjectConfig(
-            project="test",
-            environment="dev",
-            defaults=Defaults(model_id="anthropic.claude-test"),
-            agents=agents,
+        _build_config(
+            active_specialized=active_specialized,
+            disabled_specialized=disabled_specialized,
+            model_ids=model_ids,
         )
     )
 
@@ -274,15 +302,35 @@ class TestMasterSnapshotBuilder:
             assert "Master Agent" not in line
 
     def test_header_line_includes_model_and_skills(self):
+        # No per-agent master override and no MODEL_ID env in the test config →
+        # the header resolves to the config's defaults.model_id (issue #81).
         block = MasterSnapshotBuilder(_build_registry()).build()
         assert "model=" in block.header_line
-        assert DEFAULT_MODEL_ID in block.header_line
+        assert "model=anthropic.claude-test" in block.header_line
         assert "skills=" in block.header_line
+
+    def test_header_line_falls_back_to_bundled_default(self):
+        # Neither a per-agent override, MODEL_ID env, nor a usable defaults model
+        # → the bundled DEFAULT_MODEL_ID is the last-resort fallback.
+        config = _build_config(default_model=DEFAULT_MODEL_ID)
+        block = MasterSnapshotBuilder(AgentRegistry(config), project_config=config).build()
+        assert DEFAULT_MODEL_ID in block.header_line
 
     def test_header_line_uses_model_id_env_when_set(self, monkeypatch):
         monkeypatch.setenv("MODEL_ID", "anthropic.claude-prod-override")
         block = MasterSnapshotBuilder(_build_registry()).build()
         assert "anthropic.claude-prod-override" in block.header_line
+
+    def test_header_line_uses_per_agent_model_id_over_env(self, monkeypatch):
+        """A master with a per-agent ``model_id`` (Sonnet) is labelled with that
+        id even when ``MODEL_ID`` env is the deploy-wide Haiku default — the
+        header must reflect the model actually dispatched on (issue #81)."""
+        monkeypatch.setenv("MODEL_ID", "anthropic.claude-deploy-haiku")
+        config = _build_config(model_ids={"master": "us.anthropic.claude-sonnet-4-6"})
+        registry = AgentRegistry(config)
+        block = MasterSnapshotBuilder(registry, project_config=config).build()
+        assert "us.anthropic.claude-sonnet-4-6" in block.header_line
+        assert "anthropic.claude-deploy-haiku" not in block.header_line
 
 
 # ---------------------------------------------------------------------------
@@ -599,3 +647,67 @@ class TestSnapshotOrchestratorMetadata:
 
         slack_block = _block_for(_last_snapshot_sections(platform), "Slack Scanner")
         assert "anthropic.claude-3-haiku-20241022" in slack_block.header_line
+
+    @pytest.mark.asyncio
+    async def test_agent_block_header_falls_back_to_per_agent_config_model(self, monkeypatch):
+        """When the agent's report carries no model_id, the header falls back to
+        the agent's resolved per-agent config model — NOT the deploy-wide
+        MODEL_ID env (issue #81). Here cloudwatch_logs has a Sonnet override."""
+        monkeypatch.setenv("MODEL_ID", "anthropic.claude-deploy-haiku")
+        config = _build_config(
+            active_specialized=["cloudwatch_logs"],
+            model_ids={"cloudwatch_logs": "us.anthropic.claude-sonnet-4-6"},
+        )
+        registry = AgentRegistry(config)
+        # Report with empty metadata (model_id is None) — exercises the fallback.
+        report = SnapshotReport(
+            agent_name="cloudwatch_logs",
+            captured_at=REQUESTED_AT,
+            sections=[],
+        )
+        http = FakeHTTPClient(
+            responses={"http://localhost:9004": _a2a_response_for(report)},
+        )
+        orch = StatusSnapshotOrchestrator(
+            http_client=http,
+            chat_platform=FakeChatPlatform(),
+            registry=registry,
+            project_config=config,
+        )
+        platform = orch._chat_platform
+        assert isinstance(platform, FakeChatPlatform)
+
+        await orch.capture(_make_request())
+
+        cw_block = _block_for(_last_snapshot_sections(platform), "CloudWatch Logs")
+        assert "us.anthropic.claude-sonnet-4-6" in cw_block.header_line
+        assert "anthropic.claude-deploy-haiku" not in cw_block.header_line
+
+    @pytest.mark.asyncio
+    async def test_agent_block_header_uses_env_when_no_override(self, monkeypatch):
+        """An agent with no per-agent config model_id still shows the env model
+        in its header (the env/default path is preserved)."""
+        monkeypatch.setenv("MODEL_ID", "anthropic.claude-deploy-haiku")
+        config = _build_config(active_specialized=["slack_scanner"])
+        registry = AgentRegistry(config)
+        report = SnapshotReport(
+            agent_name="slack_scanner",
+            captured_at=REQUESTED_AT,
+            sections=[],
+        )
+        http = FakeHTTPClient(
+            responses={"http://localhost:9001": _a2a_response_for(report)},
+        )
+        orch = StatusSnapshotOrchestrator(
+            http_client=http,
+            chat_platform=FakeChatPlatform(),
+            registry=registry,
+            project_config=config,
+        )
+        platform = orch._chat_platform
+        assert isinstance(platform, FakeChatPlatform)
+
+        await orch.capture(_make_request())
+
+        slack_block = _block_for(_last_snapshot_sections(platform), "Slack Scanner")
+        assert "anthropic.claude-deploy-haiku" in slack_block.header_line

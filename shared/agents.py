@@ -204,10 +204,20 @@ class AgentRegistry:
         # only as a type hint at runtime.
         from shared.config import AgentConfig, ProjectConfig  # noqa: F401
 
+        # Retained so consumers that need the full ProjectConfig (e.g. resolving
+        # a per-agent model id with the dispatch precedence) read it from the
+        # same config the catalogue was folded against — no second load that
+        # could drift (issue #81).
+        self._project_config = project_config
         self._records: list[Agent] = [
             self._fold(static, project_config.agents.get(static.id))
             for static in CATALOGUE
         ]
+
+    @property
+    def project_config(self):
+        """The :class:`ProjectConfig` this registry was folded against."""
+        return self._project_config
 
     @staticmethod
     def _fold(static: Agent, cfg) -> Agent:
