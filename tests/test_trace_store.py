@@ -107,6 +107,30 @@ class TestManifestRouting:
         assert d["routing"] == routing
 
 
+class TestManifestAnalysis:
+    """Rec #5 — the #27 root-cause analysis rides on the manifest for the PIR."""
+
+    def test_analysis_omitted_when_none(self) -> None:
+        assert "analysis" not in _make_manifest().to_json_dict()
+
+    def test_analysis_serialized_when_present(self) -> None:
+        analysis = {
+            "root_cause_hypothesis": "Payment pods OOMKilled under load",
+            "correlation": "5xx spike aligns with exit-137 restarts",
+            "confidence": "high",
+            "suggested_next_action": "Raise the memory limit",
+            "causal_chain": ["traffic surge", "OOMKilled", "5xx spike"],
+            "competing_hypotheses": [],
+            "ruled_out": ["network partition"],
+        }
+        d = _make_manifest(analysis=analysis).to_json_dict()
+        assert d["analysis"] == analysis
+
+    def test_analysis_defaults_to_none(self) -> None:
+        # Back-compat: a manifest built without analysis decodes to None.
+        assert _make_manifest().analysis is None
+
+
 # ---------------------------------------------------------------------------
 # Construction
 # ---------------------------------------------------------------------------

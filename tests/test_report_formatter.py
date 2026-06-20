@@ -325,6 +325,49 @@ class TestFormatIncidentReport:
         assert "⚠️ CloudWatch Logs data unavailable: connection timeout" in report
 
 
+class TestRootCauseFallbackRendering:
+    """Rec #1 — when synthesis is OFF, the Root Cause section is an honest
+    symptoms / ruled-out / next-checks breakdown, not a fake hypothesis."""
+
+    def test_chat_report_renders_honest_fallback(self, formatter, alert_context):
+        results = {
+            "slack_scanner": _make_success_result(
+                "slack_scanner",
+                [_make_finding("Alert in #ops", severity="high", source="ops")],
+                "Found correlated alerts",
+            ),
+            "cloudwatch_logs": _make_success_result(
+                "cloudwatch_logs", [], "no errors in window",
+            ),
+            "eks": _make_error_result("eks", "endpoint unreachable"),
+        }
+        report = _render_report(formatter, alert_context, results)
+
+        assert "No single root cause established" in report
+        assert "Symptoms observed" in report
+        assert "Ruled out" in report
+        assert "Next checks" in report
+        # The clean agent is scope-limited, never asserted "healthy".
+        assert "no notable findings in its queried scope" in report
+        assert "healthy" not in report.lower()
+        # The old fake-hypothesis dressing is gone.
+        assert "Based on available evidence" not in report
+
+    def test_discord_report_renders_honest_fallback(self, formatter, alert_context):
+        results = {
+            "slack_scanner": _make_success_result(
+                "slack_scanner",
+                [_make_finding("Alert in #ops", severity="high", source="ops")],
+                "Found alerts",
+            ),
+        }
+        report = _render_report(
+            formatter, alert_context, results, renderer=DiscordReportRenderer(),
+        )
+        assert "No single root cause established" in report
+        assert "Symptoms observed" in report
+
+
 class TestFormatEnrichmentUpdate:
     """Tests for build_enrichment_sections + render_enrichment (Slack dialect)."""
 
@@ -721,7 +764,59 @@ class TestBuildPageModel:
         assert model.analysis == {
             "root_cause_hypothesis": "rc", "correlation": "co",
             "confidence": "high", "suggested_next_action": "na",
+            "causal_chain": [], "competing_hypotheses": [], "ruled_out": [],
         }
+
+    def test_passes_causal_chain_fields_in_analysis_dict(self, formatter, alert_context):
+        analysis = AnalysisSection(
+            root_cause_hypothesis="rc", correlation="co",
+            confidence="high", suggested_next_action="na",
+            causal_chain=["a", "b"],
+            competing_hypotheses=["alt"],
+            ruled_out=["disconfirmed"],
+        )
+        model = formatter.build_page_model(
+            formatter.derive_facts(alert_context, {}), analysis=analysis
+        )
+        assert model.analysis is not None
+        assert model.analysis["causal_chain"] == ["a", "b"]
+        assert model.analysis["competing_hypotheses"] == ["alt"]
+        assert model.analysis["ruled_out"] == ["disconfirmed"]
+
+
+class TestBuildPirSectionsAnalysis:
+    """Rec #5 — the PIR carries the #27 root cause when the manifest has it."""
+
+    def test_pir_uses_analysis_root_cause_when_present(self, formatter, alert_context):
+        analysis = {
+            "root_cause_hypothesis": "Payment pods OOMKilled under load",
+            "correlation": "5xx spike aligns with exit-137 restarts",
+            "confidence": "high",
+            "suggested_next_action": "Raise the memory limit",
+            "causal_chain": ["traffic surge", "OOMKilled", "5xx spike"],
+            "competing_hypotheses": [],
+            "ruled_out": ["network partition (no SG changes)"],
+        }
+        facts = formatter.derive_facts(alert_context, {})
+        sections = formatter.build_pir_sections(facts, analysis=analysis)
+        # The synthesized hypothesis drives the PIR root cause, not the
+        # deterministic "No single root cause established" fallback.
+        assert "Payment pods OOMKilled under load" in sections.root_cause
+        assert "No single root cause established" not in sections.root_cause
+        # #3 extensions surface when present.
+        assert "traffic surge" in sections.root_cause
+        assert "network partition" in sections.root_cause
+
+    def test_pir_degrades_to_fallback_without_analysis(self, formatter, alert_context):
+        facts = formatter.derive_facts(alert_context, {})
+        sections = formatter.build_pir_sections(facts)
+        # No analysis → the honest deterministic fallback (Rec #1) still renders.
+        assert "No single root cause established" in sections.root_cause
+
+    def test_pir_degrades_when_analysis_is_none(self, formatter, alert_context):
+        facts = formatter.derive_facts(alert_context, {})
+        sections = formatter.build_pir_sections(facts, analysis=None)
+        assert "No single root cause established" in sections.root_cause
 
 
 def test_build_incident_sections_carries_interactive_page_url(formatter, alert_context):

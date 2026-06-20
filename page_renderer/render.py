@@ -47,14 +47,28 @@ def _evidence_html(blocks: list[dict]) -> str:
 def _analysis_html(analysis: dict | None) -> str:
     if not analysis:
         return ""
-    return (
-        '<section class="analysis"><h2>🧠 Analysis</h2>'
-        f'<p><strong>Root cause:</strong> {_esc(analysis.get("root_cause_hypothesis",""))}</p>'
-        f'<p><strong>Correlation:</strong> {_esc(analysis.get("correlation",""))}</p>'
-        f'<p><strong>Confidence:</strong> {_esc(analysis.get("confidence",""))}</p>'
-        f'<p><strong>Next action:</strong> {_esc(analysis.get("suggested_next_action",""))}</p>'
-        "</section>"
-    )
+    parts = [
+        '<section class="analysis"><h2>🧠 Analysis</h2>',
+        f'<p><strong>Root cause:</strong> {_esc(analysis.get("root_cause_hypothesis",""))}</p>',
+        f'<p><strong>Correlation:</strong> {_esc(analysis.get("correlation",""))}</p>',
+        f'<p><strong>Confidence:</strong> {_esc(analysis.get("confidence",""))}</p>',
+        f'<p><strong>Next action:</strong> {_esc(analysis.get("suggested_next_action",""))}</p>',
+    ]
+    # Optional causal-reasoning sub-sections (#3). Omitted when empty.
+    chain = analysis.get("causal_chain") or []
+    if chain:
+        links = " → ".join(_esc(link) for link in chain)
+        parts.append(f"<p><strong>Causal chain:</strong> {links}</p>")
+    competing = analysis.get("competing_hypotheses") or []
+    if competing:
+        items = "".join(f"<li>{_esc(h)}</li>" for h in competing)
+        parts.append(f"<p><strong>Competing hypotheses:</strong></p><ul>{items}</ul>")
+    ruled_out = analysis.get("ruled_out") or []
+    if ruled_out:
+        items = "".join(f"<li>{_esc(r)}</li>" for r in ruled_out)
+        parts.append(f"<p><strong>Ruled out:</strong></p><ul>{items}</ul>")
+    parts.append("</section>")
+    return "".join(parts)
 
 
 _TIMELINE_KIND_EMOJI = {

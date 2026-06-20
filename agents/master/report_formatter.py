@@ -91,6 +91,9 @@ class ReportFormatter:
             totals_line=facts.totals_line,
             summary_parts=facts.summary_parts,
             root_cause_parts=facts.root_cause_parts,
+            root_cause_symptoms=facts.root_cause_fallback.symptoms,
+            root_cause_ruled_out=facts.root_cause_fallback.ruled_out,
+            root_cause_next_checks=facts.root_cause_fallback.next_checks,
         )
         sections.variant_label = variant_label
         sections.analysis = analysis
@@ -159,21 +162,60 @@ class ReportFormatter:
             analysis=analysis,
         )
 
-    def build_pir_sections(self, facts: IncidentFacts) -> PIRSections:
+    def build_pir_sections(
+        self,
+        facts: IncidentFacts,
+        *,
+        analysis: dict | None = None,
+    ) -> PIRSections:
         """Project pre-derived :class:`IncidentFacts` into PIR sections.
 
         The PIR is built from the archived results at ``/postmortem`` time, so
         the caller derives ``facts`` with empty pending / disabled / skipped
         sets — only the settled findings inform the post-incident report.
+
+        ``analysis`` is the #27 root-cause dict archived on the trace manifest
+        (Rec #5). When present its synthesized hypothesis (plus the #3 causal
+        chain / ruled-out, if any) becomes the PIR Root Cause; when ``None``
+        the PIR degrades to the deterministic honest fallback (Rec #1) carried
+        on ``facts.root_cause``. Fail-open: an unexpectedly-shaped dict falls
+        back to the deterministic text rather than raising.
         """
         return PIRSections(
             incident_summary=facts.summary,
             timeline=render_pir_timeline_markdown(facts.timeline),
-            root_cause=facts.root_cause,
+            root_cause=self._pir_root_cause(facts, analysis),
             impact=facts.impact_assessment,
             action_items=facts.recommended_actions,
             lessons_learned="(To be filled in by the team during the post-incident review.)",
         )
+
+    @staticmethod
+    def _pir_root_cause(facts: IncidentFacts, analysis: dict | None) -> str:
+        """Render the PIR Root Cause from the #27 analysis, or the fallback (#5).
+
+        Mirrors the chat report's 🧠 Analysis content so the PIR carries the
+        same conclusion the initial report posted. Degrades to the honest
+        deterministic ``facts.root_cause`` when there is no analysis (or it
+        lacks a hypothesis).
+        """
+        if not isinstance(analysis, dict):
+            return facts.root_cause
+        hypothesis = str(analysis.get("root_cause_hypothesis") or "").strip()
+        if not hypothesis:
+            return facts.root_cause
+        lines = [hypothesis]
+        correlation = str(analysis.get("correlation") or "").strip()
+        if correlation:
+            lines.append(f"Correlation: {correlation}")
+        chain = [str(x) for x in (analysis.get("causal_chain") or []) if str(x).strip()]
+        if chain:
+            lines.append("Causal chain: " + " → ".join(chain))
+        ruled_out = [str(x) for x in (analysis.get("ruled_out") or []) if str(x).strip()]
+        if ruled_out:
+            lines.append("Ruled out:")
+            lines.extend(f"- {r}" for r in ruled_out)
+        return "\n".join(lines)
 
     def build_page_model(
         self,
@@ -213,6 +255,9 @@ class ReportFormatter:
                     "correlation": analysis.correlation,
                     "confidence": analysis.confidence,
                     "suggested_next_action": analysis.suggested_next_action,
+                    "causal_chain": list(analysis.causal_chain),
+                    "competing_hypotheses": list(analysis.competing_hypotheses),
+                    "ruled_out": list(analysis.ruled_out),
                 }
                 if analysis is not None else None
             ),

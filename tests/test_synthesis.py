@@ -111,3 +111,56 @@ class TestFromEnv:
         monkeypatch.setenv("SYNTHESIS_ENABLED", "true")
         synth = AnalysisSynthesizer.from_env()
         assert isinstance(synth, AnalysisSynthesizer)
+
+
+class TestCausalChainSchema:
+    """Rec #3 — causal chain, competing hypotheses, and ruled-out fields."""
+
+    def test_new_list_fields_default_to_empty(self):
+        # A partial structured-output parse (only the original four fields) must
+        # still yield a usable Analysis with empty causal-chain extensions.
+        analysis = IncidentAnalysis(
+            root_cause_hypothesis="rc",
+            correlation="co",
+            confidence="low",
+            suggested_next_action="na",
+        )
+        assert analysis.causal_chain == []
+        assert analysis.competing_hypotheses == []
+        assert analysis.ruled_out == []
+
+    def test_new_list_fields_parse_when_supplied(self):
+        analysis = IncidentAnalysis(
+            root_cause_hypothesis="rc",
+            correlation="co",
+            confidence="high",
+            suggested_next_action="na",
+            causal_chain=["deploy v2", "memory leak", "OOMKilled", "5xx spike"],
+            competing_hypotheses=["upstream DB latency (lower: no slow queries)"],
+            ruled_out=["network partition (checked: no SG changes)"],
+        )
+        assert analysis.causal_chain[0] == "deploy v2"
+        assert analysis.causal_chain[-1] == "5xx spike"
+        assert len(analysis.competing_hypotheses) == 1
+        assert "network partition" in analysis.ruled_out[0]
+
+    def test_schema_caps_chain_and_competing_in_descriptions(self):
+        fields = IncidentAnalysis.model_fields
+        # The schema descriptions bound the list lengths so the structured
+        # output stays within the ~10s synthesis budget.
+        assert "4" in (fields["causal_chain"].description or "")
+        assert "3" in (fields["competing_hypotheses"].description or "")
+
+
+class TestSystemPromptCausalDiscipline:
+    """The synthesis prompt must demand backward tracing + falsification."""
+
+    def test_prompt_demands_backward_tracing_and_falsification(self):
+        from agents.master.synthesis import _SYSTEM_PROMPT
+
+        lowered = _SYSTEM_PROMPT.lower()
+        assert "upstream" in lowered or "backward" in lowered
+        # Re-states the never-invent rule specifically for chain links.
+        assert "chain" in lowered
+        # Instructs falsification / ruling out.
+        assert "ruled out" in lowered or "ruling out" in lowered or "falsif" in lowered

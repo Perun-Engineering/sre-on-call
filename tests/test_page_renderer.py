@@ -55,6 +55,49 @@ def test_render_without_analysis():
     assert "🧠" not in html
 
 
+# --- Rec #3 — causal chain / competing hypotheses / ruled out in page HTML ---
+
+
+def _rich_analysis() -> dict:
+    return {
+        "root_cause_hypothesis": "h", "correlation": "c",
+        "confidence": "high", "suggested_next_action": "n",
+        "causal_chain": ["traffic surge", "OOMKilled", "5xx spike"],
+        "competing_hypotheses": ["Upstream DB latency"],
+        "ruled_out": ["Network partition"],
+    }
+
+
+def test_render_analysis_includes_causal_chain():
+    m = _model()
+    m["analysis"] = _rich_analysis()
+    html = render_page(m, {}, ECHARTS)
+    assert "traffic surge" in html
+    assert "5xx spike" in html
+    assert "Upstream DB latency" in html
+    assert "Network partition" in html
+
+
+def test_render_analysis_omits_empty_causal_subsections():
+    m = _model()
+    # base _model()'s analysis carries none of the new lists
+    html = render_page(m, {}, ECHARTS)
+    assert "🧠" in html  # analysis still rendered
+    assert "Causal chain" not in html
+    assert "Competing hypotheses" not in html
+    assert "Ruled out" not in html
+
+
+def test_render_analysis_escapes_causal_chain():
+    m = _model()
+    a = _rich_analysis()
+    a["causal_chain"] = ["<script>alert(1)</script>"]
+    m["analysis"] = a
+    html = render_page(m, {}, ECHARTS)
+    assert "<script>alert(1)</script>" not in html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+
+
 # --- incident timeline (#34) ----------------------------------------------
 
 def _timeline():

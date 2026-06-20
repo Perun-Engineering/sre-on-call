@@ -74,6 +74,12 @@ variable "followup_model_id" {
   default     = ""
 }
 
+variable "enable_change_correlation" {
+  description = "Enable the eks agent's detect_recent_changes tool (rec #4): a single cheap, read-only rollout/generation/image-tag read that answers 'what changed right before the alert?'. Rides the existing read-only AmazonEKSAdminViewPolicy (no new IAM). Fail-open: any error returns a clean no-data finding. Set false to disable the extra read without redeploying the image."
+  type        = bool
+  default     = true
+}
+
 variable "followup_max_agents" {
   description = "Hard cap on the number of agents dispatched in the single Stage 2 follow-up round."
   type        = number
@@ -340,9 +346,10 @@ resource "aws_bedrockagentcore_agent_runtime" "eks" {
   }
 
   environment_variables = merge(local.base_env, {
-    AWS_REGION       = var.aws_region
-    MODEL_ID         = var.model_id
-    EKS_CLUSTER_NAME = var.eks_cluster_name
+    AWS_REGION                 = var.aws_region
+    MODEL_ID                   = var.model_id
+    EKS_CLUSTER_NAME           = var.eks_cluster_name
+    CHANGE_CORRELATION_ENABLED = var.enable_change_correlation ? "true" : "false"
   })
 
   tags = {
@@ -470,6 +477,13 @@ resource "aws_bedrockagentcore_agent_runtime" "master" {
       CLOUDFRONT_KEY_PAIR_ID            = aws_cloudfront_public_key.incident_page[0].id
       CLOUDFRONT_PRIVATE_KEY_SECRET_ARN = aws_secretsmanager_secret.incident_page_private_key[0].arn
       INCIDENT_PAGE_URL_TTL_SECONDS     = tostring(var.incident_page_url_ttl_seconds)
+    } : {},
+    # Issue rec #6 — change-correlation via Grafana deploy annotations. When
+    # enabled, the master reads the Grafana MCP (configured in config.yaml) using
+    # this token; mcp_loader resolves it via resolve_secret(). Secret + IAM grant
+    # live in secrets.tf / iam.tf, gated by the same var.
+    var.enable_grafana_change_source ? {
+      GRAFANA_CHANGE_SOURCE_TOKEN = aws_secretsmanager_secret.grafana_token[0].arn
     } : {},
   )
 

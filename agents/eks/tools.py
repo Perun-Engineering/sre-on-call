@@ -451,8 +451,16 @@ class EksPodDigestSource:
     def exemplars(self, kept_raw: set[str]) -> list[Finding]:
         if self._key in kept_raw:
             return []  # chunk fell back to raw — events already shown literally
-        events = [f for f in self._bulk if f.metadata.get("kind") == "event"]
-        picked = pick_top_by_severity(events, lambda f: f.severity, _SUMMARIZER_POD_EXEMPLARS)
+        # Both Warning events AND container log-tail lines are exemplar-eligible:
+        # the canonical read-the-error signal (an ``exit 137`` / ``OOMKilled``
+        # line) lives in the ``pod_logs`` tail, not an event, and must survive
+        # the digest byte-verbatim rather than being summarized to prose.
+        candidates = [
+            f
+            for f in self._bulk
+            if f.metadata.get("kind") in ("event", "pod_logs")
+        ]
+        picked = pick_top_by_severity(candidates, lambda f: f.severity, _SUMMARIZER_POD_EXEMPLARS)
         for f in picked:
             f.metadata["exemplar"] = True
         return picked
@@ -557,6 +565,328 @@ def _execute_gather(
     _gather_node_conditions(core_v1, node_names, result)
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# detect_recent_changes — change-correlation ("what changed?") (rec #4)
+# ---------------------------------------------------------------------------
+
+
+def _change_correlation_enabled() -> bool:
+    """Whether change-correlation reads run. Default on; ``"false"`` disables."""
+    return os.environ.get("CHANGE_CORRELATION_ENABLED", "true").strip().lower() != "false"
+
+
+def _container_images(spec_holder) -> list[str]:
+    """Read the container image tags from a Deployment/ReplicaSet pod-template."""
+    try:
+        containers = spec_holder.spec.template.spec.containers or []
+    except AttributeError:
+        return []
+    images: list[str] = []
+    for c in containers:
+        image = getattr(c, "image", None)
+        if image:
+            images.append(str(image))
+    return images
+
+
+def _rs_revision(rs) -> int:
+    """Read the ``deployment.kubernetes.io/revision`` annotation as an int.
+
+    Returns ``-1`` when the annotation is absent or unparseable so such
+    ReplicaSets sort before any real revision.
+    """
+    annotations = getattr(getattr(rs, "metadata", None), "annotations", None) or {}
+    raw = annotations.get("deployment.kubernetes.io/revision")
+    if raw is None:
+        return -1
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return -1
+
+
+def _rs_creation(rs) -> datetime | None:
+    ts = getattr(getattr(rs, "metadata", None), "creation_timestamp", None)
+    if isinstance(ts, datetime):
+        return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+    return None
+
+
+def _parse_alert_time(alert_time: str | None) -> datetime | None:
+    """Parse an ISO 8601 alert timestamp (tolerating a trailing ``Z``)."""
+    if not alert_time:
+        return None
+    raw = alert_time.strip()
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _minutes_before(reference: datetime | None, when: datetime) -> int | None:
+    """Whole minutes between *when* and a later *reference* (alert) time."""
+    if reference is None:
+        return None
+    delta = (reference - when).total_seconds()
+    if delta < 0:
+        return None
+    return int(delta // 60)
+
+
+def _detect_workload_changes(
+    apps_v1,
+    namespace: str,
+    name: str,
+    alert_dt: datetime | None,
+    result: ToolResult,
+) -> None:
+    """Read one Deployment's rollout state + ReplicaSet history into findings.
+
+    Honest about absence: a Deployment with no retained ReplicaSet within
+    ``revisionHistoryLimit`` yields a *"no recent rollout found within retained
+    history"* finding, never *"nothing changed"* — pruning means absence is not
+    evidence of stability.
+    """
+    try:
+        deployment = apps_v1.read_namespaced_deployment(name=name, namespace=namespace)
+    except ApiException as exc:
+        if exc.status == 404:
+            # Not a Deployment (DaemonSet/StatefulSet rollout history is not
+            # ReplicaSet-based) — report honestly, don't claim no change.
+            result.findings.append(
+                Finding(
+                    source=f"deployment/{name}",
+                    timestamp=_iso_now(),
+                    content=(
+                        f"{name} is not a Deployment in namespace '{namespace}' "
+                        f"— rollout history could not be read; cannot confirm "
+                        f"whether it changed recently."
+                    ),
+                    severity="info",
+                    metadata={"kind": "change_unknown", "workload": name},
+                )
+            )
+            return
+        msg = f"Failed to read deployment {name}: {exc.reason}"
+        logger.warning(msg)
+        result.errors.append(msg)
+        return
+
+    result.scanned_items.append(f"deployment/{name}")
+
+    # Rollout-in-progress signal: spec generation ahead of observed generation.
+    generation = getattr(getattr(deployment, "metadata", None), "generation", None)
+    observed = getattr(getattr(deployment, "status", None), "observed_generation", None)
+    if (
+        isinstance(generation, int)
+        and isinstance(observed, int)
+        and generation > observed
+    ):
+        result.findings.append(
+            Finding(
+                source=f"deployment/{name}",
+                timestamp=_iso_now(),
+                content=(
+                    f"{name}: rollout in progress — spec generation {generation} "
+                    f"ahead of observed generation {observed} (controller has not "
+                    f"yet reconciled the latest change)."
+                ),
+                severity="warning",
+                metadata={"kind": "rollout_progress", "workload": name},
+            )
+        )
+
+    # Progressing condition (carries the last rollout update time + reason).
+    for cond in getattr(getattr(deployment, "status", None), "conditions", None) or []:
+        if getattr(cond, "type", None) != "Progressing":
+            continue
+        last_update = getattr(cond, "last_update_time", None) or getattr(
+            cond, "last_transition_time", None
+        )
+        ts = last_update.isoformat() if isinstance(last_update, datetime) else ""
+        reason = getattr(cond, "reason", None) or "(no reason)"
+        result.findings.append(
+            Finding(
+                source=f"deployment/{name}",
+                timestamp=ts,
+                content=(
+                    f"{name}: Progressing={getattr(cond, 'status', '?')} "
+                    f"reason={reason} lastUpdate={ts or '(unknown)'}"
+                ),
+                severity="info",
+                metadata={"kind": "rollout_condition", "workload": name},
+            )
+        )
+
+    # Reconstruct rollout history from the retained ReplicaSets.
+    try:
+        replica_sets = apps_v1.list_namespaced_replica_set(namespace=namespace).items
+    except ApiException as exc:
+        msg = f"Failed to list replica sets for {name}: {exc.reason}"
+        logger.warning(msg)
+        result.errors.append(msg)
+        return
+
+    # Keep only RSes that belong to this deployment (name prefix is the
+    # convention; fall back to all when none match so we don't silently drop).
+    owned = [rs for rs in replica_sets if str(getattr(getattr(rs, "metadata", None), "name", "")).startswith(name + "-")]
+    if not owned:
+        owned = list(replica_sets)
+
+    ordered = sorted(owned, key=_rs_revision, reverse=True)
+
+    if len(ordered) < 2:
+        result.findings.append(
+            Finding(
+                source=f"deployment/{name}",
+                timestamp=_iso_now(),
+                content=(
+                    f"{name}: no recent rollout found within retained history "
+                    f"(revisionHistoryLimit may have pruned older ReplicaSets — "
+                    f"absence of history does NOT mean the workload was unchanged)."
+                ),
+                severity="info",
+                metadata={"kind": "no_rollout_history", "workload": name},
+            )
+        )
+        return
+
+    newest, previous = ordered[0], ordered[1]
+    new_images = _container_images(newest)
+    old_images = _container_images(previous)
+    created = _rs_creation(newest)
+    mins = _minutes_before(alert_dt, created) if created is not None else None
+
+    when_label = created.isoformat() if created is not None else "(unknown time)"
+    lead = ""
+    if mins is not None:
+        lead = f", ~{mins} min before alert"
+
+    if new_images != old_images:
+        content = (
+            f"{name}: image change {','.join(old_images) or '(none)'} → "
+            f"{','.join(new_images) or '(none)'} at {when_label}{lead} "
+            f"(rev {_rs_revision(previous)} → {_rs_revision(newest)}) — "
+            f"likely-related recent change."
+        )
+        severity = "warning"
+        kind = "rollout_change"
+    else:
+        content = (
+            f"{name}: rollout to rev {_rs_revision(newest)} at {when_label}{lead} "
+            f"with no container image change (config/scale/template-only change "
+            f"or restart)."
+        )
+        severity = "info"
+        kind = "rollout_change"
+
+    result.findings.append(
+        Finding(
+            source=f"deployment/{name}",
+            timestamp=when_label if created is not None else _iso_now(),
+            content=content,
+            severity=severity,
+            metadata={
+                "kind": kind,
+                "workload": name,
+                "new_revision": _rs_revision(newest),
+                "previous_revision": _rs_revision(previous),
+                "minutes_before_alert": mins if mins is not None else -1,
+            },
+        )
+    )
+
+
+def _execute_detect_recent_changes(
+    apps_v1,
+    namespace: str,
+    workloads: list[str],
+    *,
+    alert_time: str | None = None,
+) -> ToolResult:
+    """Core change-correlation logic — all I/O goes through *apps_v1*.
+
+    For each implicated Deployment, reads ``.metadata.generation`` vs
+    ``.status.observedGeneration``, the ``Progressing`` condition, container
+    image tags, and the retained ReplicaSet history to reconstruct the most
+    recent rollout. When a rollout is found it is reported as a ranked lead
+    ("image X→Y at HH:MM, ~N min before alert"); when none is retained it says
+    so honestly ("no recent rollout found within retained history").
+
+    Fail-open: a disabled gate returns an empty no-data result; per-workload API
+    errors are recorded on the result, never raised. Mirrors the
+    ``_execute_gather`` mock-friendly seam contract (no client construction
+    inside — the caller injects *apps_v1*).
+    """
+    result = ToolResult()
+
+    if not _change_correlation_enabled():
+        return result
+
+    if not workloads:
+        return result
+
+    alert_dt = _parse_alert_time(alert_time)
+
+    for name in workloads:
+        try:
+            _detect_workload_changes(apps_v1, namespace, name, alert_dt, result)
+        except Exception as exc:  # noqa: BLE001 — fail-open; never abort the investigation
+            logger.warning("detect_recent_changes failed for %s: %s", name, exc)
+            result.errors.append(f"Change correlation failed for {name}: {exc}")
+
+    return result
+
+
+@tool
+def detect_recent_changes(
+    namespace: str,
+    workloads: list[str],
+    alert_time: str | None = None,
+) -> str:
+    """Correlate the alert with recent Kubernetes workload changes ("what changed?").
+
+    Reads — read-only — each implicated Deployment's rollout state (spec vs
+    observed generation, ``Progressing`` condition), container image tags, and
+    its retained ReplicaSet history to surface the most recent rollout as a
+    ranked lead, e.g. "image v1→v2 at 12:20, ~10 min before the alert". Call
+    this ONCE, early, before ``gather_eks_state`` — it is a single cheap read
+    that answers the first question any operator asks.
+
+    Honesty: when no rollout is retained it reports "no recent rollout found
+    within retained history" (``revisionHistoryLimit`` pruning means absence is
+    not proof the workload was unchanged) — it never claims "nothing changed".
+
+    Args:
+        namespace: Kubernetes namespace of the implicated workload(s).
+        workloads: Deployment names implicated by the alert.
+        alert_time: Optional ISO 8601 timestamp the alert fired, used to report
+            how long before the alert each rollout happened.
+
+    Returns:
+        A human-readable summary string for the LLM to consume.
+    """
+    if not _change_correlation_enabled():
+        return format_result(build_agent_result("eks", ToolResult()))
+    try:
+        _load_kube_config()
+        from kubernetes import client as k8s_client
+
+        apps_v1 = k8s_client.AppsV1Api()
+    except Exception as exc:  # noqa: BLE001 — fail-open like capture_snapshot
+        result = ToolResult()
+        result.errors.append(f"Change correlation could not load cluster config: {exc}")
+        return format_result(build_agent_result("eks", result))
+
+    result = _execute_detect_recent_changes(
+        apps_v1, namespace, workloads, alert_time=alert_time,
+    )
+    return format_result(build_agent_result("eks", result))
 
 
 # ---------------------------------------------------------------------------

@@ -5,7 +5,7 @@ tool: agents.eks.tools:gather_eks_state
 ---
 # When to use
 
-Call this skill when the alert mentions a Kubernetes workload. A first call gathers broad cluster state — pod status, events, descriptions, logs, node conditions — for the namespace and resource selectors. If a pod is crashlooping, pending, or restarting, follow up with a focused call narrowed to that workload (its deployment name or label selector) to drill into its logs and events, rather than reporting the first pass as-is. Stop once you can explain the alert or your budget is spent.
+Call this skill when the alert mentions a Kubernetes workload. A first call gathers broad cluster state — pod status, events, descriptions, logs, node conditions — for the namespace and resource selectors. If a pod is crashlooping, pending, or restarting, follow up with a focused call narrowed to that workload (its deployment name or label selector) to drill into its logs and events, rather than reporting the first pass as-is. When results are ambiguous, prefer a discriminating follow-up that confirms whether the condition is STILL firing now (re-check current pod status / latest events) versus already resolved — gather, don't guess from a stale first pass. Stop once you can explain the alert or your budget is spent.
 
 # Inputs
 

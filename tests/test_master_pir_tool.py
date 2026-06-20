@@ -107,6 +107,49 @@ async def test_happy_path_posts_threaded_pir(monkeypatch):
     assert target.channel_id == "C1"
 
 
+async def test_pir_carries_manifest_analysis_root_cause(monkeypatch):
+    # Rec #5 — the #27 analysis archived on the manifest reaches the chat PIR.
+    from shared.trace_store import InvestigationRef
+    platform = RecordingChatPlatform()
+    store = _StubStore(
+        ref=InvestigationRef(investigation_id="inv-1", dt="dt=2025-01-15"),
+        manifest={
+            "alert_context": {
+                "investigation_id": "inv-1", "platform": "slack",
+                "channel_id": "C1", "message_id": "1700.1",
+                "alert_text": "High CPU", "alert_timestamp": "2025-01-15T14:00:00Z",
+                "investigation_window": ["2025-01-15T13:55:00Z",
+                                         "2025-01-15T14:05:00Z"]},
+            "analysis": {
+                "root_cause_hypothesis": "Payment pods OOMKilled under load",
+                "correlation": "5xx aligns with restarts",
+                "confidence": "high",
+                "suggested_next_action": "Raise memory limit",
+                "causal_chain": ["traffic surge", "OOMKilled"],
+                "competing_hypotheses": [],
+                "ruled_out": ["network partition"],
+            },
+        },
+        results={"eks": AgentResult(
+            agent_name="eks", status="success",
+            findings=[Finding(source="pod", timestamp="t",
+                              content="CrashLoop", severity="critical")],
+            summary="bad", metadata=AgentMetadata())},
+    )
+    monkeypatch.setattr(tools.TraceStore, "from_env",
+                        classmethod(lambda cls: store))
+    monkeypatch.setattr(tools, "for_platform", lambda name: platform)
+
+    await tools.finalize_postmortem(_pir_payload())
+    await _drain_until(lambda: bool(platform.deliveries))
+
+    _, payload, text = platform.deliveries[0]
+    assert isinstance(payload, PIRSections)
+    assert "Payment pods OOMKilled under load" in payload.root_cause
+    assert "traffic surge" in payload.root_cause
+    assert "Payment pods OOMKilled under load" in text
+
+
 async def test_no_trace_store_posts_notice(monkeypatch):
     platform = RecordingChatPlatform()
     monkeypatch.setattr(tools.TraceStore, "from_env",

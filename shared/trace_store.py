@@ -200,6 +200,12 @@ class TraceManifest:
     # dicts). None when no timeline was built. Archived alongside the manifest
     # so a closed investigation can be replayed without the page model.
     timeline: list[dict] | None = None
+    # Rec #5 — the #27 synthesized root-cause analysis as a JSON-safe dict
+    # ({root_cause_hypothesis, correlation, confidence, suggested_next_action,
+    # causal_chain, competing_hypotheses, ruled_out}). None when synthesis was
+    # off or fell open. Archived so the /postmortem chat PIR can carry the same
+    # root cause the initial report posted. Old rows decode to None.
+    analysis: dict | None = None
 
     def to_json_dict(self) -> dict:
         """Serialise to a JSON-safe dict (e.g. for ``s3:PutObject``)."""
@@ -221,6 +227,8 @@ class TraceManifest:
             d["routing"] = self.routing
         if self.timeline is not None:
             d["timeline"] = self.timeline
+        if self.analysis is not None:
+            d["analysis"] = self.analysis
         return d
 
 

@@ -1201,3 +1201,206 @@ class TestExecuteGatherSummarizer:
         assert "pod_digest" not in kinds
         assert "pod_logs" in kinds
         assert "event" in kinds
+
+    def test_digested_pod_keeps_log_tail_oom_line_as_verbatim_exemplar(self):
+        """A digested pod whose log tail carries an exit-137/OOMKilled line must
+        still emit that line byte-verbatim as an exemplar Finding (issue #49,
+        rec #2). Previously only ``kind == "event"`` findings were exemplar-
+        eligible, so the canonical container-log error vanished into the digest.
+        """
+        oom_line = "fatal: container killed (exit 137) OOMKilled"
+        core_v1 = MagicMock()
+        apps_v1 = MagicMock()
+        pod = _make_pod(name="web-abc", phase="Running", node_name="node-1")
+        apps_v1.read_namespaced_deployment.return_value = _make_deployment({"app": "web"})
+        core_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[pod])
+        # No Warning events — so the only error signal lives in the log tail.
+        core_v1.list_namespaced_event.return_value = SimpleNamespace(items=[])
+        log_body = "\n".join(
+            [f"info line {i}" for i in range(59)] + [oom_line]
+        )
+        core_v1.read_namespaced_pod_log.return_value = log_body
+        core_v1.read_node.return_value = _make_node("node-1")
+        summarizer = _FakeSummarizer()
+
+        result = _execute_gather(
+            core_v1, apps_v1, "default", ["web-deploy"], summarizer=summarizer,
+        )
+
+        kinds = self._kinds(result)
+        assert "pod_digest" in kinds          # bulk was digested
+        exemplars = [
+            f for f in result.findings if f.metadata.get("exemplar") is True
+        ]
+        assert exemplars, "expected at least one verbatim exemplar from the log tail"
+        # The exit-137 line survives byte-verbatim in an exemplar's content.
+        assert any(oom_line in f.content for f in exemplars)
+
+
+# ---------------------------------------------------------------------------
+# detect_recent_changes — change-correlation ("what changed?") (rec #4)
+# ---------------------------------------------------------------------------
+
+from agents.eks.tools import _execute_detect_recent_changes  # noqa: E402
+
+
+def _make_deployment_with_status(
+    *,
+    name: str = "web",
+    generation: int = 5,
+    observed_generation: int = 5,
+    images: list[str] | None = None,
+    conditions: list | None = None,
+) -> SimpleNamespace:
+    """Build a mock V1Deployment with ``.status``/``.metadata.generation`` and
+    a container spec so image tags can be read."""
+    if images is None:
+        images = ["myrepo/web:v2"]
+    containers = [
+        SimpleNamespace(name=f"c{i}", image=img) for i, img in enumerate(images)
+    ]
+    return SimpleNamespace(
+        metadata=SimpleNamespace(name=name, generation=generation),
+        spec=SimpleNamespace(
+            template=SimpleNamespace(
+                spec=SimpleNamespace(containers=containers),
+            ),
+        ),
+        status=SimpleNamespace(
+            observed_generation=observed_generation,
+            conditions=conditions or [],
+        ),
+    )
+
+
+def _make_dep_condition(
+    *,
+    type_: str = "Progressing",
+    status: str = "True",
+    reason: str = "NewReplicaSetAvailable",
+    last_update_time=None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        type=type_,
+        status=status,
+        reason=reason,
+        last_update_time=last_update_time,
+        last_transition_time=last_update_time,
+        message="",
+    )
+
+
+def _make_replica_set(
+    *,
+    name: str,
+    revision: str,
+    creation_timestamp: datetime,
+    images: list[str] | None = None,
+) -> SimpleNamespace:
+    if images is None:
+        images = ["myrepo/web:v2"]
+    containers = [
+        SimpleNamespace(name=f"c{i}", image=img) for i, img in enumerate(images)
+    ]
+    return SimpleNamespace(
+        metadata=SimpleNamespace(
+            name=name,
+            creation_timestamp=creation_timestamp,
+            annotations={"deployment.kubernetes.io/revision": revision},
+        ),
+        spec=SimpleNamespace(
+            template=SimpleNamespace(
+                spec=SimpleNamespace(containers=containers),
+            ),
+        ),
+    )
+
+
+class TestDetectRecentChanges:
+    """Change-correlation reads of Deployment generation + ReplicaSet history."""
+
+    def _kinds(self, result):
+        return [f.metadata.get("kind") for f in result.findings]
+
+    def test_rollout_image_change_detected_with_minutes_before_alert(self):
+        alert_time = datetime(2026, 6, 20, 12, 30, 0, tzinfo=timezone.utc)
+        # Newest RS (rev 7) created 10 min before the alert with image v2;
+        # prior RS (rev 6) had image v1 → an image v1→v2 rollout.
+        rs_new = _make_replica_set(
+            name="web-77",
+            revision="7",
+            creation_timestamp=alert_time - timedelta(minutes=10),
+            images=["myrepo/web:v2"],
+        )
+        rs_old = _make_replica_set(
+            name="web-66",
+            revision="6",
+            creation_timestamp=alert_time - timedelta(hours=3),
+            images=["myrepo/web:v1"],
+        )
+        apps_v1 = MagicMock()
+        apps_v1.read_namespaced_deployment.return_value = _make_deployment_with_status(
+            name="web", generation=7, observed_generation=7,
+            images=["myrepo/web:v2"],
+        )
+        apps_v1.list_namespaced_replica_set.return_value = SimpleNamespace(
+            items=[rs_old, rs_new]
+        )
+
+        result = _execute_detect_recent_changes(
+            apps_v1, "default", ["web"], alert_time=alert_time.isoformat(),
+        )
+
+        assert not result.errors
+        blob = " ".join(f.content for f in result.findings)
+        assert "v1" in blob and "v2" in blob   # image change named
+        assert "10 min" in blob or "~10 min" in blob  # lead time before alert
+        # A ranked rollout lead finding exists.
+        assert any(
+            f.metadata.get("kind") == "rollout_change" for f in result.findings
+        )
+
+    def test_no_history_reports_honest_message_not_nothing_changed(self):
+        alert_time = datetime(2026, 6, 20, 12, 30, 0, tzinfo=timezone.utc)
+        apps_v1 = MagicMock()
+        apps_v1.read_namespaced_deployment.return_value = _make_deployment_with_status(
+            name="web", generation=3, observed_generation=3,
+        )
+        # No ReplicaSets retained (revisionHistoryLimit pruned them all).
+        apps_v1.list_namespaced_replica_set.return_value = SimpleNamespace(items=[])
+
+        result = _execute_detect_recent_changes(
+            apps_v1, "default", ["web"], alert_time=alert_time.isoformat(),
+        )
+
+        blob = " ".join(f.content for f in result.findings).lower()
+        assert "retained history" in blob          # honest absence framing
+        assert "nothing changed" not in blob       # never overclaim
+
+    def test_disabled_returns_clean_empty_finding(self, monkeypatch):
+        monkeypatch.setenv("CHANGE_CORRELATION_ENABLED", "false")
+        apps_v1 = MagicMock()
+
+        result = _execute_detect_recent_changes(
+            apps_v1, "default", ["web"], alert_time=None,
+        )
+
+        assert result.errors == []
+        # No kube reads happened.
+        apps_v1.read_namespaced_deployment.assert_not_called()
+        apps_v1.list_namespaced_replica_set.assert_not_called()
+
+    def test_api_error_fails_open_no_raise(self):
+        apps_v1 = MagicMock()
+        apps_v1.read_namespaced_deployment.side_effect = _api_exception(403, "Forbidden")
+        apps_v1.list_namespaced_replica_set.side_effect = _api_exception(403, "Forbidden")
+
+        # Must not raise — fail-open.
+        result = _execute_detect_recent_changes(
+            apps_v1, "default", ["web"], alert_time=None,
+        )
+
+        # The error is recorded, not raised, and no rollout lead is fabricated.
+        assert not any(
+            f.metadata.get("kind") == "rollout_change" for f in result.findings
+        )

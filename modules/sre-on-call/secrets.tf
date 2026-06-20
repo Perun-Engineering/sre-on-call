@@ -61,7 +61,33 @@ resource "aws_secretsmanager_secret" "discord_bot_token" {
   }
 }
 
+# ── Grafana Change-Correlation Secret (rec #6, opt-in) ───────────────────────
+#
+# Holds a Grafana service-account token the Master_Agent uses to query deploy
+# annotations ("what changed?") via the grafana MCP server. Created empty —
+# populate out-of-band like the chat secrets above. Gated by
+# var.enable_grafana_change_source (default off) so a normal deployment carries
+# no Grafana footprint. The grafana MCP block in config.yaml references this
+# token through an env var (api_key:<ENV_VAR>); wiring that env var + the MCP
+# block is the orchestrator's responsibility, not this module.
+
+resource "aws_secretsmanager_secret" "grafana_token" {
+  count = var.enable_grafana_change_source ? 1 : 0
+
+  name        = "${var.project_name}-${var.environment}-grafana-token"
+  description = "Grafana service-account token for deploy-annotation change correlation (used by Master_Agent)"
+
+  tags = {
+    Name = "${var.project_name}-grafana-token"
+  }
+}
+
 # ── Outputs ──────────────────────────────────────────────────────────────────
+
+output "grafana_token_secret_arn" {
+  description = "ARN of the Grafana service-account token secret (null when the Grafana change source is disabled)"
+  value       = try(aws_secretsmanager_secret.grafana_token[0].arn, null)
+}
 
 output "slack_bot_token_secret_arn" {
   description = "ARN of the Slack Bot Token secret (null when Slack is disabled)"

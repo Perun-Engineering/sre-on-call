@@ -33,11 +33,21 @@ _SYSTEM_PROMPT = (
     "Reason over the alert and every agent's findings, summaries, and "
     "failures. Correlate signals across sources to explain what most likely "
     "caused the incident.\n"
+    "Trace the failure BACKWARD: start from the alerting symptom, ask what "
+    "upstream condition produced it, and keep going until you bottom out at a "
+    "concrete trigger. Express this as an ordered causal_chain "
+    "(upstream → downstream).\n"
+    "Falsify alternatives: list the competing_hypotheses you considered and why "
+    "you ranked them lower, and list what you checked and disconfirmed in "
+    "ruled_out.\n"
     "Rules:\n"
     "- Ground every claim in the supplied evidence. Never invent log lines, "
     "metrics, or events that were not provided.\n"
-    "- If the evidence is thin or contradictory, say so and lower your "
-    "confidence accordingly.\n"
+    "- This grounding rule applies with FULL force to every link in the causal "
+    "chain: a fabricated chain link is worse than a flat hypothesis. Only "
+    "include a link the evidence supports.\n"
+    "- If the evidence is thin or contradictory, or the causal chain has gaps "
+    "you cannot ground, say so and LOWER your confidence accordingly.\n"
     "- Be specific and operational: name the component, the failure mode, and "
     "the next concrete action a responder should take."
 )
@@ -58,6 +68,22 @@ class IncidentAnalysis(BaseModel):
     )
     suggested_next_action: str = Field(
         description="The single most useful next step for the responder."
+    )
+    causal_chain: list[str] = Field(
+        default_factory=list,
+        description="Ordered causal chain from upstream trigger to downstream "
+        "symptom (A → B → C). At most 4 links; include only links the evidence "
+        "grounds — a fabricated link is worse than omitting it.",
+    )
+    competing_hypotheses: list[str] = Field(
+        default_factory=list,
+        description="At most 3 ranked alternative hypotheses, each with a brief "
+        "reason it ranks below the primary hypothesis.",
+    )
+    ruled_out: list[str] = Field(
+        default_factory=list,
+        description="Hypotheses that were checked against the evidence and "
+        "disconfirmed (what was checked and why it was excluded).",
     )
 
 

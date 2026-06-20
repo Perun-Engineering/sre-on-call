@@ -64,3 +64,12 @@ variable "source_root" {
   type        = string
   default     = ""
 }
+
+
+# ── Change-correlation: Grafana deploy-annotation source (rec #6) ─────────────
+
+variable "enable_grafana_change_source" {
+  description = "Provision a Grafana service-account token secret and grant the Master_Agent read access to it, so the master can query Grafana deploy annotations (\"what changed?\") via an MCP server. Opt-in (default off) until deployment-annotator is confirmed running. Only creates the empty secret + IAM grant; the secret value must be populated out-of-band and the grafana MCP block added to config.yaml by the orchestrator."
+  type        = bool
+  default     = false
+}
