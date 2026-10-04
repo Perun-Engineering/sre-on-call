@@ -144,7 +144,7 @@ All agents run on AWS Bedrock AgentCore Runtime, communicate via the A2A protoco
 │   ├── assets/                     # Logo + other repo image assets
 │   ├── icons/                      # AWS + vendor icons used by the diagram
 │   └── superpowers/                # Living design specs and implementation plans
-├── CONTEXT.md                      # Domain vocabulary
+├── GLOSSARY.md                      # Domain vocabulary
 └── pyproject.toml
 ```
 
