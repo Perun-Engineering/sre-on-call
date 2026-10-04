@@ -22,5 +22,5 @@ Top-level docs for the sre-on-call project.
 
 ## Domain vocabulary
 
-See [`CONTEXT.md`](../CONTEXT.md) at the repo root for the canonical term definitions (`AlertContext`, `Finding`, `AgentResult`, `ToolResult`, `WebhookAdapter`, `ChatPoster`, `ReportRenderer`, `ChannelMessageSource`).
+See [`GLOSSARY.md`](../GLOSSARY.md) at the repo root for the canonical term definitions (`AlertContext`, `Finding`, `AgentResult`, `ToolResult`, `WebhookAdapter`, `ChatPoster`, `ReportRenderer`, `ChannelMessageSource`).
 
